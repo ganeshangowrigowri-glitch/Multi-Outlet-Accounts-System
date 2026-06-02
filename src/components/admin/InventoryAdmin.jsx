@@ -345,6 +345,21 @@ function loadOutlet(o) {
               </strong>
             </div>
           )}
+              {/* Opening Quantity — outlet override */}
+            <div className="fg" style={{marginTop:4}}>
+      <div className="ff">
+        <label>Outlet Opening Quantity</label>
+        <input
+          type="number"
+          value={ef.openingQty ?? ""}
+          onChange={e => setEf({...ef, openingQty: e.target.value})}
+          placeholder={editItem.openingQty != null ? `Default: ${editItem.openingQty}` : "e.g. 10"}
+          min="0"
+        />
+      </div>
+      {/* Spacer so it doesn't stretch full width */}
+      <div className="ff" style={{visibility:"hidden"}} aria-hidden="true"/>
+    </div>
           <div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 0 2px",
             borderTop:"1px solid var(--bdr)",marginTop:4}}>
             <input type="checkbox" id="hide-item-ov" checked={ef.hidden}
@@ -675,6 +690,34 @@ function loadOutlet(o) {
               </strong>
             </div>
           )}
+          {/* Opening Quantity */}
+    <div className="fg" style={{marginTop:2}}>
+      <div className="ff">
+        <label>Outlet Opening Quantity</label>
+        <input
+          type="number"
+          min="0"
+          value={ef.openingQty ?? ""}
+          onChange={e => setEf({...ef, openingQty: e.target.value})}
+          placeholder={editItem.openingQty != null ? `Default: ${editItem.openingQty}` : "e.g. 10"}
+        />
+      </div>
+      <div className="ff" style={{visibility:"hidden"}} aria-hidden="true"/>
+    </div>
+
+    {/* Opening qty override hint */}
+    {ef.openingQty !== "" && ef.openingQty != null && (
+      <div style={{background:"var(--s2)",borderRadius:6,padding:"7px 11px",fontSize:11.5,
+        border:"1px solid var(--bdr)",marginBottom:10,color:"var(--mut)"}}>
+        Staff will see opening qty: <strong style={{color:"var(--txt)"}}>{ef.openingQty}</strong>
+        {editItem.openingQty != null && Number(ef.openingQty) !== Number(editItem.openingQty) && (
+          <span style={{color:"var(--gld2)",marginLeft:8}}>
+            (overrides main: {editItem.openingQty})
+          </span>
+        )}
+      </div>
+    )}
+
           <div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 0 2px",
             borderTop:"1px solid var(--bdr)",marginTop:4}}>
             <input type="checkbox" id="hide-empty-ov" checked={ef.hidden}
