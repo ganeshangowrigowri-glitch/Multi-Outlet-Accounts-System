@@ -3,8 +3,9 @@
 //  Admin › Bank Management
 //  Tabs: Bank Master | All Entries | Access Control
 // ─────────────────────────────────────────────────────────────
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { ls, lss } from "../../utils/helpers";
+import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
 import Modal from "../shared/Modal";
 
@@ -16,7 +17,16 @@ const BANKS = [
   "Peoples Bank","NTB/AMEX","DFCC","Seylan Bank","Union Bank",
 ];
 
-const OUTLETS_KEY = "outlets"; // same key used by your OutletManagement
+const normAccount = (a) => ({
+  ...a,
+  outlet_id:    a.outlet_id    || a.outlet    || "",
+  account_no:   a.account_no   || a.accountNo || "",
+  account_name: a.account_name || a.accountName || "",
+  bank:         a.bank || "",
+  branch:       a.branch || "",
+  active:       a.active !== false,
+  hidden:       a.hidden || false,
+});
 
 // ── seed bank accounts so something shows on first load ──
 const SEED_BANKS = [
@@ -30,23 +40,23 @@ const uid = () => "ba" + Date.now().toString(36) + Math.random().toString(36).sl
 const fmt  = n  => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
 
 // ════════════════════════════════════════════════════════════
-export default function A_Bank() {
+export default function A_Bank({ outlets: outletsProp = [], toast_ }) {
   const [tab, setTab] = useState(0);
 
   return (
     <div>
       {/* ── Tab Bar ── */}
       <div className="stabs no-print" style={{ marginBottom: 16 }}>
-        {["Bank Master","All Entries","Access Control"].map((t, i) => (
-          <button key={i} className={`stab ${tab === i ? "act" : ""}`} onClick={() => setTab(i)}>
-            {[I.bank, I.gl, I.shield][i]} {t}
-          </button>
-        ))}
+        {["Bank Master","Access Control"].map((t, i) => (
+       <button key={i} className={`stab ${tab === i ? "act" : ""}`} onClick={() => setTab(i)}>
+       {[I.bank, I.shield][i]} {t}
+       </button>
+       ))}
+        
       </div>
 
-      {tab === 0 && <BankMaster />}
-      {tab === 1 && <AllEntries />}
-      {tab === 2 && <BankAccess />}
+      {tab === 0 && <BankMaster outlets={outletsProp} toast_={toast_} />}
+      {tab === 1 && <BankAccess />}
     </div>
   );
 }
@@ -54,46 +64,112 @@ export default function A_Bank() {
 // ════════════════════════════════════════════════════════════
 // TAB 0 — Bank Master
 // ════════════════════════════════════════════════════════════
-function BankMaster() {
-  const [accounts, setAccounts] = useState(() => ls(BANK_KEY, SEED_BANKS));
+  function BankMaster({ outlets: outletsProp = [], toast_ }) {
+  const [accounts, setAccounts] = useState([]);
+
+  useEffect(() => {
+    supabase.from("bank_accounts").select("*")
+      .then(({ data }) => {
+        if (data && data.length) setAccounts(data.map(normAccount));
+        else setAccounts(ls(BANK_KEY, SEED_BANKS).map(normAccount));
+      });
+  }, []);
   const [search,   setSearch]   = useState("");
   const [filterB,  setFilterB]  = useState("");
   const [modal,    setModal]    = useState(null); // null | "add" | "edit"
   const [form,     setForm]     = useState({});
 
-  const outlets = ls(OUTLETS_KEY, []).map(o => typeof o === "string" ? o : o.name || o.outlet || "");
+  const outlets = outletsProp.length
+    ? outletsProp
+    : ls("outlets", []).map(o => typeof o === "string" ? o : o.name || o.outlet || "");
 
-  function save(list) { setAccounts(list); lss(BANK_KEY, list); }
+   async function save(list) { const n = list.map(normAccount); setAccounts(n); lss(BANK_KEY, n); }
 
   function openAdd() {
     setForm({ outlet:"", bank:"", accountNo:"", accountName:"", branch:"", active:true, hidden:false });
     setModal("add");
   }
-  function openEdit(a) { setForm({ ...a }); setModal("edit"); }
+  function openEdit(a) {
+    setForm({
+      id: a.id,
+      outlet: a.outlet_id || a.outlet || "",
+      bank: a.bank || "",
+      accountNo: a.account_no || a.accountNo || "",
+      accountName: a.account_name || a.accountName || "",
+      branch: a.branch || "",
+      active: a.active !== false,
+      hidden: a.hidden || false,
+    });
+    setModal("edit");
+  }
 
-  function submitForm() {
-    if (!form.outlet || !form.bank || !form.accountNo || !form.accountName) return;
-    if (modal === "add") {
-      save([...accounts, { ...form, id: uid() }]);
-    } else {
-      save(accounts.map(a => a.id === form.id ? { ...form } : a));
+async function submitForm() {
+  if (!form.outlet || !form.bank || !form.accountNo || !form.accountName) {
+    toast_?.("Fill all required fields", "err");
+    return;
+  }
+
+  const row = {
+    outlet_id:    form.outlet,
+    bank:         form.bank,
+    account_no:   form.accountNo,
+    account_name: form.accountName,
+    branch:       form.branch || "",
+    active:       form.active,
+    hidden:       form.hidden || false,
+  };
+
+  if (modal === "add") {
+    const newId = crypto.randomUUID();
+    const { data, error } = await supabase.from("bank_accounts")
+      .insert({ ...row, id: newId })
+      .select()
+      .single();
+    if (error) {
+      console.error("bank_accounts insert:", error);
+      toast_?.("Failed to save account: " + error.message, "err");
+      return;
     }
-    setModal(null);
+    setAccounts(prev => [...prev, normAccount(data)]);
+    toast_?.("Account added ✓");
+  } else {
+    const { error } = await supabase.from("bank_accounts").update(row).eq("id", form.id);
+    if (error) {
+      console.error("bank_accounts update:", error);
+      toast_?.("Failed to update account: " + error.message, "err");
+      return;
+    }
+    setAccounts(prev => prev.map(a => a.id === form.id ? normAccount({ ...a, ...row }) : a));
+    toast_?.("Account updated ✓");
   }
-
-  function toggleActive(id) {
-    save(accounts.map(a => a.id === id ? { ...a, active: !a.active } : a));
-  }
-  function toggleHidden(id) {
-    save(accounts.map(a => a.id === id ? { ...a, hidden: !a.hidden } : a));
-  }
-  function del(id) {
-    if (window.confirm("Delete this bank account?")) save(accounts.filter(a => a.id !== id));
-  }
+  setModal(null);
+}
+  async function toggleActive(id) {
+  const acc = accounts.find(a => a.id === id);
+  const { error } = await supabase.from("bank_accounts").update({ active: !acc.active }).eq("id", id);
+  if (error) console.error("toggleActive:", error);
+  setAccounts(prev => prev.map(a => a.id === id ? { ...a, active: !a.active } : a));
+}
+async function toggleHidden(id) {
+  const acc = accounts.find(a => a.id === id);
+  const nextHidden = !acc.hidden;
+  const { error } = await supabase.from("bank_accounts").update({ hidden: nextHidden }).eq("id", id);
+  if (error) console.error("toggleHidden:", error);
+  setAccounts(prev => prev.map(a => a.id === id ? { ...a, hidden: nextHidden } : a));
+}
+async function del(id) {
+  if (!window.confirm("Delete this bank account?")) return;
+  const { error } = await supabase.from("bank_accounts").delete().eq("id", id);
+  if (error) console.error("delete bank account:", error);
+  setAccounts(prev => prev.filter(a => a.id !== id));
+}
 
   const visible = accounts.filter(a => {
     const q = search.toLowerCase();
-    const matchQ = !q || a.outlet.toLowerCase().includes(q) || a.bank.toLowerCase().includes(q) || a.accountNo.includes(q) || a.accountName.toLowerCase().includes(q);
+    const outletName = (a.outlet_id || a.outlet || "").toLowerCase();
+    const acctNo = a.account_no || a.accountNo || "";
+    const acctName = (a.account_name || a.accountName || "").toLowerCase();
+    const matchQ = !q || outletName.includes(q) || (a.bank || "").toLowerCase().includes(q) || acctNo.includes(q) || acctName.includes(q);
     const matchB = !filterB || a.bank === filterB;
     return matchQ && matchB;
   });
@@ -154,13 +230,13 @@ function BankMaster() {
                 <tr key={a.id} style={{ opacity: a.hidden ? 0.5 : 1 }}>
                   <td className="mono" style={{ color:"var(--mut)", fontSize:11 }}>{i+1}</td>
                   <td>
-                    <div style={{ fontWeight:600, fontSize:13 }}>{a.outlet}</div>
+                    <div style={{ fontWeight:600, fontSize:13 }}>{a.outlet_id}</div>
                   </td>
                   <td>
                     <span className="badge bb">{a.bank}</span>
                   </td>
-                  <td className="mono" style={{ letterSpacing:".04em" }}>{a.accountNo}</td>
-                  <td style={{ fontSize:12.5 }}>{a.accountName}</td>
+                  <td className="mono" style={{ letterSpacing:".04em" }}>{a.account_no}</td>
+                  <td style={{ fontSize:12.5 }}>{a.account_name}</td>
                   <td style={{ fontSize:12, color:"var(--mut)" }}>{a.branch}</td>
                   <td>
                     <span className={`badge ${a.active ? "ba" : "bd"}`}>
@@ -265,120 +341,20 @@ function BankMaster() {
     </>
   );
 }
-
 // ════════════════════════════════════════════════════════════
-// TAB 1 — All Entries (cross-outlet audit view)
+// TAB 1 — Access Control (which outlets can use bank module)
 // ════════════════════════════════════════════════════════════
-function AllEntries() {
-  const bankAccounts = ls(BANK_KEY, SEED_BANKS);
-  const outlets      = [...new Set(bankAccounts.map(a => a.outlet))];
-
-  // Gather all entries from all outlet bank ledgers
-  const allEntries = outlets.flatMap(outlet => {
-    const ledger = ls(`outlet_${outlet}_bank_ledger`, []);
-    return ledger.map(e => ({ ...e, outlet }));
-  }).sort((a, b) => b.date.localeCompare(a.date));
-
-  const [filterO, setFilterO] = useState("");
-  const [filterT, setFilterT] = useState("");
-  const [fromD,   setFromD]   = useState("");
-  const [toD,     setToD]     = useState("");
-
-  const rows = allEntries.filter(e => {
-    if (filterO && e.outlet !== filterO) return false;
-    if (filterT && e.type  !== filterT)  return false;
-    if (fromD   && e.date  < fromD)      return false;
-    if (toD     && e.date  > toD)        return false;
-    return true;
-  });
-
-  const totalIn  = rows.filter(e => e.type === "in").reduce((a, e)  => a + e.amount, 0);
-  const totalOut = rows.filter(e => e.type === "out").reduce((a, e) => a + e.amount, 0);
-
-  return (
-    <>
-      {/* ── Summary ── */}
-      <div className="sg3" style={{ marginBottom: 14 }}>
-        <div className="sc"><div className="sl">Total Entries</div><div className="sa">{rows.length}</div></div>
-        <div className="sc"><div className="sl">Total In</div><div className="sa cg">Rs.{fmt(totalIn)}</div></div>
-        <div className="sc"><div className="sl">Total Out</div><div className="sa cr">Rs.{fmt(totalOut)}</div></div>
-      </div>
-
-      {/* ── Filters ── */}
-      <div className="chd" style={{ marginBottom: 12, flexWrap:"wrap", gap:8 }}>
-        <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-          <select className="btn btnsm" value={filterO} onChange={e => setFilterO(e.target.value)}>
-            <option value="">All outlets</option>
-            {outlets.map(o => <option key={o}>{o}</option>)}
-          </select>
-          <select className="btn btnsm" value={filterT} onChange={e => setFilterT(e.target.value)}>
-            <option value="">All types</option>
-            <option value="in">Bank In</option>
-            <option value="out">Bank Out</option>
-          </select>
-          <input type="date" className="btn btnsm" value={fromD} onChange={e => setFromD(e.target.value)} />
-          <input type="date" className="btn btnsm" value={toD}   onChange={e => setToD(e.target.value)} />
-        </div>
-        <button className="btn btnd btnsm no-print" onClick={() => window.print()}>{I.print} Print</button>
-      </div>
-
-      {/* ── Table ── */}
-      <div className="card" style={{ padding:0, overflow:"hidden" }}>
-        <div style={{ overflowX:"auto" }}>
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Date</th>
-                <th>Outlet</th>
-                <th>Bank / Account</th>
-                <th>Cheque No.</th>
-                <th>Description</th>
-                <th>Type</th>
-                <th className="rt">Amount</th>
-                <th>Staff</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.length === 0 && (
-                <tr><td colSpan={8}><div className="empty">No entries found.</div></td></tr>
-              )}
-              {rows.map(e => (
-                <tr key={e.id}>
-                  <td className="mono">{e.date}</td>
-                  <td style={{ fontSize:12.5 }}>{e.outlet}</td>
-                  <td>
-                    <div style={{ fontSize:12.5 }}>{e.bankName || "—"}</div>
-                    <div className="mono" style={{ fontSize:10.5, color:"var(--mut)" }}>{e.accountNo || ""}</div>
-                  </td>
-                  <td className="mono" style={{ fontSize:12 }}>{e.chequeNo || "—"}</td>
-                  <td style={{ fontSize:12.5 }}>{e.description}</td>
-                  <td>
-                    <span className={`badge ${e.type === "in" ? "ba" : "bd"}`}>
-                      {e.type === "in" ? "Bank In" : "Bank Out"}
-                    </span>
-                  </td>
-                  <td className={`rt mono bold ${e.type === "in" ? "cg" : "cr"}`}>
-                    Rs.{fmt(e.amount)}
-                  </td>
-                  <td style={{ fontSize:12, color:"var(--mut)" }}>{e.by || "—"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ════════════════════════════════════════════════════════════
-// TAB 2 — Access Control (which outlets can use bank module)
-// ════════════════════════════════════════════════════════════
-function BankAccess() {
+ function BankAccess() {
   const AKEY = "bank_access_control";
-  const bankAccounts = ls(BANK_KEY, SEED_BANKS);
-  const outlets      = [...new Set(bankAccounts.map(a => a.outlet))];
+  const [bankAccounts, setBankAccounts] = useState([]);
   const [access, setAccess] = useState(() => ls(AKEY, {}));
+
+  useEffect(() => {
+    supabase.from("bank_accounts").select("*")
+      .then(({ data }) => { if (data) setBankAccounts(data); });
+  }, []);
+
+  const outlets = [...new Set(bankAccounts.map(a => a.outlet_id).filter(Boolean))];
 
   function toggle(outlet) {
     const updated = { ...access, [outlet]: !access[outlet] };
@@ -405,7 +381,7 @@ function BankAccess() {
               <tr><td colSpan={3}><div className="empty">No outlets with bank accounts yet.</div></td></tr>
             )}
             {outlets.map(outlet => {
-              const accs    = bankAccounts.filter(a => a.outlet === outlet && !a.hidden);
+              const accs    = bankAccounts.filter(a => a.outlet_id === outlet && !a.hidden);
               const enabled = access[outlet] !== false; // default ON
               return (
                 <tr key={outlet}>
@@ -416,7 +392,7 @@ function BankAccess() {
                       : accs.map(a => (
                           <div key={a.id} style={{ fontSize:12, marginBottom:2 }}>
                             <span className="badge bb" style={{ marginRight:4 }}>{a.bank}</span>
-                            <span className="mono" style={{ fontSize:11 }}>{a.accountNo}</span>
+                            <span className="mono" style={{ fontSize:11 }}>{a.account_no}</span>
                           </div>
                         ))
                     }

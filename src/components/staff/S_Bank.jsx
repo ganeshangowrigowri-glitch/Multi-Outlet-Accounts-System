@@ -3,13 +3,12 @@
 //  Staff › Bank
 //  Tabs:  Payment History
 // ─────────────────────────────────────────────────────────────
-import { useState } from "react";
-import { ls, lss, fmt, oKey, today } from "../../utils/helpers";
+import { useState, useEffect } from "react";
+import { fmt, today } from "../../utils/helpers";
+import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
 
-const BANK_KEY = "admin_bank_accounts";
-const ACCESS_KEY = "bank_access_control";
-const uid = () => "be" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+
 
 const ENTRY_TYPES = [
   { value: "deposit", label: "Deposit", gl: "1002" },
@@ -23,11 +22,17 @@ const ENTRY_TYPES = [
 export default function S_Bank({ outlet, toast_ }) {
   const [tab, setTab] = useState(0);
 
-  const access = ls(ACCESS_KEY, {});
-  const hasAccess = access[outlet] !== false;
+  const [hasAccess, setHasAccess] = useState(true);
+  const [outletBanks, setOutletBanks] = useState([]);
 
-  const allBanks = ls(BANK_KEY, []);
-  const outletBanks = allBanks.filter(a => a.outlet === outlet && a.active && !a.hidden);
+useEffect(() => {
+  supabase.from("bank_accounts")
+    .select("*")
+    .eq("outlet_id", outlet)
+    .eq("active", true)
+    .eq("hidden", false)
+    .then(({ data }) => { if (data) setOutletBanks(data); });
+}, [outlet]);  
 
   if (!hasAccess) {
     return (
@@ -327,25 +332,33 @@ function MyEntries({ outlet, outletBanks, toast_ }) {
 // ════════════════════════════════════════════════════════════
 // TAB 2 — Payment History (from Accounts Payable → Pay Invoice)
 // ════════════════════════════════════════════════════════════
-function PaymentHistory({ outlet }) {
-  const payments = ls(oKey(outlet, "ap_payments"), []);
+  function PaymentHistory({ outlet }) {
+  const [payments, setPayments] = useState([]);
+
+  useEffect(() => {
+    supabase.from("ap_payments")
+      .select("*")
+      .eq("outlet_id", outlet)
+      .order("date", { ascending: false })
+      .then(({ data }) => { if (data) setPayments(data); });
+  }, [outlet]);
+
+  const suppliers = [...new Set(payments.map(p => p.supplier_id).filter(Boolean))];
 
   const [filterSup, setFilterSup] = useState("");
   const [filterType, setFilterType] = useState("");
   const [fromD, setFromD] = useState("");
   const [toD, setToD] = useState("");
 
-  const suppliers = [...new Set(payments.map(p => p.supId).filter(Boolean))];
-
   const rows = payments.filter(p => {
-    if (filterSup && p.supId !== filterSup) return false;
-    if (filterType && p.payType !== filterType) return false;
+    if (filterSup && p.supplier_id !== filterSup) return false;
+    if (filterType && p.method !== filterType) return false;
     if (fromD && p.date < fromD) return false;
     if (toD && p.date > toD) return false;
     return true;
   }).sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 
-  const totalPaid = rows.reduce((a, p) => a + (p.payAmt || 0), 0);
+  const totalPaid = rows.reduce((a, p) => a + (p.amount || 0), 0);
   const totalDisc = rows.reduce((a, p) => a + (p.discount || 0), 0);
   const totalLate = rows.reduce((a, p) => a + (p.lateCharge || 0), 0);
 
@@ -400,29 +413,27 @@ function PaymentHistory({ outlet }) {
               {rows.length === 0 && (
                 <tr><td colSpan={10}><div className="empty">No invoice payments recorded yet.</div></td></tr>
               )}
-              {rows.map(p => (
-                <tr key={p.id}>
-                  <td className="mono">{p.date}</td>
-                  <td style={{ fontSize: 12 }}>{p.supId}</td>
-                  <td className="mono">{p.invNo}</td>
-                  <td><span className={`badge ${p.payType === "Cash" ? "ba" : "bb"}`}>{p.payType}</span></td>
-                  <td style={{ fontSize: 11.5 }}>
-                    {p.bankName
-                      ? <><span className="badge bb">{p.bankName}</span>{" "}<span className="mono" style={{ fontSize: 11 }}>{p.accountNo}</span></>
-                      : <span style={{ color: "var(--mut)" }}>—</span>
-                    }
-                  </td>
-                  <td className="mono" style={{ fontSize: 11.5 }}>
-                    {p.checkNo || <span style={{ color: "var(--mut)" }}>—</span>}
-                  </td>
-                  <td className="rt mono">Rs.{fmt(p.invAmt)}</td>
-                  <td className="rt mono cg bold">Rs.{fmt(p.payAmt)}</td>
-                  <td className="rt mono cg">Rs.{fmt(p.discount)}</td>
-                  <td className="rt mono" style={{ color: p.lateCharge > 0 ? "var(--red)" : "var(--mut)" }}>
-                    {p.lateCharge > 0 ? `Rs.${fmt(p.lateCharge)}` : "—"}
-                  </td>
-                </tr>
-              ))}
+             {rows.map(p => (
+  <tr key={p.id}>
+    <td className="mono">{p.date}</td>
+    <td style={{ fontSize: 12 }}>{p.supplier_id || "—"}</td>
+    <td className="mono">{p.notes || "—"}</td>
+    <td><span className={`badge ${p.method === "Cash" ? "ba" : "bb"}`}>{p.method}</span></td>
+    <td style={{ fontSize: 11.5 }}>
+      {p.bank_name
+        ? <><span className="badge bb">{p.bank_name}</span>{" "}<span className="mono" style={{ fontSize: 11 }}>{p.account_no}</span></>
+        : <span style={{ color: "var(--mut)" }}>—</span>
+      }
+    </td>
+    <td className="mono" style={{ fontSize: 11.5 }}>{p.ref || "—"}</td>
+    <td className="rt mono">Rs.{fmt(p.inv_amt || 0)}</td>
+    <td className="rt mono cg bold">Rs.{fmt(p.amount)}</td>
+    <td className="rt mono cg">Rs.{fmt(p.discount || 0)}</td>
+    <td className="rt mono" style={{ color: (p.late_charge || 0) > 0 ? "var(--red)" : "var(--mut)" }}>
+      {(parseFloat(p.late_charge) || 0) > 0 ? `Rs.${fmt(parseFloat(p.late_charge))}` : "—"}
+    </td>
+  </tr>
+))}
             </tbody>
           </table>
         </div>

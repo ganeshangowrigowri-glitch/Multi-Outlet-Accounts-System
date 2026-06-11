@@ -1,5 +1,6 @@
 import React, { useState, useMemo, useEffect,  useRef} from "react";
 import { ls, lss } from "../../utils/helpers";
+import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getSales, getPurchases, getTransfers, getReturns } from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SEED_EMPTY, SUPPLIERS_LIST, SUP_COLOR, ITEM_TYPES, OUTLETS, OUTLET_INV_SEEDS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -58,6 +59,15 @@ function loadInv() {
   return sortInv(stored);
 }
 
+async function loadInvFromSupabase() {
+  const data = await getInventoryMaster();
+  if (data && data.length > 0) {
+    lss("inv_main", data);
+    return sortInv(data);
+  }
+  return loadInv();
+}
+
 function getAllSupColors() {
   const extra = ls("extra_suppliers", []);
   const merged = { ...SUP_COLOR };
@@ -77,8 +87,9 @@ function getAllSuppliersList() {
   });
 }
 // outlet inventory panel
-function OutletInventoryPanel({ inv, toast_, allSupColors }) {
-  const [selOutlet, setSelOutlet] = useState(OUTLETS[0]);
+function OutletInventoryPanel({ inv, toast_, allSupColors, adminOutlets }) {
+  const outletList = adminOutlets?.length ? adminOutlets : OUTLETS;
+  const [selOutlet, setSelOutlet] = useState(outletList[0]);
   const [supF,      setSupF]      = useState("ALL");
   const [search,    setSearch]    = useState("");
   const [editItem,  setEditItem]  = useState(null);
@@ -88,9 +99,12 @@ function OutletInventoryPanel({ inv, toast_, allSupColors }) {
 // AFTER — no inv reference needed
 const [overrides, setOverridesState] = useState(() => {
   initOutletSeeds();
-  return ls(outletInvKey(OUTLETS[0]), {});
+  return ls(outletInvKey(outletList[0]), {});
 });
 // 2. useEffect — no pruning, just read directly
+useEffect(() => {
+  if (!outletList.includes(selOutlet)) setSelOutlet(outletList[0] || "");
+}, [outletList, selOutlet]);
 useEffect(() => {
   setOverridesState(ls(outletInvKey(selOutlet), {}));
 }, [selOutlet]);
@@ -102,9 +116,18 @@ function loadOutlet(o) {
   setSupF("ALL"); setSearch(""); setShowOnly("all");
 }
 
-  function saveOverrides(newOv) {
+  async function syncOpeningToDb(newOv) {
+    const mainMap = {};
+    Object.entries(newOv).forEach(([key, ov]) => {
+      if (ov?.qty !== undefined) mainMap[key.split("__")[0]] = Number(ov.qty) || 0;
+    });
+    if (Object.keys(mainMap).length) await saveOpeningStock(selOutlet, today(), mainMap, null);
+  }
+
+  async function saveOverrides(newOv) {
     setOverridesState(newOv);
     lss(outletInvKey(selOutlet), newOv);
+    await syncOpeningToDb(newOv);
   }
 
   function openEdit(item) {
@@ -113,20 +136,23 @@ function loadOutlet(o) {
       sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
       unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
       hidden:       ov.hidden || false,
+      qty:          ov.qty          !== undefined ? ov.qty          : (item.qty || 0),
+      openingQty:   ov.qty          !== undefined ? ov.qty          : (item.qty || 0),
     });
     setEditItem(item);
   }
 
-  function saveEdit() {
+  async function saveEdit() {
     const newOv = {
       ...overrides,
       [`${editItem.code}__${editItem.supplier}`]: {
         unitCost:     Number(ef.unitCost)     || 0,
         sellingPrice: Number(ef.sellingPrice) || 0,
         hidden:       ef.hidden,
+        qty:          Number(ef.qty)          || 0,
       },
     };
-    saveOverrides(newOv);
+    await saveOverrides(newOv);
     toast_(`${editItem.code} updated for ${selOutlet} ✓`);
     setEditItem(null);
   }
@@ -154,8 +180,8 @@ function loadOutlet(o) {
     );
     if (showOnly === "custom") items = items.filter(i => overrides[`${i.code}__${i.supplier}`]);
     if (showOnly === "hidden") items = items.filter(i => overrides[`${i.code}__${i.supplier}`]?.hidden);
-    return items;
-  }, [inv, supF, search, overrides, showOnly]);
+     return sortInv(items);
+}, [inv, supF, search, overrides, showOnly]);
 
   const customCount = Object.keys(overrides).length;
   const hiddenCount = Object.values(overrides).filter(o => o.hidden).length;
@@ -171,7 +197,7 @@ function loadOutlet(o) {
           <select value={selOutlet} onChange={e=>loadOutlet(e.target.value)}
             style={{padding:"7px 11px",background:"var(--s2)",border:"1px solid var(--bdr)",
               borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none",width:"100%"}}>
-            {OUTLETS.map(o=><option key={o}>{o}</option>)}
+            {outletList.map(o=><option key={o}>{o}</option>)}
           </select>
         </div>
         <div style={{display:"flex",gap:6,paddingBottom:2,flexWrap:"wrap"}}>
@@ -351,9 +377,10 @@ function loadOutlet(o) {
         <label>Outlet Opening Quantity</label>
         <input
           type="number"
-          value={ef.openingQty ?? ""}
-          onChange={e => setEf({...ef, openingQty: e.target.value})}
-          placeholder={editItem.openingQty != null ? `Default: ${editItem.openingQty}` : "e.g. 10"}
+          value={ef.qty ?? ""}
+          onChange={e => setEf({...ef, qty: e.target.value})}
+          
+           placeholder={`Main stock: ${editItem.qty ?? 0} — enter outlet qty`}
           min="0"
         />
       </div>
@@ -447,29 +474,39 @@ function loadOutlet(o) {
     lss(outletEmptyInvKey(selOutlet), newOv);
   }
 
-  function openEdit(item) {
-    const ov = overrides[item.code] || {};
-    setEf({
-      sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
-      unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
-      hidden:       ov.hidden || false,
-    });
-    setEditItem(item);
-  }
+  
+function openEdit(item) {
+  const ov = overrides[`${item.code}__${item.supplier}`] || {};
+  setEf({
+    sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
+    unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
+    hidden:       ov.hidden || false,
+    openingQty:   ov.qty          !== undefined ? ov.qty          : "",
+  });
+  setEditItem(item);
+}
 
-  function saveEdit() {
-    const newOv = {
-      ...overrides,
-      [editItem.code]: {
-        unitCost:     Number(ef.unitCost)     || 0,
-        sellingPrice: Number(ef.sellingPrice) || 0,
-        hidden:       ef.hidden,
-      },
-    };
-    saveOverrides(newOv);
-    toast_(`${editItem.code} updated for ${selOutlet} ✓`);
-    setEditItem(null);
+  // AFTER
+function saveEdit() {
+  const newOv = {
+    ...overrides,
+    [`${editItem.code}__${editItem.supplier}`]: {
+      unitCost:     Number(ef.unitCost)     || 0,
+      sellingPrice: Number(ef.sellingPrice) || 0,
+      hidden:       ef.hidden,
+      qty:          ef.openingQty !== "" && ef.openingQty != null
+                      ? Number(ef.openingQty)
+                      : undefined,
+    },
+  };
+  // Remove qty key entirely if admin left it blank (so staff falls back to 0, not main stock)
+  if (newOv[`${editItem.code}__${editItem.supplier}`].qty === undefined) {
+    delete newOv[`${editItem.code}__${editItem.supplier}`].qty;
   }
+  saveOverrides(newOv);
+  toast_(`${editItem.code} updated for ${selOutlet} ✓`);
+  setEditItem(null);
+}
 
   function resetOverride(code) {
     const newOv = { ...overrides };
@@ -697,22 +734,22 @@ function loadOutlet(o) {
         <input
           type="number"
           min="0"
-          value={ef.openingQty ?? ""}
-          onChange={e => setEf({...ef, openingQty: e.target.value})}
-          placeholder={editItem.openingQty != null ? `Default: ${editItem.openingQty}` : "e.g. 10"}
+          value={ef.qty ?? ""}
+          onChange={e => setEf({...ef, qty: e.target.value})}
+          placeholder={editItem.qty != null ? `Default: ${editItem.qty}` : "e.g. 10"}
         />
       </div>
       <div className="ff" style={{visibility:"hidden"}} aria-hidden="true"/>
     </div>
 
     {/* Opening qty override hint */}
-    {ef.openingQty !== "" && ef.openingQty != null && (
+    {ef.qty !== "" && ef.qty  != null && (
       <div style={{background:"var(--s2)",borderRadius:6,padding:"7px 11px",fontSize:11.5,
         border:"1px solid var(--bdr)",marginBottom:10,color:"var(--mut)"}}>
-        Staff will see opening qty: <strong style={{color:"var(--txt)"}}>{ef.openingQty}</strong>
-        {editItem.openingQty != null && Number(ef.openingQty) !== Number(editItem.openingQty) && (
+        Staff will see opening qty: <strong style={{color:"var(--txt)"}}>{ef.qty}</strong>
+        {editItem.qty != null && Number(ef.ty) !== Number(editItem.qty) && (
           <span style={{color:"var(--gld2)",marginLeft:8}}>
-            (overrides main: {editItem.openingQty})
+            (overrides main: {editItem.qty})
           </span>
         )}
       </div>
@@ -1127,8 +1164,13 @@ function saveEmpty(data) {
 // ─────────────────────────────────────────────
 // MAIN EXPORT
 // ─────────────────────────────────────────────
-export default function InventoryAdmin({ toast_, isAdmin }) {
-  const [inv,      setIR] = useState(loadInv);
+export default function InventoryAdmin({ toast_, isAdmin, adminOutlets }) {
+  const outletNames = adminOutlets?.length ? adminOutlets : OUTLETS;
+  const [inv, setIR] = useState(() => loadInv());
+
+useEffect(() => {
+  loadInvFromSupabase().then(data => setIR(data));
+}, []);
   const [empty,    setER] = useState(() => ls("inv_empty", SEED_EMPTY));
   const [invTab,   setInvTab]  = useState("main");
   const [supF,     setSupF]    = useState("ALL");
@@ -1148,12 +1190,18 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
   const [csMonth,  setCsMonth] = useState(today().slice(0,7));
   const [csOutlet, setCsOutlet]= useState("ALL");
   const [physStock,setPhysStock]= useState({});
+  const [statusDb, setStatusDb]   = useState({ sales: {}, purchases: {}, transfers: {}, returns: {} });
   const csWrapRef = useRef(null);
   // OutletEmptyPanel (Tab 4) loads its own data via loadEmptyFromStorage() on mount.
   // handleEmptyInventoryChange is kept so EmptyStockPanel's onInventoryChange prop works.
   function handleEmptyInventoryChange(_newData) { /* no-op: Tab 4 self-loads */ }
 
-  const si = d => { const s = sortInv(d); setIR(s); lss("inv_main", s); };
+  const si = d  => {
+  const s = sortInv(d);
+  setIR(s); 
+  lss("inv_main", s);
+  saveInventoryMaster(s); // save to Supabase
+};
   const se = d => { setER(d); lss("inv_empty", d); };
 
   const allTypes = useMemo(() => {
@@ -1192,6 +1240,21 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
       .map(sup => ({ supplier: sup, items: groups[sup] }));
   }, [filtInv, supF]);
 
+  useEffect(() => {
+    if (invTab !== "status") return;
+    const toLoad = csOutlet === "ALL" ? outletNames : [csOutlet];
+    (async () => {
+      const sales = {}, purchases = {}, transfers = {}, returns = {};
+      await Promise.all(toLoad.map(async o => {
+        const [s, p, t, r] = await Promise.all([
+          getSales(o), getPurchases(o), getTransfers(o), getReturns(o),
+        ]);
+        sales[o] = s; purchases[o] = p; transfers[o] = t; returns[o] = r;
+      }));
+      setStatusDb({ sales, purchases, transfers, returns });
+    })();
+  }, [invTab, csOutlet, csMode, csDate, csWeekOf, csMonth, outletNames]);
+
   const csData = useMemo(() => {
   let csFrom, csTo;
   if (csMode === "daily") {
@@ -1214,7 +1277,7 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
     csTo = csMonth + "-" + String(lastDay).padStart(2, "0");
   }
 
-  const outlets = csOutlet === "ALL" ? OUTLETS : [csOutlet];
+  const outlets = csOutlet === "ALL" ? outletNames : [csOutlet];
 
   return inv.map(item => {
     const sp = (() => {
@@ -1240,60 +1303,75 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
     let adjStock      = 0;
     let firstOpening  = null;
     let lastEndStock  = null;
-   let hasSaleEntry  = false;
+    let hasSaleEntry  = false;
 
     outlets.forEach(outlet => {
-      const salesInRange = ls(oKey(outlet, "sales"), [])
+      const salesInRange = (statusDb.sales[outlet] || [])
         .filter(s => s.date && s.date >= csFrom && s.date <= csTo)
         .sort((a, b) => a.date.localeCompare(b.date));
 
-      salesInRange.forEach(s => {
-        const row = (s.mainRows || []).find(
-          r => r.code === item.code && r.id === item.id
-        ) || (s.mainRows || []).find(
-          r => r.code === item.code && r.supplier === item.supplier
+      if (salesInRange.length > 0) {
+        const firstRow = (salesInRange[0].items || salesInRange[0].mainRows || []).find(
+          r => r.code === item.code && r.id === item.id && !r.isEmptyItem
+        ) || (salesInRange[0].items || salesInRange[0].mainRows || []).find(
+          r => r.code === item.code && r.supplier === item.supplier && !r.isEmptyItem
+        );
+        if (firstRow) firstOpening = Number(firstRow.openingStock) || 0;
+      }
+
+      for (let i = salesInRange.length - 1; i >= 0; i--) {
+        const row = (salesInRange[i].items || salesInRange[i].mainRows || []).find(
+          r => r.code === item.code && r.id === item.id && !r.isEmptyItem
+        ) || (salesInRange[i].items || salesInRange[i].mainRows || []).find(
+          r => r.code === item.code && r.supplier === item.supplier && !r.isEmptyItem
         );
         if (row) {
           hasSaleEntry = true;
-          if (firstOpening === null) {
-            firstOpening = parseFloat(row.openingStock) || 0;
+          if (row.stkSE !== undefined) adjStock = Number(row.stkSE) || 0;
+          if (row.endStock !== "" && row.endStock !== undefined) {
+            lastEndStock = parseFloat(row.endStock);
+            break;
           }
-          adjStock += parseFloat(row.stkSE) || 0;
-          const es = parseFloat(row.endStock);
-          if (!isNaN(es)) lastEndStock = es;
         }
-      });
+      }
 
-      ls(oKey(outlet, "purchases"), [])
+      (statusDb.purchases[outlet] || [])
         .filter(p => p.date && p.date >= csFrom && p.date <= csTo)
-        .forEach(p => (p.lines || []).forEach(l => {
+        .forEach(p => (p.items || p.lines || []).forEach(l => {
           if (l.itemCode === item.code && !l.isEmptyItem)
             totalPurchase += parseFloat(l.qty) || 0;
         }));
 
-      ls(oKey(outlet, "transfers"), [])
-        .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.type === "in")
-        .forEach(t => (t.lines || []).forEach(l => {
+      (statusDb.transfers[outlet] || [])
+        .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.from_outlet_id !== outlet)
+        .forEach(t => (t.items || t.lines || []).forEach(l => {
           if (l.itemCode === item.code)
             transferIn += parseFloat(l.qty) || 0;
         }));
 
-      ls(oKey(outlet, "transfers"), [])
-        .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.type === "out")
-        .forEach(t => (t.lines || []).forEach(l => {
+      (statusDb.transfers[outlet] || [])
+        .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.from_outlet_id === outlet)
+        .forEach(t => (t.items || t.lines || []).forEach(l => {
           if (l.itemCode === item.code)
             transferOut += parseFloat(l.qty) || 0;
         }));
 
-      ls(oKey(outlet, "returns"), [])
+      (statusDb.returns[outlet] || [])
         .filter(r => r.date && r.date >= csFrom && r.date <= csTo)
-        .forEach(r => (r.lines || []).forEach(l => {
+        .forEach(r => (r.items || r.lines || []).forEach(l => {
           if (l.itemCode === item.code)
             totalReturn += parseFloat(l.qty) || 0;
         }));
     });
 
-    const opening         = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+    const openingFromOv = (() => {
+      if (csOutlet !== "ALL") {
+        const ov = ls(outletInvKey(csOutlet), {})[`${item.code}__${item.supplier}`];
+        if (ov?.qty !== undefined) return Number(ov.qty) || 0;
+      }
+      return Number(item.qty) || 0;
+    })();
+    const opening         = firstOpening !== null ? firstOpening : openingFromOv;
     const inHandStock     = lastEndStock !== null ? lastEndStock : 0;
     const totalBottleSale = opening + totalPurchase - inHandStock;
     const physicalStock   = inHandStock * uc;
@@ -1303,7 +1381,7 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
 
     return {
       ...item,
-          _hasSaleEntry: hasSaleEntry,
+      _hasSaleEntry: hasSaleEntry,
       opening,
       inHandStock,
       physicalStock,
@@ -1327,9 +1405,10 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
     r.totalPurchase > 0 ||
     r.transferIn > 0 ||
     r.transferOut > 0 ||
-    r.totalReturn > 0
+    r.totalReturn > 0 ||
+    r.opening > 0
   );
-}, [inv, csMode, csDate, csWeekOf, csMonth, csOutlet, physStock]);
+}, [inv, csMode, csDate, csWeekOf, csMonth, csOutlet, physStock, statusDb, outletNames]);
 
   function saveItem() {
     if (!iForm.code||!iForm.name){toast_("Fill code and name","err");return;}
@@ -1346,16 +1425,19 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
     setIModal(null); setTypeInput("");
   }
 
-  function saveSupplier() {
-    if (!supForm.id||!supForm.name){toast_("Fill ID and Name","err");return;}
-    const numId  = supForm.id.replace(/\D/g,"");
-    const fullId = `${numId}-${supForm.name.toUpperCase().trim()}`;
-    const existing = ls("extra_suppliers",[]);
-    if ([...SUPPLIERS_LIST,...existing].find(s=>s.id===fullId)){toast_("Supplier already exists","err");return;}
-    lss("extra_suppliers",[...existing,{id:fullId,name:supForm.name.toUpperCase().trim(),color:supForm.color}]);
-    toast_(`${supForm.name.toUpperCase()} added ✓`);
-    setSupModal(false); setIR(prev=>[...prev]);
-  }
+  // AFTER
+async function saveSupplier() {
+  if (!supForm.id||!supForm.name){toast_("Fill ID and Name","err");return;}
+  const numId  = supForm.id.replace(/\D/g,"");
+  const fullId = `${numId}-${supForm.name.toUpperCase().trim()}`;
+  const existing = ls("extra_suppliers",[]);
+  if ([...SUPPLIERS_LIST,...existing].find(s=>s.id===fullId)){toast_("Supplier already exists","err");return;}
+  await addSupplier({ id:fullId, name:supForm.name.toUpperCase().trim(), color:supForm.color });
+  lss("extra_suppliers",[...existing,{id:fullId,name:supForm.name.toUpperCase().trim(),color:supForm.color}]);
+  toast_(`${supForm.name.toUpperCase()} added ✓`);
+  setSupModal(false); setIR(prev=>[...prev]);
+}
+  
 
   function getRowNum(item) { return inv.findIndex(i=>i.id===item.id)+1; }
 
@@ -1537,7 +1619,7 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
 
       {/* ══════════ TAB 3 — OUTLET INVENTORY ══════════ */}
       {invTab==="outlet" && (
-        <OutletInventoryPanel inv={inv} toast_={toast_} allSupColors={allSupColors}/>
+        <OutletInventoryPanel inv={inv} toast_={toast_} allSupColors={allSupColors} adminOutlets={outletNames}/>
       )}
 
       {/* ══════════ TAB 4 — OUTLET EMPTY INVENTORY ══════════ */}
@@ -1654,7 +1736,7 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
           style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
             borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none",minWidth:180}}>
           <option value="ALL">All Outlets</option>
-          {OUTLETS.map(o=><option key={o}>{o}</option>)}
+          {outletNames.map(o=><option key={o}>{o}</option>)}
         </select>
       </div>
 
@@ -1809,16 +1891,14 @@ export default function InventoryAdmin({ toast_, isAdmin }) {
               </select>
             </div>
           </div>
-          <div className="fg3">
+          <div className="fg">
             <div className="ff"><label>Unit Cost (Rs.)</label>
               <input type="number" value={iForm.unitCost} onChange={e=>setIForm({...iForm,unitCost:e.target.value})} placeholder="0.00"/>
             </div>
             <div className="ff"><label>Selling Price (Rs.)</label>
               <input type="number" value={iForm.sellingPrice} onChange={e=>setIForm({...iForm,sellingPrice:e.target.value})} placeholder="0.00"/>
             </div>
-            <div className="ff"><label>Opening Qty</label>
-              <input type="number" value={iForm.qty} onChange={e=>setIForm({...iForm,qty:e.target.value})} placeholder="0"/>
-            </div>
+            
           </div>
         </Modal>
       )}

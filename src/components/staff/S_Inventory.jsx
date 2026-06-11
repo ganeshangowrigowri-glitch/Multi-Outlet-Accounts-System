@@ -1,9 +1,18 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
-import { ls, lss, fmt, oKey, today } from "../../utils/helpers";
-import { uid, postCash, postGL } from "../../utils/helpers";
+import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
+import { addSale, addCashEntry, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
 import { outletInvKey, outletEmptyInvKey } from "../admin/InventoryAdmin";
+const EMPTY_PURCHASE_SUP_ID = "EMPTY_PURCHASE"; // adjust to match your actual Supabase ID
+
+const MAIN_EMPTY_SUP_IDS = new Set([
+  "2001-DCSL",
+  "2002-LION BREWERY",
+  "2003-UG",
+  "2006-DCSL BEER",
+  "2007-TODDY",
+]);
 
 // ─────────────────────────────────────────────────────────────
 //  OUTLET MAIN INVENTORY
@@ -12,24 +21,25 @@ import { outletInvKey, outletEmptyInvKey } from "../admin/InventoryAdmin";
 //  code to exist under different suppliers (e.g. LION BREWERY
 //  and KASTHURI W/S sharing the same item codes).
 // ─────────────────────────────────────────────────────────────
-function getOutletInventory(outlet) {
-  const master    = ls("inv_main", SEED_INVENTORY);
+  function getOutletInventory(outlet, masterOverride) {
+  const master    = masterOverride || ls("inv_main", SEED_INVENTORY);
   const overrides = ls(outletInvKey(outlet), {});
   return master
     .filter(item => {
       const ovKey = `${item.code}__${item.supplier}`;
       return item.type !== "EM" && !overrides[ovKey]?.hidden;
     })
-    .map(item => {
-      const ovKey = `${item.code}__${item.supplier}`;
-      const ov    = overrides[ovKey];
-      if (!ov) return item;
-      return {
-        ...item,
-        unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
-        sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
-      };
-    });
+    // AFTER
+.map(item => {
+  const ovKey = `${item.code}__${item.supplier}`;
+  const ov    = overrides[ovKey];
+  return {
+    ...item,
+    unitCost:     ov?.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
+    sellingPrice: ov?.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
+    qty:          ov?.qty          !== undefined ? ov.qty          : 0,
+  };
+});
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -66,22 +76,24 @@ const EMPTY_SEED_STAFF = [
 //  Override key is item.id (unique) NOT item.code, because the
 //  same code can exist under different empty suppliers.
 // ─────────────────────────────────────────────────────────────
-function getOutletEmptyInventory(outlet) {
-  let master = ls("inv_empty_v2", null);
-  if (!master || master.length === 0) {
-    lss("inv_empty_v2", EMPTY_SEED_STAFF);
-    master = EMPTY_SEED_STAFF;
-  }
+// AFTER
+function getOutletEmptyInventory(outlet, masterOverride) {
+  const master = masterOverride && masterOverride.length > 0
+    ? masterOverride.filter(i => i.type === "EMP")
+    : EMPTY_SEED_STAFF.filter(i => i.supplier !== "EMPTY PURCHASE");
+
   const overrides = ls(outletEmptyInvKey(outlet), {});
   return master
-    .filter(item => !overrides[item.id]?.hidden)
+    .filter(item => item.supplier !== "EMPTY PURCHASE" && !overrides[`${item.code}__${item.supplier}`]?.hidden)
     .map(item => {
-      const ov = overrides[item.id];
-      if (!ov) return item;
+      const ovKey = `${item.code}__${item.supplier}`;
+      const ov = overrides[ovKey];
       return {
         ...item,
-        unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
-        sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
+        id:           item.id || `${item.supplier}__${item.code}`.replace(/\s/g, "_"),
+        unitCost:     ov?.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
+        sellingPrice: ov?.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
+        qty:          ov?.qty          !== undefined ? ov.qty          : 0,
       };
     });
 }
@@ -95,6 +107,16 @@ function prevDate(dateStr) {
   const d = new Date(dateStr);
   d.setDate(d.getDate() - 1);
   return d.toISOString().slice(0, 10);
+}
+async function propagateOpeningForward(outlet, fromDate, endStockMain, endStockEmp) {
+  for (let i = 1; i <= 30; i++) {
+    const d = new Date(fromDate);
+    d.setDate(d.getDate() + i);
+    const dateStr = d.toISOString().slice(0, 10);
+    const existing = await getOpeningStock(outlet, dateStr);
+    if (existing) break;
+    await saveOpeningStock(outlet, dateStr, endStockMain, endStockEmp);
+  }
 }
 
 function getOpeningForDate(outlet, date, seedMain, seedEmp) {
@@ -182,6 +204,22 @@ function CsTotals({ csData, fmt, physStock }) {
   );
 }
 export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) {
+  const [supOrder, setSupOrder] = useState([
+  "2001-DCSL","2003-UG","2005-ROCKLAND","2004-IDL","2006-DCSL BEER",
+  "2002-LION BREWERY","2007-TODDY","2008-ROYAL CASK","2009-LUXURY BRAND",
+  "2010-B LANKA","2011-USW","2012-PREMERA","2013-JSP","2014-SIGNATURE",
+  "2015-VA","2016-VICTORY","2017-FAVOURITE","2018-FREE LANKA",
+  "2019-BAG","2020-SODA","2021-GOLD LEAF","2022-BITE","2023-KASTHURI W/S",
+]);
+
+useEffect(() => {
+  getSuppliers().then(data => {
+    if (data && data.length > 0) {
+      setSupOrder(data.map(s => s.id));
+    }
+  });
+}, []);
+
 
   const [mainDate,      setMainDate]      = useState(today());
   const [mainSupFilter, setMainSupFilter] = useState("ALL");
@@ -190,6 +228,17 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
   const [csFrom,        setCsFrom]        = useState(() => today().slice(0, 7) + "-01");
   const [csTo,          setCsTo]          = useState(today);
   const [physStock,     setPhysStock]     = useState({});
+  const [dbPurchases, setDbPurchases] = useState([]);
+const [dbTransfers, setDbTransfers] = useState([]);
+const [dbReturns,   setDbReturns]   = useState([]);
+const [dbSales,     setDbSales]     = useState([]);
+
+useEffect(() => {
+  getPurchases(outlet).then(setDbPurchases);
+  getTransfers(outlet).then(setDbTransfers);
+  getReturns(outlet).then(setDbReturns);
+  getSales(outlet).then(setDbSales);
+}, [outlet]);
 
   const mainTableRef = useRef(null);
   const empTableRef  = useRef(null);
@@ -198,8 +247,30 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
   const empScrollBy  = useCallback(d => empTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
 
   // Stable seed references
-  const seedMain = useMemo(() => getOutletInventory(outlet),      [outlet]);
-  const seedEmp  = useMemo(() => getOutletEmptyInventory(outlet), [outlet]);
+  const [masterInv, setMasterInv] = useState(() => ls("inv_main", SEED_INVENTORY));
+
+useEffect(() => {
+  getInventoryMaster().then(data => {
+    if (data && data.length > 0) {
+      
+    // AFTER
+const sorted = [...data].sort((a, b) => {
+  const oi = supOrder.indexOf(a.supplier);
+  const oj = supOrder.indexOf(b.supplier);
+  const supCmp = (oi === -1 ? 999 : oi) - (oj === -1 ? 999 : oj);
+  if (supCmp !== 0) return supCmp;
+  const numA = parseInt((a.code || "").replace(/\D/g, "")) || 0;
+  const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
+  return numA - numB;
+});
+      lss("inv_main", sorted);
+      setMasterInv(sorted);
+    }
+  });
+}, [supOrder]);
+
+const seedMain = useMemo(() => getOutletInventory(outlet, masterInv), [outlet, masterInv]);
+const seedEmp = useMemo(() => getOutletEmptyInventory(outlet, masterInv), [outlet, masterInv]);
 
   // ── Supplier dropdown for Main tab (strip numeric prefix for display) ──
   const mainSuppliers = useMemo(() => {
@@ -208,11 +279,13 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
   }, [seedMain]);
 
   // ── Supplier dropdown for Empty tab (use full supplier name) ──
-  const empSuppliers = useMemo(() => {
-    const sups = seedEmp.map(i => (i.supplier || "").trim() || "EMP");
-    return ["ALL", ...[...new Set(sups)].sort()];
-  }, [seedEmp]);
-
+  // AFTER 
+const empSuppliers = useMemo(() => {
+  const sups = seedEmp
+    .filter(i => i.supplier !== "EMPTY PURCHASE")
+    .map(i => (i.supplier || "").trim() || "EMP");
+  return ["ALL", ...[...new Set(sups)]];
+}, [seedEmp]);
   // ── Main rows state ──
   const [mainRows, setMR] = useState(() =>
     seedMain.map(i => ({
@@ -225,8 +298,11 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
   );
 
   // ── Empty rows state ──
-  const [empRows, setER] = useState(() =>
-    seedEmp.map(e => ({
+  // AFTER
+const [empRows, setER] = useState(() =>
+  seedEmp
+    .filter(e => e.supplier !== "EMPTY PURCHASE")
+    .map(e => ({
       ...e,
       adminSellingPrice: Number(e.sellingPrice) || Number(e.rate) || 0,
       openingStock: Number(e.qty) || 0,
@@ -237,20 +313,42 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
   );
 
   // ── Reload mainRows when outlet or date changes ──
-  useEffect(() => {
-    const lsMain = getOutletInventory(outlet);
-    const lsEmp  = getOutletEmptyInventory(outlet);
-    const opening = getOpeningForDate(outlet, mainDate, lsMain, lsEmp);
-    const savedSale = ls(oKey(outlet, "sales"), [])
-      .find(s => s.date === mainDate && (s.mainRows || []).length > 0);
-    const savedMap = savedSale
-      ? Object.fromEntries((savedSale.mainRows || []).map(r => [r.id, r]))
-      : {};
+useEffect(() => {
+  const lsMain = getOutletInventory(outlet, masterInv);
+  const lsEmp  = getOutletEmptyInventory(outlet);
+
+  // Build outlet baseline from outlet overrides (ov.qty = admin-set opening per outlet)
+  const baseMain = {};
+  lsMain.forEach(i => { baseMain[i.code] = Number(i.qty) || 0; });
+
+  const prevDate = new Date(mainDate);
+  prevDate.setDate(prevDate.getDate() - 1);
+  const yDate = prevDate.toISOString().slice(0, 10);
+
+  (async () => {
+    // 1. Try today's explicit opening from Supabase
+    let opening = await getOpeningStock(outlet, mainDate);
+
+    // 2. Try yesterday's saved opening from Supabase
+    if (!opening) opening = await getOpeningStock(outlet, yDate);
+
+    // 3. Fall back to outlet override qty (set by admin in Tab 3)
+    if (!opening) opening = { main: baseMain, emp: {} };
+    else opening = { main: { ...baseMain, ...opening.main }, emp: opening.emp || {} };
+
+    // 4. Check Supabase sales for today
+    const todaySale = dbSales.find(s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem));
+    const savedMap = todaySale
+  ? Object.fromEntries(
+      (todaySale.items || [])
+        .filter(r => r.isEmptyItem && r.supplier !== "EMPTY PURCHASE")
+        .map(r => [r.id, r])
+    )
+  : {};
 
     setMR(() => lsMain.map(i => {
       const adminSP = Number(i.sellingPrice) || 0;
-      // Opening keyed by code for main items
-      const op = opening.main?.[i.code] ?? Number(i.qty) ?? 0;
+      const op = opening.main?.[i.code] ?? 0;
       const saved = savedMap[i.id];
       if (saved) {
         return {
@@ -270,24 +368,38 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
         sold:"", rate:adminSP, endStock:"",
       };
     }));
-  }, [outlet, mainDate]); // eslint-disable-line
+  })();
+}, [outlet, mainDate, masterInv, dbSales]); // eslint-disable-line
 
   // ── Reload empRows when outlet or empDate changes ──
-  useEffect(() => {
-    const lsMain = getOutletInventory(outlet);
-    const lsEmp  = getOutletEmptyInventory(outlet);
-    const opening = getOpeningForDate(outlet, empDate, lsMain, lsEmp);
-    const savedSale = ls(oKey(outlet, "sales"), [])
-      .find(s => s.date === empDate && (s.empRows || []).length > 0);
-    // Key by unique id — codes repeat across suppliers (DEMP Q under DCSL AND EMPTY PURCHASE)
-    const savedMap = savedSale
-      ? Object.fromEntries((savedSale.empRows || []).map(r => [r.id, r]))
+ // AFTER
+// AFTER
+useEffect(() => {
+  const lsEmp = getOutletEmptyInventory(outlet, masterInv);
+
+  const baseEmp = {};
+  lsEmp.forEach(e => { baseEmp[e.id] = Number(e.qty) || 0; });
+
+  const prevDate = new Date(empDate);
+  prevDate.setDate(prevDate.getDate() - 1);
+  const yDate = prevDate.toISOString().slice(0, 10);
+
+  (async () => {
+    let opening = await getOpeningStock(outlet, empDate);
+    if (!opening) opening = await getOpeningStock(outlet, yDate);
+    if (!opening) opening = { main: {}, emp: baseEmp };
+    else opening = { main: opening.main || {}, emp: { ...baseEmp, ...opening.emp } };
+
+    const todaySale = dbSales.find(s => s.date === empDate && (s.items || []).some(r => r.isEmptyItem));
+    const savedMap = todaySale
+      ? Object.fromEntries((todaySale.items || []).filter(r => r.isEmptyItem).map(r => [r.id, r]))
       : {};
 
-    setER(() => lsEmp.map(e => {
+       setER(() => lsEmp
+       .filter(e => e.supplier !== "EMPTY PURCHASE")
+       .map(e => {
       const adminSP = Number(e.sellingPrice) || Number(e.rate) || 0;
-      // Opening keyed by unique id for empty items
-      const op = opening.emp?.[e.id] ?? Number(e.qty) ?? 0;
+      const op = opening.emp?.[e.id] ?? 0;
       const saved = savedMap[e.id];
       if (saved) {
         return {
@@ -310,35 +422,40 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
         sold:"", rate:adminSP, endStock:"",
       };
     }));
-  }, [outlet, empDate]); // eslint-disable-line
+  })();
+}, [outlet, empDate, dbSales, masterInv]); // eslint-disable-line
 
   // ── Auto-populate Purchase / TransferIn / TransferOut / Returns for Main ──
   useEffect(() => {
     const pV={}, tiV={}, toV={}, rV={};
-    ls(oKey(outlet, "purchases"), [])
+
+    
+    // ── Supabase (new data) ──
+    dbPurchases
       .filter(r => r.date === mainDate)
-      .forEach(rec => (rec.lines || []).forEach(l => {
+      .forEach(rec => (rec.items || []).forEach(l => {
         if (!l.itemCode || l.isEmptyItem) return;
         pV[l.itemCode] = (pV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
       }));
-    ls(oKey(outlet, "transfers"), [])
-      .filter(r => r.date === mainDate && r.type === "in")
-      .forEach(rec => (rec.lines || []).forEach(l => {
+    dbTransfers
+      .filter(r => r.date === mainDate && r.from_outlet_id !== outlet)
+      .forEach(rec => (rec.items || []).forEach(l => {
         if (!l.itemCode) return;
         tiV[l.itemCode] = (tiV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
       }));
-    ls(oKey(outlet, "transfers"), [])
-      .filter(r => r.date === mainDate && r.type === "out")
-      .forEach(rec => (rec.lines || []).forEach(l => {
+    dbTransfers
+      .filter(r => r.date === mainDate && r.from_outlet_id === outlet)
+      .forEach(rec => (rec.items || []).forEach(l => {
         if (!l.itemCode) return;
         toV[l.itemCode] = (toV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
       }));
-    ls(oKey(outlet, "returns"), [])
+    dbReturns
       .filter(r => r.date === mainDate)
-      .forEach(rec => (rec.lines || []).forEach(l => {
+      .forEach(rec => (rec.items || []).forEach(l => {
         if (!l.itemCode) return;
         rV[l.itemCode] = (rV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
       }));
+
     setMR(prev => prev.map(r => ({
       ...r,
       purchase:    pV[r.code]  || 0,
@@ -346,38 +463,41 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
       transferOut: toV[r.code] || 0,
       returns:     rV[r.code]  || 0,
     })));
-  }, [outlet, mainDate]); // eslint-disable-line
+  }, [outlet, mainDate, dbPurchases, dbTransfers, dbReturns]); // eslint-disable-line
 
   // ── Auto-populate Purchase / InvPurchase for Empty ──
   useEffect(() => {
     const codes = new Set(seedEmp.map(e => e.code));
     const pQ = {}, ipQ = {};
-    ls(oKey(outlet, "purchases"), [])
+
+    // ── Supabase only ──
+    dbPurchases
       .filter(r => r.date === empDate)
-      .forEach(rec => (rec.lines || []).forEach(l => {
+      .forEach(rec => (rec.items || []).forEach(l => {
         if (!l.itemCode || !codes.has(l.itemCode)) return;
         const qty = parseFloat(l.qty) || 0;
         if (!qty) return;
-        const sid = rec.supId || rec.supplier || rec.supplierId || "";
-        if (l.emptyRoute === "purchase") {
-          pQ[l.itemCode] = (pQ[l.itemCode] || 0) + qty;
-        } else if (l.emptyRoute === "invPurchase") {
-          ipQ[l.itemCode] = (ipQ[l.itemCode] || 0) + qty;
-        } else {
-          // Route by supplier: EMPTY PURCHASE → purchase col; others → invPurchase col
-          if (sid === "EMPTY PURCHASE") {
-            pQ[l.itemCode]  = (pQ[l.itemCode]  || 0) + qty;
-          } else {
-            ipQ[l.itemCode] = (ipQ[l.itemCode] || 0) + qty;
-          }
-        }
+        const sid = rec.supplier_id || "";
+        // AFTER
+// AFTER — clean, unambiguous routing
+const isEmptyPurchaseSup = sid === EMPTY_PURCHASE_SUP_ID;
+const isMainSup = MAIN_EMPTY_SUP_IDS.has(sid);
+
+if (isEmptyPurchaseSup || l.emptyRoute === "invPurchase") {
+  // Empty Purchase supplier → Invoice Purchase column
+  ipQ[l.itemCode] = (ipQ[l.itemCode] || 0) + qty;
+} else if (isMainSup || l.emptyRoute === "purchase") {
+  // DCSL / UG / Lion / Toddy / DCSL Beer → Purchase column
+  pQ[l.itemCode] = (pQ[l.itemCode] || 0) + qty;
+}
       }));
+
     setER(prev => prev.map(r => ({
       ...r,
       purchase:    pQ[r.code]  || 0,
       invPurchase: ipQ[r.code] || 0,
     })));
-  }, [outlet, empDate]); // eslint-disable-line
+  }, [outlet, empDate, dbPurchases]); // eslint-disable-line
 
   // ─────────────────────────────────────────────────────────
   //  DERIVE FUNCTIONS
@@ -463,108 +583,93 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
   // ─────────────────────────────────────────────────────────
-  function saveMainSale() {
-    const totalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
+  async function saveMainSale() {
+  const totalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
 
-    // Embed derived stkSE into each row so Current Status can read it back
-    const mainRowsWithDerived = mainRows.map(r => {
-      const { stkSE, endStock } = deriveMain(r);
-      return { ...r, stkSE, endStock };
-    });
+  // Embed derived stkSE and endStock into each row
+  const mainRowsWithDerived = mainRows.map(r => {
+    const { stkSE, endStock } = deriveMain(r);
+    return { ...r, stkSE, endStock };
+  });
 
-    const allSalesM = ls(oKey(outlet, "sales"), []);
-    const existingIdx = allSalesM.findIndex(
-      s => s.date === mainDate && (s.mainRows || []).length > 0
-    );
-    if (existingIdx >= 0) {
-      allSalesM[existingIdx] = { ...allSalesM[existingIdx], mainRows: mainRowsWithDerived, totalSale, by:user.username };
-    } else {
-      allSalesM.unshift({
-        id: uid(), date: mainDate,
-        mainRows: mainRowsWithDerived, empRows: [], totalSale,
-        outlet, by: user.username,
-      });
-    }
-    lss(oKey(outlet, "sales"), allSalesM);
+  // Carry end stock to next day's opening (keyed by code for main)
+  const nd = new Date(mainDate);
+  nd.setDate(nd.getDate() + 1);
+  const nextDay = nd.toISOString().slice(0, 10);
+  const om = {};
+  mainRowsWithDerived.forEach(r => {
+    om[r.code] = r.endStock !== "" ? r.endStock : 0;
+  });
 
-    // Carry end stock to next day's opening (keyed by code for main)
-    const nd = new Date(mainDate);
-    nd.setDate(nd.getDate() + 1);
-    const nextDay = nd.toISOString().slice(0, 10);
-    const om = {};
-    mainRowsWithDerived.forEach(r => { om[r.code] = r.endStock; });
-    lss(
-      oKey(outlet, `opening_${nextDay}`),
-      { ...ls(oKey(outlet, `opening_${nextDay}`), { main:{}, emp:{} }), main: om }
-    );
+  // Save opening for next day + propagate forward for past/future date support
+  await saveOpeningStock(outlet, nextDay, om, null);
+ await propagateOpeningForward(outlet, mainDate, om, null);
+  await propagateOpeningForward(outlet, mainDate, om, null);
 
-    // Cash & GL postings
-    postCash(outlet, { date:mainDate, description:"Daily Sale", type:"in", amount:totalSale });
-    postGL(outlet, { date:mainDate, accountId:"4001", description:"Sales Revenue", debit:0, credit:totalSale });
+  // Cash & GL postings
+  await addSale(outlet, {
+    date: mainDate,
+    items: mainRowsWithDerived,
+    total: totalSale,
+    paymentMethod: "cash",
+  });
+  await addCashEntry(outlet, {
+    date: mainDate,
+    description: "Daily Sale",
+    type: "in",
+    debit: totalSale,
+    credit: 0,
+  });
+  await addGLEntry(outlet, {
+    date: mainDate,
+    account_id: "4001",
+    description: "Sales Revenue",
+    debit: 0,
+    credit: totalSale,
+    source: "sale",
+  });
 
-    toast_("Main stock daily sale saved ✓");
-  }
+  // ✅ Re-fetch so rows stay visible after save
+  const freshSales = await getSales(outlet);
+  setDbSales(freshSales);
 
+  toast_("Main stock daily sale saved ✓");
+}
   // ─────────────────────────────────────────────────────────
   //  SAVE EMPTY DAILY SALE
   // ─────────────────────────────────────────────────────────
-  function saveEmpSale() {
-    const allSalesE = ls(oKey(outlet, "sales"), []);
-    const existingIdx = allSalesE.findIndex(
-      s => s.date === empDate && (s.empRows || []).length > 0
-    );
-    if (existingIdx >= 0) {
-      allSalesE[existingIdx] = { ...allSalesE[existingIdx], empRows, by:user.username };
-    } else {
-      allSalesE.unshift({
-        id: uid(), date: empDate,
-        mainRows: [], empRows, totalSale: 0,
-        outlet, by: user.username,
-      });
-    }
-    lss(oKey(outlet, "sales"), allSalesE);
+  // AFTER
+   async function saveEmpSale() {
+  const nd = new Date(empDate);
+  nd.setDate(nd.getDate() + 1);
+  const nextDay = nd.toISOString().slice(0, 10);
+  const oe = {};
+  empRows.forEach(r => { oe[r.id] = deriveEmp(r).endStock !== "" ? deriveEmp(r).endStock : 0; });
+  await saveOpeningStock(outlet, nextDay, null, oe);
+await propagateOpeningForward(outlet, empDate, null, oe);
+  const empRowsWithDerived = empRows.map(r => {
+    const d = deriveEmp(r);
+    return { ...r, ...d, isEmptyItem: true };
+  });
+  await addSale(outlet, { date: empDate, items: empRowsWithDerived, total: 0, paymentMethod: "empty" });
 
-    // Carry end stock to next day's opening (keyed by unique id for empty)
-    const nd = new Date(empDate);
-    nd.setDate(nd.getDate() + 1);
-    const nextDay = nd.toISOString().slice(0, 10);
-    const oe = {};
-    empRows.forEach(r => { oe[r.id] = deriveEmp(r).endStock; });
-    lss(
-      oKey(outlet, `opening_${nextDay}`),
-      { ...ls(oKey(outlet, `opening_${nextDay}`), { main:{}, emp:{} }), emp: oe }
-    );
-
-    // Cash postings for empty items
-    empRows.forEach(e => {
-      const s    = parseFloat(e.sold)    || 0;
-      const rr   = parseFloat(e.return_) || 0;
-      const p    = parseFloat(e.purchase)|| 0;
-      const rate = parseFloat(e.rate)    || 0;
-
-      if (s > 0) postCash(outlet, {
-        date: empDate,
-        description: `Empty Sold: ${e.name} (${e.supplier})`,
-        type: "in",
-        amount: s * rate,
-      });
-      if (rr > 0) postCash(outlet, {
-        date: empDate,
-        description: `Empty Return: ${e.name} (${e.supplier})`,
-        type: "out",
-        amount: rr * rate,
-      });
-      if (p > 0) postCash(outlet, {
-        date: empDate,
-        description: `Empty Purchase: ${e.name} (${e.supplier})`,
-        type: "out",
-        amount: p * rate,
-      });
-    });
-
-    toast_("Empty stock daily sale saved ✓");
+  for (const e of empRows) {
+    const s    = parseFloat(e.sold)    || 0;
+    const rr   = parseFloat(e.return_) || 0;
+    const p    = parseFloat(e.purchase)|| 0;
+    const rate = parseFloat(e.rate)    || 0;
+    if (s > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Sold: ${e.name} (${e.supplier})`, debit: s * rate, credit: 0 });
+    if (rr > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Return: ${e.name} (${e.supplier})`, debit: 0, credit: rr * rate });
+    if (p > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Purchase: ${e.name} (${e.supplier})`, debit: 0, credit: p * rate });
   }
 
+  // ✅ Re-fetch so rows stay visible after save
+  const [freshSales] = await Promise.all([getSales(outlet)]);
+  setDbSales(freshSales);
+
+  toast_("Empty stock daily sale saved ✓");
+  }
+   
   // ─────────────────────────────────────────────────────────
   //  CURRENT STATUS DATA (Tab 5 logic)
   //  Total Bottle Sale = Opening + Total Purchase − In Hand Stock
@@ -572,87 +677,91 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
   //  Profit            = Margin × Total Bottle Sale
   //  Margin            = Selling Price − Unit Cost
   // ─────────────────────────────────────────────────────────
-  const inv = useMemo(() => getOutletInventory(outlet), [outlet]);
+  // AFTER
+const inv = useMemo(() => getOutletInventory(outlet, masterInv), [outlet, masterInv]);
 
-  const csData = useMemo(() => inv.map(item => {
-  const sp = Number(item.sellingPrice) || 0;
+const csData = useMemo(() => inv.map(item => {
   const uc = Number(item.unitCost)     || 0;
-  const mg = sp - uc; // margin = selling price − unit cost
+  const sp = Number(item.sellingPrice) || 0;
+  const mg = sp - uc;
 
-  // ── Aggregate from daily sales in date range ──
-  let totalBottleSold = 0; // sum of sold qty (for reference)
-  let adjStock        = 0;
-  let firstOpening    = null;
-  let lastEndStock    = null;
-
-  const salesInRange = ls(oKey(outlet, "sales"), [])
-    .filter(s => s.date && s.date >= csFrom && s.date <= csTo)
+  // ── All daily sales for this item in the date range, sorted by date ──
+  const salesInRange = dbSales
+    .filter(s => s.date >= csFrom && s.date <= csTo)
     .sort((a, b) => a.date.localeCompare(b.date));
 
-  salesInRange.forEach(s => {
-    const row = (s.mainRows || []).find(r => r.code === item.code && r.id === item.id);
-    if (row) {
-      // First opening in range
-      if (firstOpening === null) {
-        firstOpening = parseFloat(row.openingStock) || 0;
-      }
-      totalBottleSold += parseFloat(row.sold)   || 0;
-      adjStock        += parseFloat(row.stkSE)  || 0;  // now populated from saved row
-      const es = parseFloat(row.endStock);
-      if (!isNaN(es)) lastEndStock = es;
+  // ── Last known end stock (= in-hand stock) ──
+  let lastEndStock = null;
+  for (let i = salesInRange.length - 1; i >= 0; i--) {
+    const row = (salesInRange[i].items || []).find(
+      r => r.code === item.code && r.id === item.id && !r.isEmptyItem
+    );
+    if (row && row.endStock !== "" && row.endStock !== undefined) {
+      lastEndStock = parseFloat(row.endStock) ?? null;
+      break;
     }
-  });
+  }
 
-  // ── Purchases in range ──
+  // ── First opening in range ──
+  let firstOpening = null;
+  if (salesInRange.length > 0) {
+    const firstRow = (salesInRange[0].items || []).find(
+      r => r.code === item.code && r.id === item.id && !r.isEmptyItem
+    );
+    if (firstRow) firstOpening = Number(firstRow.openingStock) ?? null;
+  }
+
+  // ── Purchases ──
   let totalPurchase = 0;
-  ls(oKey(outlet, "purchases"), [])
-    .filter(p => p.date && p.date >= csFrom && p.date <= csTo)
-    .forEach(p => (p.lines || []).forEach(l => {
+  dbPurchases
+    .filter(p => p.date >= csFrom && p.date <= csTo)
+    .forEach(p => (p.items || []).forEach(l => {
       if (l.itemCode === item.code && !l.isEmptyItem)
         totalPurchase += parseFloat(l.qty) || 0;
     }));
 
-  // ── Transfers in range ──
+  // ── Transfers In ──
   let transferIn = 0;
-  ls(oKey(outlet, "transfers"), [])
-    .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.type === "in")
-    .forEach(t => (t.lines || []).forEach(l => {
+  dbTransfers
+    .filter(t => t.date >= csFrom && t.date <= csTo && t.from_outlet_id !== outlet)
+    .forEach(t => (t.items || []).forEach(l => {
       if (l.itemCode === item.code) transferIn += parseFloat(l.qty) || 0;
     }));
 
+  // ── Transfers Out ──
   let transferOut = 0;
-  ls(oKey(outlet, "transfers"), [])
-    .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.type === "out")
-    .forEach(t => (t.lines || []).forEach(l => {
+  dbTransfers
+    .filter(t => t.date >= csFrom && t.date <= csTo && t.from_outlet_id === outlet)
+    .forEach(t => (t.items || []).forEach(l => {
       if (l.itemCode === item.code) transferOut += parseFloat(l.qty) || 0;
     }));
 
-  // ── Returns in range ──
+  // ── Returns ──
   let totalReturn = 0;
-  ls(oKey(outlet, "returns"), [])
-    .filter(r => r.date && r.date >= csFrom && r.date <= csTo)
-    .forEach(r => (r.lines || []).forEach(l => {
+  dbReturns
+    .filter(r => r.date >= csFrom && r.date <= csTo)
+    .forEach(r => (r.items || []).forEach(l => {
       if (l.itemCode === item.code) totalReturn += parseFloat(l.qty) || 0;
     }));
 
-  // ── In Hand Stock = last known end stock from daily sale ──
-  const inHandStock = lastEndStock !== null ? lastEndStock : 0;
+  const inHandStock   = lastEndStock  !== null ? lastEndStock  : 0;
+  const opening       = firstOpening  !== null ? firstOpening  : (Number(item.qty) || 0);
 
-  // ── Opening = first opening found in range (fallback: seed qty) ──
-  const opening = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
-
-  // ── Total Bottle Sale = Opening + Total Purchase − In Hand Stock ──
-  // (doc formula; transfers & returns are internal movements, not added here)
   const totalBottleSale = opening + totalPurchase - inHandStock;
+  const physicalStock   = inHandStock * uc;
+  const totalSaleAmt    = totalBottleSale - sp;   
+  const profit          = mg * totalBottleSale;
 
-  // ── Physical Stock = End Stock × Unit Cost ──
-  const physicalStock = inHandStock * uc;
-
-  // ── Total Sale = Total Bottle Sale -  Selling Price (outlet-assigned) ──
-  const totalSaleAmt = totalBottleSale - sp;
-
-  // ── Profit = Margin × Total Bottle Sale ──
-  const profit = mg * totalBottleSale;
+  // ── Adj to stock (stock short/excess) ──
+  // Last saved stkSE for this item in range, or 0
+  let adjStock = 0;
+  if (salesInRange.length > 0) {
+    const lastSale = salesInRange[salesInRange.length - 1];
+    const lastRow  = (lastSale.items || []).find(
+      r => r.code === item.code && r.id === item.id && !r.isEmptyItem
+    );
+    if (lastRow?.stkSE !== undefined) adjStock = lastRow.stkSE || 0;
+  }
 
   const pk = `${item.id}_${csFrom}_${csTo}`;
 
@@ -671,12 +780,14 @@ export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) 
     adjStock,
     profit,
     margin: mg,
+    unitCost: uc,
+    sellingPrice: sp,
     physKey: pk,
   };
 }).filter(r =>
   r.totalBottleSale > 0 || r.totalPurchase > 0 ||
   r.transferIn > 0 || r.transferOut > 0 || r.totalReturn > 0
-), [inv, outlet, csFrom, csTo, physStock]);
+), [inv, outlet, csFrom, csTo, physStock, dbSales, dbPurchases, dbTransfers, dbReturns]);
   // ─────────────────────────────────────────────────────────
   //  FILTERED VIEWS
   // ─────────────────────────────────────────────────────────

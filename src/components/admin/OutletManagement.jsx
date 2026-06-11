@@ -1,14 +1,20 @@
 import { useState } from "react";
 import { I } from "../../utils/icons";
 
-export default function OutletManagement({ outlets, setOutlets, clerks, toast_ }) {
+const clerkAtOutlet = (c, o) => {
+  const list = Array.isArray(c.outlets) ? c.outlets : c.outlet ? [c.outlet] : [];
+  return list.includes(o);
+};
+
+export default function OutletManagement({ outlets, onAddOutlet, onDeleteOutlet, clerks, toast_ }) {
   const [newOutlet, setNewOutlet] = useState("");
 
-  function addOutlet() {
+  async function addOutlet() {
     const n = newOutlet.trim().toUpperCase();
     if (!n) return;
     if (outlets.includes(n)) { toast_("Already exists","err"); return; }
-    setOutlets([...outlets, n]);
+    const result = await onAddOutlet(n);
+    if (!result?.ok) { toast_(result?.message || "Failed to save outlet", "err"); return; }
     setNewOutlet("");
     toast_(`"${n}" added ✓`);
   }
@@ -28,7 +34,7 @@ export default function OutletManagement({ outlets, setOutlets, clerks, toast_ }
         <div className="chd"><h3>All Outlets</h3><p>{outlets.length} registered</p></div>
         <div className="ogrid">
           {outlets.map(o => {
-            const n = clerks.filter(c => c.outlet === o).length;
+            const n = clerks.filter(c => clerkAtOutlet(c, o)).length;
             return (
               <div className="ocard" key={o}>
                 <div className="onum">{outlets.indexOf(o)+1}</div>
@@ -36,10 +42,11 @@ export default function OutletManagement({ outlets, setOutlets, clerks, toast_ }
                   <div className="oname">{o}</div>
                   <div className="osub">{n} clerk{n!==1?"s":""}</div>
                 </div>
-                <button className="btndel" onClick={()=>{
-                  if(clerks.some(c=>c.outlet===o)){toast_("Clerks assigned","err");return;}
+                <button className="btndel" onClick={async ()=>{
+                  if(clerks.some(c=>clerkAtOutlet(c,o))){toast_("Clerks assigned","err");return;}
                   if(!confirm(`Remove "${o}"?`))return;
-                  setOutlets(outlets.filter(x=>x!==o));
+                  const result = await onDeleteOutlet(o);
+                  if (!result?.ok) { toast_(result?.message || "Failed to remove outlet", "err"); return; }
                   toast_("Removed");
                 }}>{I.trash}</button>
               </div>

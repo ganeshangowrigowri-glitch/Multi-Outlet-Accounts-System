@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { deleteClerk } from "../../db";
 import { I } from "../../utils/icons";
 import { DESIGNATIONS, ACCESS_OPTIONS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -48,7 +49,7 @@ export default function UserManagement({ clerks, setClerks, outlets, toast_ }) {
       if (clerks.find(c => c.username.toLowerCase() === form.username.toLowerCase())) {
         toast_("Username exists", "err"); return;
       }
-      setClerks([...clerks, { ...saveData, id: Date.now() }]);
+      setClerks([...clerks, { ...saveData }]);
       toast_(`"${form.username}" added ✓`);
     } else {
       setClerks(clerks.map(c => c.id === modal.id ? { ...c, ...saveData } : c));
@@ -110,11 +111,12 @@ export default function UserManagement({ clerks, setClerks, outlets, toast_ }) {
                   <td>
                     <div style={{display:"flex",gap:2}}>
                       <button className="btngh btnsm" onClick={()=>openEdit(c)}>{I.edit}</button>
-                      <button className="btndel btnsm" onClick={()=>{
-                        if(!confirm(`Remove "${c.username}"?`))return;
-                        setClerks(clerks.filter(x=>x.id!==c.id));
-                        toast_("Removed");
-                      }}>{I.trash}</button>
+                      <button className="btndel btnsm" onClick={async ()=>{
+                       if(!confirm(`Remove "${c.username}"?`))return;
+                       await deleteClerk(c.id);
+                       setClerks(clerks.filter(x=>x.id!==c.id));
+                       toast_("Removed");
+                       }}>{I.trash}</button>
                     </div>
                   </td>
                 </tr>

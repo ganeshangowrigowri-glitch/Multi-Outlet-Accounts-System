@@ -1,21 +1,33 @@
 // src/components/staff/S_AP.jsx
-import { useState, useMemo } from "react";
-import { ls, lss, fmt, oKey, today } from "../../utils/helpers";
-import { uid, postCash, postBank, postGL } from "../../utils/helpers";
+import { useState,useEffect, useMemo } from "react";
+import { fmt, today } from "../../utils/helpers";
+import {supabase} from "../../supabase";
 import { I } from "../../utils/icons";
-import { SUPPLIERS_LIST } from "../../data/seeds";
-
-const BANK_KEY = "admin_bank_accounts";
+import { addAPPayment, addCashEntry, addBankEntry, addGLEntry } from "../../db";
 
 export default function S_AP({ outlet, user, toast_ }) {
 
-  const [subTab,   setSubTab] = useState("sup");
-  const [invoices, setInvR]   = useState(() => ls(oKey(outlet, "ap_invoices"), []));
-  const [payments, setPayR]   = useState(() => ls(oKey(outlet, "ap_payments"), []));
+  const [subTab,    setSubTab]   = useState("sup");
+  const [invoices,  setInvR]     = useState([]);
+  const [payments,  setPayR]     = useState([]);
+  const [suppliers, setSuppliers] = useState([]);
+  useEffect(() => {
+  supabase.from("ap_invoices").select("*").eq("outlet_id", outlet)
+    .order("date", { ascending: false })
+    .then(({ data }) => { if (data) setInvR(data); });
+
+  supabase.from("ap_payments").select("*").eq("outlet_id", outlet)
+    .order("date", { ascending: false })
+    .then(({ data }) => { if (data) setPayR(data); });
+
+  supabase.from("suppliers").select("*")
+    .then(({ data }) => { if (data) setSuppliers(data); });
+}, [outlet]);
+
 
   const [pf, setPf] = useState({
     date:    today(),
-    supId:   SUPPLIERS_LIST[0].id,
+    supId: "",
     invDate: today(),
     invNo:   "",
     invAmt:  "",
@@ -26,22 +38,31 @@ export default function S_AP({ outlet, user, toast_ }) {
     checkNo:     "",
     lateCharge:  "",
   });
+   
+  const [aged, setAged] = useState("");
 
-  const [aged, setAged] = useState(SUPPLIERS_LIST[0].id);
+useEffect(() => {
+  if (suppliers.length > 0 && !aged) setAged(suppliers[0].id);
+}, [suppliers]);
 
-  function setInv(d) { setInvR(d); lss(oKey(outlet, "ap_invoices"), d); }
-  function setPay(d) { setPayR(d); lss(oKey(outlet, "ap_payments"), d); }
+  const [outletBanks, setOutletBanks] = useState([]);
+  useEffect(() => {
+  if (suppliers.length > 0 && !pf.supId) {
+    setPf(p => ({ ...p, supId: suppliers[0].id }));
+  }
+}, [suppliers]);
 
-  // ── Bank accounts for this outlet (from Admin → Bank Master) ──
-  const outletBanks = useMemo(() => {
-    const allBanks = ls(BANK_KEY, []);
-    return allBanks.filter(b => b.outlet === outlet && b.active && !b.hidden);
-  }, [outlet]);
-
+useEffect(() => {
+  supabase.from("bank_accounts")
+    .select("*")
+    .eq("outlet_id", outlet)
+    .eq("active", true)
+    .then(({ data }) => { if (data) setOutletBanks(data); });
+}, [outlet]);
   // ── Invoice numbers filtered by supplier + invDate ──
   const filteredInvoices = useMemo(() => {
     return invoices.filter(inv =>
-      inv.supId === pf.supId &&
+      inv.supplier_id === pf.supId &&
       inv.date  === pf.invDate
     );
   }, [invoices, pf.supId, pf.invDate]);
@@ -56,66 +77,73 @@ export default function S_AP({ outlet, user, toast_ }) {
   // When an invoice is selected → auto-fill amount
   function handleInvNoChange(invNo) {
     if (!invNo) { setPf(p => ({ ...p, invNo: "", invAmt: "" })); return; }
-    const matched = filteredInvoices.find(i => i.invoiceNo === invNo);
-    const amt = matched ? (matched.grandTotal ?? matched.subtotal ?? "") : "";
+    const matched = filteredInvoices.find(i => i.ref === invNo);
+    const amt = matched ? (matched.amount ?? "") : "";
     setPf(p => ({ ...p, invNo, invAmt: amt !== "" ? String(amt) : "" }));
   }
+async function savePayment() {
+  if (!pf.invNo || !pf.payAmt) { toast_("Fill invoice no & payment amount", "err"); return; }
+  if (pf.payType === "Bank" && !pf.bankId) { toast_("Select a bank account", "err"); return; }
 
-  function savePayment() {
-    if (!pf.invNo || !pf.payAmt) { toast_("Fill invoice no & payment amount", "err"); return; }
-    if (pf.payType === "Bank" && !pf.bankId) { toast_("Select a bank account", "err"); return; }
+  const pa   = parseFloat(pf.payAmt)   || 0;
+  const disc = parseFloat(pf.discount) || 0;
+  const bankAcc = outletBanks.find(b => b.id === pf.bankId);
 
-    const pa   = parseFloat(pf.payAmt)   || 0;
-    const disc = parseFloat(pf.discount) || 0;
-    const bankAcc = outletBanks.find(b => b.id === pf.bankId);
+await addAPPayment(outlet, {
+  date:        pf.date,
+  invoiceId:   pf.invNo,
+  amount:      pa,
+  method:      pf.payType,
+  ref:         pf.checkNo || "",
+  supplierId:  pf.supId,
+  invAmt:      parseFloat(pf.invAmt) || 0,
+  discount:    disc,
+  lateCharge:  parseFloat(pf.lateCharge) || 0,
+  bankName:    bankAcc?.bank || "",
+  accountNo:   bankAcc?.account_no || "",
+});
 
-    const entry = {
-      id:        uid(),
-      date:      pf.date,
-      supId:     pf.supId,
-      invDate:   pf.invDate,
-      invNo:     pf.invNo,
-      invAmt:    parseFloat(pf.invAmt) || 0,
-      payType:   pf.payType,
-      bankId:    pf.payType === "Bank" ? pf.bankId : "",
-      bankName:  pf.payType === "Bank" ? (bankAcc?.bank || "") : "",
-      accountNo: pf.payType === "Bank" ? (bankAcc?.accountNo || "") : "",
-      payAmt:    pa,
-      discount:  disc,
-      checkNo:   pf.checkNo || "",
-      lateCharge: parseFloat(pf.lateCharge) || 0,
-      outlet,
-      by:        user.username,
-    };
-
-    setPay([...payments, entry]);
-
-    if (pf.payType === "Cash") {
-      postCash(outlet, { date: pf.date, description: `AP Payment ${pf.supId} ${pf.invNo}`, type: "out", amount: pa });
-    }
-    if (pf.payType === "Bank") {
-      postBank(outlet, {
-        date: pf.date, description: `AP Payment ${pf.supId} ${pf.invNo}`,
-        type: "out", amount: pa,
-        bankName: bankAcc?.bank || "", accountNo: bankAcc?.accountNo || "",
-        by: user.username,
-      });
-    }
-
-    postGL(outlet, { date: pf.date, accountId: "2000", description: `AP Payment ${pf.supId}`, debit: pa, credit: 0 });
-
-    toast_("Payment saved ✓");
-    setPf(p => ({ ...p, invNo: "", invAmt: "", payAmt: "", discount: "", checkNo: "", lateCharge: "" }));
+  if (pf.payType === "Cash") {
+    await addCashEntry(outlet, {
+      date: pf.date,
+      description: `AP Payment ${pf.supId} ${pf.invNo}`,
+      type: "out", debit: 0, credit: pa,
+    });
   }
+  if (pf.payType === "Bank") {
+    await addBankEntry(outlet, {
+      date: pf.date,
+      description: `AP Payment ${pf.supId} ${pf.invNo}`,
+      type: "out", debit: 0, credit: pa,
+    });
+  }
+
+  await addGLEntry(outlet, {
+    date: pf.date,
+    account_id: "2000",
+    description: `AP Payment ${pf.supId}`,
+    debit: pa, credit: 0, source: "ap_payment",
+  });
+
+  // Refresh payments
+  const { data } = await supabase.from("ap_payments")
+    .select("*").eq("outlet_id", outlet)
+    .order("date", { ascending: false });
+  if (data) setPayR(data);
+
+  toast_("Payment saved ✓");
+  setPf(p => ({ ...p, invNo: "", invAmt: "", payAmt: "", discount: "", checkNo: "", lateCharge: "" }));
+}
+  
 
   // ── Aged analysis ──
   const agedData = () => {
     const b = { o7: 0, d815: 0, d1521: 0, o22: 0 };
-    invoices.filter(i => i.supId === aged).forEach(inv => {
+    invoices.filter(i => i.supplier_id === aged).forEach(inv => {
       const d   = parseInt((inv.date || "").slice(8, 10)) || 0;
-      const rem = inv.grandTotal - payments
+      const rem = inv.amount - payments
         .filter(p => p.invNo === inv.invNo)
-        .reduce((a, p) => a + p.payAmt, 0);
+        .reduce((a, p) => a + p.amount, 0);
       if (rem <= 0) return;
       if      (d >= 1  && d <= 7)  b.o22   += rem;
       else if (d >= 8  && d <= 14) b.d1521 += rem;
@@ -126,8 +154,8 @@ export default function S_AP({ outlet, user, toast_ }) {
   };
 
   const bal = v => {
-    const t = invoices.filter(i => i.supId === v).reduce((a, i) => a + i.grandTotal, 0);
-    const p = payments.filter(p => p.supId === v).reduce((a, p) => a + p.payAmt + p.discount, 0);
+    const t = invoices.filter(i => i.supplier_id === v).reduce((a, i) => a + Number(i.amount), 0);
+    const p = payments.filter(p => p.supplier_id === v).reduce((a, p) => a + p.amount + p.discount, 0);
     return t - p;
   };
 
@@ -156,14 +184,14 @@ export default function S_AP({ outlet, user, toast_ }) {
               </tr>
             </thead>
             <tbody>
-              {SUPPLIERS_LIST.map(s => {
+              {suppliers.map(s => {
                 const b = bal(s.id);
                 return (
                   <tr key={s.id}>
                     <td className="mono">{s.id}</td>
                     <td className="bold">{s.name}</td>
-                    <td className="rt mono">Rs.{fmt(invoices.filter(i => i.supId === s.id).reduce((a, i) => a + i.grandTotal, 0))}</td>
-                    <td className="rt mono cg">Rs.{fmt(payments.filter(p => p.supId === s.id).reduce((a, p) => a + p.payAmt + p.discount, 0))}</td>
+                    <td className="rt mono">Rs.{fmt(invoices.filter(i => i.supplier_id === s.id).reduce((a, i) => a + i.grandTotal, 0))}</td>
+                    <td className="rt mono cg">Rs.{fmt(payments.filter(p => p.supplier_id === s.id).reduce((a, p) => a + p.amount + p.discount, 0))}</td>
                     <td className="rt mono bold" style={{ color: b > 0 ? "var(--red)" : "var(--grn)" }}>Rs.{fmt(b)}</td>
                     <td><span className={`badge ${b > 0 ? "ba" : "bg"}`}>{b > 0 ? "Outstanding" : "Settled"}</span></td>
                   </tr>
@@ -192,7 +220,7 @@ export default function S_AP({ outlet, user, toast_ }) {
                 <div className="ff">
                   <label>Supplier</label>
                   <select value={pf.supId} onChange={e => handleSupChange(e.target.value)}>
-                    {SUPPLIERS_LIST.map(s => <option key={s.id} value={s.id}>{s.id}</option>)}
+                    {suppliers.map(s => <option key={s.id} value={s.id}>{s.id}</option>)}
                   </select>
                 </div>
 
@@ -212,7 +240,7 @@ export default function S_AP({ outlet, user, toast_ }) {
                   >
                     <option value="">Select invoice…</option>
                     {filteredInvoices.map(inv => (
-                      <option key={inv.id} value={inv.invoiceNo}>{inv.invoiceNo}</option>
+                      <option key={inv.id} value={inv.ref}>{inv.ref}</option>
                     ))}
                   </select>
                   {filteredInvoices.length === 0 && (
@@ -262,7 +290,7 @@ export default function S_AP({ outlet, user, toast_ }) {
                         <option value="">Select bank account…</option>
                         {outletBanks.map(b => (
                           <option key={b.id} value={b.id}>
-                            {b.bank} — {b.accountNo} ({b.accountName})
+                            {b.bank} — {b.account_no} ({b.account_name})
                           </option>
                         ))}
                       </select>
@@ -353,7 +381,7 @@ export default function S_AP({ outlet, user, toast_ }) {
             <label style={{ fontSize: 11, fontWeight: 600, color: "var(--mut)" }}>Supplier:</label>
             <select value={aged} onChange={e => setAged(e.target.value)}
               style={{ padding: "5px 9px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)", outline: "none" }}>
-              {SUPPLIERS_LIST.map(s => <option key={s.id} value={s.id}>{s.id} — {s.name}</option>)}
+              {suppliers.map(s => <option key={s.id} value={s.id}>{s.id} — {s.name}</option>)}
             </select>
           </div>
 
@@ -369,7 +397,7 @@ export default function S_AP({ outlet, user, toast_ }) {
 
           <div className="card">
             <div className="chd">
-              <h3>Aged Payables — {SUPPLIERS_LIST.find(s => s.id === aged)?.name}</h3>
+              <h3>Aged Payables — {suppliers.find(s => s.id === aged)?.name}</h3>
               <p>As of {today()}</p>
             </div>
             <table className="tbl">
@@ -381,20 +409,20 @@ export default function S_AP({ outlet, user, toast_ }) {
                 </tr>
               </thead>
               <tbody>
-                {invoices.filter(i => i.supId === aged).length === 0 && (
+                {invoices.filter(i => i.supplier_id === aged).length === 0 && (
                   <tr><td colSpan={7}><div className="empty">No invoices for this supplier.</div></td></tr>
                 )}
-                {invoices.filter(i => i.supId === aged).map(inv => {
-                  const paid = payments.filter(p => p.invNo === inv.invNo && p.supId === aged).reduce((a, p) => a + p.payAmt, 0);
-                  const b    = inv.grandTotal - paid;
+                {invoices.filter(i => i.supplier_id === aged).map(inv => {
+                  const paid = payments.filter(p => p.invNo === inv.invNo && p.supplier_id === aged).reduce((a, p) => a + p.amount, 0);
+                  const b    = inv.amount - paid;
                   const d    = parseInt((inv.date || "").slice(8, 10)) || 0;
                   const bkt  = d >= 1 && d <= 7 ? "Over 22" : d >= 8 && d <= 14 ? "15–21" : d >= 15 && d <= 21 ? "8–14" : "0–7";
                   return (
                     <tr key={inv.id}>
-                      <td className="mono">{inv.invoiceNo}</td>
+                      <td className="mono">{inv.ref}</td>
                       <td className="mono">{inv.date}</td>
                       <td>{d}</td>
-                      <td className="rt mono">Rs.{fmt(inv.grandTotal)}</td>
+                      <td className="rt mono">Rs.{fmt(inv.amount)}</td>
                       <td className="rt mono cg">Rs.{fmt(paid)}</td>
                       <td className="rt mono bold" style={{ color: b > 0 ? "var(--red)" : "var(--grn)" }}>Rs.{fmt(b)}</td>
                       <td><span className={`badge ${bkt === "0–7" ? "bg" : bkt === "Over 22" ? "ba" : "bb"}`}>{bkt}</span></td>

@@ -1,42 +1,71 @@
 // src/components/staff/S_Expenses.jsx
-import { useState } from "react";
-import { ls, lss, fmt, oKey, today, monthOf } from "../../utils/helpers";
-import { uid, postCash, postBank, postGL } from "../../utils/helpers";
+import { useState, useEffect } from "react";
+import { fmt, today, monthOf } from "../../utils/helpers";
 import { I } from "../../utils/icons";
-import { COA_DEF } from "../../data/seeds";
+import { supabase } from "../../supabase";
+
 
 export default function S_Expenses({ outlet, user, toast_ }) {
 
-  const accounts = ls("coa_accounts", COA_DEF);
-  const expAccs  = accounts.filter(a => a.id >= "5500" && a.id <= "5999");
+  const [accounts, setAccounts] = useState([]);
+  const expAccs  = accounts.filter(a => a.id >= "5500" && a.id <= "5999" && a.id !=="5500");
+  useEffect(() => {
+  supabase.from("coa_accounts").select("*").then(({ data }) => {
+    if (data) setAccounts(data);
+  });
+}, []);
 
   const [date,      setDate]      = useState(today());
   const [accId,     setAccId]     = useState(expAccs[0]?.id || "5651");
   const [desc,      setDesc]      = useState("");
   const [amount,    setAmount]    = useState("");
   const [payMethod, setPayMethod] = useState("Cash");
-  const [records,   setRec]       = useState(() => ls(oKey(outlet, "expenses"), []));
+  const [records, setRec] = useState([]);
+  useEffect(() => {
+  supabase.from("expenses")
+    .select("*")
+    .eq("outlet_id", outlet)
+    .order("date", { ascending: false })
+    .then(({ data }) => { if (data) setRec(data); });
+}, [outlet]);
 
-  function save(d) { setRec(d); lss(oKey(outlet, "expenses"), d); }
+  async function submit() {
+  if (!amount || parseFloat(amount) <= 0) { toast_("Enter valid amount", "err"); return; }
 
-  function submit() {
-    if (!amount || parseFloat(amount) <= 0) { toast_("Enter valid amount", "err"); return; }
+  const amt = parseFloat(amount);
+  const acc = accounts.find(a => a.id === accId);
+  const rec = {
+    date, acc_id: accId, acc_name: acc?.name || accId,
+    desc, amount: amt, pay_method: payMethod,
+    outlet, by: user.username
+  };
 
-    const amt = parseFloat(amount);
-    const acc = accounts.find(a => a.id === accId);
-    const rec = { id: uid(), date, accId, accName: acc?.name || accId, desc, amount: amt, payMethod, outlet, by: user.username };
+  const { data, error } = await supabase.from("expenses").insert([rec]).select().single();
+  if (error) { toast_("Save failed: " + error.message, "err"); return; }
 
-    save([rec, ...records]);
+  setRec(prev => [data, ...prev]);
 
-    if (payMethod === "Cash") postCash(outlet, { date, description: `Expense: ${acc?.name || accId}`, type: "out", amount: amt });
-    if (payMethod === "Bank") postBank(outlet, { date, description: `Expense: ${acc?.name || accId}`, type: "out", amount: amt });
-
-    postGL(outlet, { date, accountId: accId, description: acc?.name || accId, debit: amt, credit: 0 });
-
-    toast_("Expense saved ✓");
-    setDesc("");
-    setAmount("");
+  // Cash/Bank ledger
+  if (payMethod === "Cash" || payMethod === "Bank") {
+    await supabase.from("cash_bank_ledger").insert([{
+      outlet, date,
+      description: `Expense: ${acc?.name || accId}`,
+      type: "out", amount: amt,
+      ledger_type: payMethod === "Cash" ? "cash" : "bank"
+    }]);
   }
+
+  // GL entry
+  await supabase.from("gl_entries").insert([{
+    outlet, date,
+    account_id: accId,
+    description: acc?.name || accId,
+    debit: amt, credit: 0
+  }]);
+
+  toast_("Expense saved ✓");
+  setDesc(""); setAmount("");
+}
 
   const mo     = today().slice(0, 7);
   const mTotal = records.filter(r => monthOf(r.date) === mo).reduce((a, r) => a + r.amount, 0);
@@ -125,9 +154,9 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             {records.slice(0, 25).map(r => (
               <tr key={r.id}>
                 <td className="mono">{r.date}</td>
-                <td style={{ fontSize: 11 }}>{r.accName}</td>
+                <td style={{ fontSize: 11 }}>{r.acc_name}</td>
                 <td style={{ fontSize: 11, color: "var(--mut)" }}>{r.desc || "—"}</td>
-                <td><span className={`badge ${r.payMethod === "Cash" ? "ba" : "bb"}`}>{r.payMethod}</span></td>
+                <td><span className={`badge ${r.pay_method === "Cash" ? "ba" : "bb"}`}>{r.payMethod}</span></td>
                 <td className="rt mono cr bold">Rs.{fmt(r.amount)}</td>
               </tr>
             ))}

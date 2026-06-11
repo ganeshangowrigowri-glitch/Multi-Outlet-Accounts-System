@@ -12,9 +12,9 @@ import A_Bank from "./AdminBank";
 
 import {
   getClerks, saveClerks, addClerk, updateClerk, deleteClerk,
-  getOutlets,
+  ensureOutlets, addOutlet, deleteOutlet, sortOutletsByOrder,
   getInventoryMaster,
-  getSales, getExpenses, getCashLedger,
+  getSales, getExpenses, getCashLedger, getCOA
 } from "../../db";
 
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -27,6 +27,8 @@ export default function AdminDashboard({ user, onLogout }) {
   const [clerks,     setCR]        = useState([]);
   const [outlets,    setOR]        = useState([]);
   const [inv,        setInv]       = useState([]);
+  const [allCOA, setAllCOA] = useState([]);
+  
   const [toast,      setToast]     = useState(null);
   const [search,     setSearch]    = useState("");
   const [selOutlet,  setSelOutlet] = useState("");
@@ -40,21 +42,23 @@ export default function AdminDashboard({ user, onLogout }) {
   const t_ = (msg, type="ok") => setToast({ msg, type });
   const mo = new Date().toISOString().slice(0,7);
 
-  // ── initial load ──
-  useEffect(() => {
-    Promise.all([
-      getClerks(),
-      getOutlets(),
-      getInventoryMaster(),
-    ]).then(([c, o, i]) => {
-      setCR(c);
-      const outletList = o.length ? o : OUTLETS;
-      setOR(outletList);
-      setSelOutlet(outletList[0] || "");
-      setInv(i);
-      setLoading(false);
-    });
-  }, []);
+ // ── initial load ──
+useEffect(() => {
+  Promise.all([
+    getClerks(),
+    getInventoryMaster(),
+    getCOA(),
+    ensureOutlets(OUTLETS),
+  ]).then(([c, i, coa, outletList]) => {
+    setCR(c);
+    const list = outletList.length ? outletList : OUTLETS;
+    setOR(list);
+    setSelOutlet(list[0] || "");
+    setInv(i);
+    setAllCOA(coa);
+    setLoading(false);
+  });
+}, []);
 
   // ── load outlet data when selOutlet changes ──
   useEffect(() => {
@@ -87,7 +91,18 @@ export default function AdminDashboard({ user, onLogout }) {
   }
 
   // ── outlet management ──
-  function setOutlets(d) { setOR(d); }
+  async function handleAddOutlet(name) {
+    const result = await addOutlet(name);
+    if (result.ok) {
+      setOR(prev => sortOutletsByOrder(prev.includes(name) ? prev : [...prev, name], OUTLETS));
+    }
+    return result;
+  }
+  async function handleDeleteOutlet(name) {
+    const result = await deleteOutlet(name);
+    if (result.ok) setOR(prev => prev.filter(x => x !== name));
+    return result;
+  }
 
   const navGroups = [
     { label:"Overview", items:[
@@ -174,7 +189,7 @@ export default function AdminDashboard({ user, onLogout }) {
                 <div className="sc"><div className="sl">Total Outlets</div><div className="sv">{outlets.length}</div></div>
                 <div className="sc"><div className="sl">Total Staff</div><div className="sv">{clerks.length}</div></div>
                 <div className="sc"><div className="sl">Inventory Items</div><div className="sv">{inv.length}</div></div>
-                <div className="sc"><div className="sl">Chart of Accounts</div><div className="sv">30</div></div>
+                <div className="sc"><div className="sl">Chart of Accounts</div><div className="sv">{allCOA.length}</div></div>
               </div>
               <div className="sg2">
                 <div className="card">
@@ -278,12 +293,12 @@ export default function AdminDashboard({ user, onLogout }) {
               toast_={t_}
             />
           )}
-          {page==="outlets" && <OutletManagement outlets={outlets} setOutlets={setOutlets} clerks={clerks} toast_={t_}/>}
+          {page==="outlets" && <OutletManagement outlets={outlets} onAddOutlet={handleAddOutlet} onDeleteOutlet={handleDeleteOutlet} clerks={clerks} toast_={t_}/>}
           {page==="access"  && <AccessControl clerks={clerks} setClerks={setClerks} toast_={t_}/>}
-          {page==="inv"     && <InventoryAdmin toast_={t_} isAdmin={true}/>}
+          {page==="inv"     && <InventoryAdmin toast_={t_} isAdmin={true} adminOutlets={outlets}/>}
           {page==="coa"     && <ChartOfAccounts user={{...user,role:"admin"}}/>}
           {page==="reports" && <Reports user={user}/>}
-          {page==="bank"    && <A_Bank/>}
+          {page==="bank"    && <A_Bank outlets={outlets} toast_={t_}/>}
         </div>
       </div>
 

@@ -1,10 +1,76 @@
 import { supabase } from "./supabase";
  
 // ─── OUTLETS ────────────────────────────────────────────────
-export const getOutlets = async () => {
-  const { data, error } = await supabase.from("outlets").select("*").order("name");
-  if (error) { console.error("getOutlets:", error); return []; }
-  return data.map(o => o.id);
+const outletLabel = (o) => String(o?.id || o?.name || "").trim();
+
+/** Keep your original shop list order; new outlets go at the end. */
+export const sortOutletsByOrder = (names, canonicalOrder = []) => {
+  const seen = new Set();
+  const result = [];
+  for (const n of canonicalOrder) {
+    if (names.includes(n) && !seen.has(n)) { result.push(n); seen.add(n); }
+  }
+  for (const n of names) {
+    if (!seen.has(n)) { result.push(n); seen.add(n); }
+  }
+  return result;
+};
+
+async function fetchOutletRows() {
+  const { data, error } = await supabase.from("outlets").select("*");
+  if (error) { console.error("fetchOutletRows:", error); return []; }
+  return data || [];
+}
+
+async function insertOutletRow(name) {
+  const id = String(name || "").trim();
+  if (!id) return { ok: false, message: "Outlet name is required" };
+
+  // Table needs id (shop code). Some schemas also require name — try both.
+  const attempts = [{ id, name: id }, { id }];
+  let lastError = null;
+  for (const row of attempts) {
+    const { error } = await supabase.from("outlets").insert(row);
+    if (!error) return { ok: true };
+    if (error.code === "23505") return { ok: true }; // already exists
+    lastError = error;
+    // Unknown column (e.g. no name column) — try next shape
+    if (error.code === "PGRST204") continue;
+  }
+  console.error("insertOutletRow:", id, lastError);
+  const msg = lastError?.message || "Could not save outlet";
+  const detail = lastError?.details ? ` (${lastError.details})` : "";
+  return { ok: false, message: msg + detail };
+}
+
+export const getOutlets = async (canonicalOrder = []) => {
+  const rows = await fetchOutletRows();
+  const names = rows.map(outletLabel).filter(Boolean);
+  return sortOutletsByOrder(names, canonicalOrder);
+};
+
+export const ensureOutlets = async (fallbackNames = []) => {
+  let rows = await fetchOutletRows();
+  if (!rows.length && fallbackNames.length) {
+    for (const n of fallbackNames) {
+      await insertOutletRow(n);
+    }
+    rows = await fetchOutletRows();
+  }
+  const names = rows.map(outletLabel).filter(Boolean);
+  return sortOutletsByOrder(names.length ? names : fallbackNames, fallbackNames);
+};
+
+export const addOutlet = async (name) => insertOutletRow(name);
+
+export const deleteOutlet = async (name) => {
+  const id = String(name || "").trim();
+  const { error } = await supabase.from("outlets").delete().eq("id", id);
+  if (error) {
+    console.error("deleteOutlet:", error);
+    return { ok: false, message: error.message };
+  }
+  return { ok: true };
 };
  
 // ─── CLERKS ─────────────────────────────────────────────────
@@ -13,8 +79,9 @@ export const getClerks = async () => {
   if (error) { console.error("getClerks:", error); return []; }
   return data.map(c => ({
     ...c,
-    outlets: c.outlet_ids || [],
-    outlet:  c.outlet_ids?.[0] || "",
+    password: c.password_hash || "",
+    outlets: c.outlet_ids?.length ? c.outlet_ids : (c.outlet ? [c.outlet] : []),
+    outlet:  c.outlet_ids?.[0] || c.outlet || "",
   }));
 };
  
@@ -22,7 +89,7 @@ export const saveClerks = async (clerks) => {
   for (const c of clerks) {
     const row = {
       username:      c.username,
-      password_hash: c.password,
+      password_hash: c.password || c.password_hash,
       designation:   c.designation,
       access:        c.access,
       outlet_ids:    Array.isArray(c.outlets) ? c.outlets : c.outlet ? [c.outlet] : [],
@@ -64,12 +131,13 @@ export const deleteClerk = async (id) => {
 };
  
 // ─── SUPPLIERS ──────────────────────────────────────────────
+// AFTER
 export const getSuppliers = async () => {
-  const { data, error } = await supabase.from("suppliers").select("*");
+  const { data, error } = await supabase
+    .from("suppliers").select("*").order("sort_order", { ascending: true });
   if (error) { console.error("getSuppliers:", error); return []; }
   return data;
-};
- 
+}; 
 // ─── CHART OF ACCOUNTS ──────────────────────────────────────
 export const getCOA = async () => {
   const { data, error } = await supabase.from("coa_accounts").select("*").order("id");
@@ -270,12 +338,19 @@ export const getAPPayments = async (outlet) => {
  
 export const addAPPayment = async (outlet, payment) => {
   const { error } = await supabase.from("ap_payments").insert({
-    outlet_id:  outlet,
-    invoice_id: payment.invoiceId || null,
-    date:       payment.date,
-    amount:     payment.amount,
-    method:     payment.method || "cash",
-    ref:        payment.ref || "",
+    outlet_id:   outlet,
+    invoice_id:  null,
+    date:        payment.date,
+    amount:      payment.amount,
+    method:      payment.method,
+    ref:         payment.ref || "",
+    notes:       payment.invoiceId || "",
+    supplier_id: payment.supplierId || "",
+    inv_amt:     payment.invAmt || 0,
+    discount:    payment.discount || 0,
+    late_charge: payment.lateCharge || 0,
+    bank_name:   payment.bankName || "",
+    account_no:  payment.accountNo || "",
   });
   if (error) console.error("addAPPayment:", error);
 };
@@ -296,6 +371,7 @@ export const addAREntry = async (outlet, entry) => {
     debit:       entry.debit || 0,
     credit:      entry.credit || 0,
     ref:         entry.ref || "",
+    account_id:  entry.ref || "", 
   });
   if (error) console.error("addAREntry:", error);
 };
@@ -422,4 +498,43 @@ export const addExpense = async (outlet, expense) => {
   });
   if (error) console.error("addExpense:", error);
 };
- 
+ // ─── DAILY OPENING STOCK ─────────────────────────────────────
+
+export const getOpeningStock = async (outlet, date) => {
+  const { data, error } = await supabase
+    .from("outlet_daily_opening")
+    .select("*")
+    .eq("outlet_id", outlet)
+    .eq("date", date);
+  if (error) { console.error("getOpeningStock:", error); return null; }
+  if (!data || data.length === 0) return null;
+  const main = {}, emp = {};
+  data.forEach(r => {
+    if (r.type === "emp") emp[r.item_code] = Number(r.qty);
+    else                  main[r.item_code] = Number(r.qty);
+  });
+  return { main, emp };
+};
+
+export const saveOpeningStock = async (outlet, date, mainMap, empMap) => {
+  const rows = [];
+  Object.entries(mainMap || {}).forEach(([code, qty]) => {
+    rows.push({ outlet_id: outlet, date, item_code: code, qty: Number(qty) || 0, type: "main" });
+  });
+  Object.entries(empMap || {}).forEach(([id, qty]) => {
+    rows.push({ outlet_id: outlet, date, item_code: id, qty: Number(qty) || 0, type: "emp" });
+  });
+  if (rows.length === 0) return;
+  const { error } = await supabase
+    .from("outlet_daily_opening")
+    .upsert(rows, { onConflict: "outlet_id,date,item_code,type" });
+  if (error) console.error("saveOpeningStock:", error);
+};
+export const addSupplier = async (supplier) => {
+  const { error } = await supabase.from("suppliers").insert({
+    id:    supplier.id,
+    name:  supplier.name,
+    color: supplier.color || "#94a3b8",
+  });
+  if (error) console.error("addSupplier:", error);
+};

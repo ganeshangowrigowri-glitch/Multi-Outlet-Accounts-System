@@ -1,4 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
+import { supabase } from "../supabase";
+import { saveCOA } from "../db";
 // ═══ FULL ACCOUNT LIST DATA ═══════════════════════════════════════════════════
 const ACCOUNT_RANGES = [
   { range:"1000-1499", type:"Current Assets",           debit:"Asset",       credit:"Cash",      stmt:"Balance Sheet" },
@@ -155,9 +157,6 @@ const TYPE_COLOR = {
 
 const STMT_COLOR = { "Balance Sheet":"#22c55e", "P&L":"#3b82f6" };
 
-const ls  = (k,d) => { try { const v=localStorage.getItem(k); return v?JSON.parse(v):d; } catch { return d; }};
-const lss = (k,v) => { try { localStorage.setItem(k,JSON.stringify(v)); } catch {} };
-
 // ═══ ICONS ════════════════════════════════════════════════════════════════════
 const Ic = {
   plus:   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
@@ -291,16 +290,34 @@ function AccountModal({ initial, onSave, onClose, existingIds }) {
 // ════════════════════════════════════════════════════════════════
 // WINDOW 1 — Accounts List
 // ════════════════════════════════════════════════════════════════
-function AccountsList({ isAdmin }) {
-  const stored   = ls("coa_accounts", DEFAULT_ACCOUNTS);
-  const [accounts, setAccounts] = useState(stored);
+  function AccountsList({ isAdmin }) {
+  const [accounts, setAccounts] = useState([]);
+
+  useEffect(() => {
+  supabase.from("coa_accounts").select("*").order("id")
+    .then(({ data }) => {
+      if (data && data.length) {
+        setAccounts(data);
+      } else {
+        // First time: seed defaults into Supabase
+        const inserts = DEFAULT_ACCOUNTS.map(a => ({
+          id: a.id, name: a.name, type: a.type, stmt: a.stmt, editable: a.editable
+        }));
+        supabase.from("coa_accounts").insert(inserts)
+          .then(() => setAccounts(DEFAULT_ACCOUNTS));
+      }
+    });
+}, []);
+
   const [search, setSearch]     = useState("");
   const [filterType, setFilter] = useState("All");
   const [filterStmt, setStmt]   = useState("All");
   const [modal, setModal]       = useState(null); // null | "add" | account obj
 
-  const save = (list) => { setAccounts(list); lss("coa_accounts", list); };
-
+  const save = async (list) => {
+  setAccounts(list);
+  await saveCOA(list);
+  };
   const filtered = useMemo(() => accounts.filter(a => {
     const q = search.toLowerCase();
     const matchQ = !q || a.id.toLowerCase().includes(q) || a.name.toLowerCase().includes(q);
@@ -319,21 +336,20 @@ function AccountsList({ isAdmin }) {
     return g;
   }, [filtered]);
 
-  const handleSave = (acc) => {
-    if (modal === "add") {
-      save([...accounts, acc]);
-    } else {
-      save(accounts.map(a => a.id === acc.id ? acc : a));
-    }
-    setModal(null);
-  };
+  const handleSave = async (acc) => {
+  if (modal === "add") {
+    await save([...accounts, acc]);
+  } else {
+    await save(accounts.map(a => a.id === acc.id ? acc : a));
+  }
+  setModal(null);
+};
 
-  const handleDelete = (id) => {
-    const acc = accounts.find(a => a.id === id);
-    if (!acc?.editable) return;
-    if (!window.confirm(`Delete account ${id}?`)) return;
-    save(accounts.filter(a => a.id !== id));
-  };
+const handleDelete = async (id) => {
+  if (!window.confirm(`Delete account ${id}?`)) return;
+  await supabase.from("coa_accounts").delete().eq("id", id);
+  setAccounts(accounts.filter(a => a.id !== id));
+};
 
   const types = ["All", ...Array.from(new Set(accounts.map(a => a.type)))];
 
@@ -431,15 +447,13 @@ function AccountsList({ isAdmin }) {
                         {a.stmt}
                       </span>
                     </td>
-                    {isAdmin && (
-                      <td style={{...styles.td, textAlign:"right"}}>
-                        <div style={{display:"flex", gap:4, justifyContent:"flex-end"}}>
-                          <button style={styles.actBtn} onClick={() => setModal(a)} title="Edit">{Ic.edit}</button>
-                          {a.editable && (
-                            <button style={{...styles.actBtn, color:"#ef4444"}} onClick={() => handleDelete(a.id)} title="Delete">{Ic.trash}</button>
-                          )}
-                        </div>
-                      </td>
+                     {isAdmin && (
+                    <td style={{...styles.td, textAlign:"right"}}>
+                    <div style={{display:"flex", gap:4, justifyContent:"flex-end"}}>
+                    <button style={styles.actBtn} onClick={() => setModal(a)} title="Edit">{Ic.edit}</button>
+                    <button style={{...styles.actBtn, color:"#ef4444"}} onClick={() => handleDelete(a.id)} title="Delete">{Ic.trash}</button>
+                    </div>
+                    </td>
                     )}
                   </tr>
                 ))}
@@ -468,9 +482,12 @@ function AccountsList({ isAdmin }) {
 // ════════════════════════════════════════════════════════════════
 // WINDOW 2 — Reports (Account Breakdown)
 // ════════════════════════════════════════════════════════════════
-function AccountReports() {
-  const accounts = ls("coa_accounts", DEFAULT_ACCOUNTS);
-
+  function AccountReports() {
+  const [accounts, setAccounts] = useState([]);
+  useEffect(() => {
+    supabase.from("coa_accounts").select("*").order("id")
+      .then(({ data }) => { if (data && data.length) setAccounts(data); });
+  }, []);
   const byStmt = (stmt) => accounts.filter(a => a.stmt === stmt);
   const byType = (type) => accounts.filter(a => a.type === type);
 

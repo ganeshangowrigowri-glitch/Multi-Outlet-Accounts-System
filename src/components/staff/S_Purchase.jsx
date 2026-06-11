@@ -1,26 +1,64 @@
 // src/components/staff/S_Purchase.jsx
-import { useState } from "react";
-import { ls, lss, fmt, oKey, today } from "../../utils/helpers";
-import { uid, postCash, postGL } from "../../utils/helpers";
+import { useState, useEffect } from "react";
+import { fmt, oKey, today } from "../../utils/helpers";
+import { uid } from "../../utils/helpers";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SUPPLIERS_LIST, COA_DEF } from "../../data/seeds";
 import { loadEmptyFromStorage } from "../admin/InventoryAdmin";
+import {
+  addPurchase, addAPInvoice, addGLEntry,
+  addCashEntry, addTransfer, addAREntry, addReturn,
+  getCOA, getInventoryMaster, getSuppliers,
+} from "../../db";
 
 export default function S_Purchase({ outlet, user, toast_ }) {
 
-  const inv = ls("inv_main", SEED_INVENTORY);
-  const emptyInv = loadEmptyFromStorage();
-  const extraSuppliers = ls("extra_suppliers", []);
-  const extraSupIds = extraSuppliers.map(s => s.id);
+  // ── Load from Supabase (inv_main & COA) but keep emptyInv & extra suppliers from localStorage ──
+  const [inv,            setInv]     = useState(SEED_INVENTORY);
+  const [allCOA,         setCOA]     = useState(COA_DEF);
+  const [suppliersReady, setReady]   = useState(false);
+
+  // AFTER
+const SUP_ORDER = [
+  "2001-DCSL","2003-UG","2005-ROCKLAND","2004-IDL","2006-DCSL BEER",
+  "2002-LION BREWERY","2007-TODDY","2008-ROYAL CASK","2009-LUXURY BRAND",
+  "2010-B LANKA","2011-USW","2012-PREMERA","2013-JSP","2014-SIGNATURE",
+  "2015-VA","2016-VICTORY","2017-FAVOURITE","2018-FREE LANKA",
+  "2019-BAG","2020-SODA","2021-GOLD LEAF","2022-BITE","2023-KASTHURI W/S",
+];
+
+useEffect(() => {
+  getInventoryMaster().then(data => {
+    if (data.length) {
+      const sorted = [...data].sort((a, b) => {
+        const oi = SUP_ORDER.indexOf(a.supplier);
+        const oj = SUP_ORDER.indexOf(b.supplier);
+        const supCmp = (oi === -1 ? 999 : oi) - (oj === -1 ? 999 : oj);
+        if (supCmp !== 0) return supCmp;
+        const numA = parseInt((a.code || "").replace(/\D/g, "")) || 0;
+        const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
+        return numA - numB;
+      });
+      setInv(sorted);
+    }
+  });
+  getCOA().then(data => { if (data.length) setCOA(data); });
+  setReady(true);
+}, []);
+
+  // These still read from localStorage (not yet migrated)
+  const emptyInv       = loadEmptyFromStorage();
+  const extraSuppliers = (() => { try { return JSON.parse(localStorage.getItem("extra_suppliers") || "[]"); } catch { return []; } })();
+  const extraSupIds    = extraSuppliers.map(s => s.id);
   const mergedSuppliers = [
     ...SUPPLIERS_LIST.filter(s => !extraSupIds.includes(s.id)),
     ...extraSuppliers.map(s => ({ id: s.id, name: s.name || s.id })),
-    { id: "EMPTY PURCHASE", name: "EMPTY PURCHASE" },  // ← add this
+    { id: "EMPTY PURCHASE", name: "EMPTY PURCHASE" },
   ];
 
   const [subTab,     setSubTab]     = useState("received");
   const [date,       setDate]       = useState(today());
-  const [supId, setSupId] = useState(mergedSuppliers[0]?.id || "");
+  const [supId,      setSupId]      = useState(mergedSuppliers[0]?.id || "");
   const [invNo,      setInvNo]      = useState("");
   const [lateCharge, setLateCharge] = useState("");
   const [lines,      setLines]      = useState([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", unitCost: "", discount: "", amount: 0 }]);
@@ -29,15 +67,14 @@ export default function S_Purchase({ outlet, user, toast_ }) {
   const [trType,  setTrType]  = useState("in");
   const [trLines, setTrLines] = useState([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", unitCost: "", stockValue: 0 }]);
 
-  // AR account dropdown (1200–1299) for Transfer Out
-  const allCOA    = ls("coa_accounts", COA_DEF);
   const arAccList = allCOA.filter(a => a.id >= "1200" && a.id <= "1299");
   const [trAcc, setTrAcc] = useState(arAccList[0]?.id || "");
+  useEffect(() => { if (arAccList.length && !trAcc) setTrAcc(arAccList[0]?.id || ""); }, [allCOA]);
 
   const [retDate,  setRetDate]  = useState(today());
   const [retLines, setRetLines] = useState([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", sellingPrice: "", stockValue: 0 }]);
 
- // ── Line update helpers ──
+  // ── Line update helpers — IDENTICAL to original ──
   function updL(id, f, v) {
     setLines(p => p.map(l => {
       if (l.id !== id) return l;
@@ -91,17 +128,16 @@ export default function S_Purchase({ outlet, user, toast_ }) {
   const totalDisc  = lines.reduce((a, l) => a + (parseFloat(l.discount) || 0), 0);
   const grandTotal = subtotal - (parseFloat(lateCharge) || 0);
 
-  // ── Save purchase ──
-  function savePurchase() {
+  // ── Save purchase — same logic, Supabase storage ──
+  async function savePurchase() {
     if (!invNo || !lines[0].itemCode) { toast_("Fill invoice no and at least one item", "err"); return; }
 
     const rec = { id: uid(), date, supId, invoiceNo: invNo, lines, subtotal, totalDisc, lateCharge: parseFloat(lateCharge) || 0, grandTotal, outlet, by: user.username };
 
-    const purs  = ls(oKey(outlet, "purchases"),   []); lss(oKey(outlet, "purchases"),   [rec, ...purs]);
-    const apInv = ls(oKey(outlet, "ap_invoices"), []); lss(oKey(outlet, "ap_invoices"), [{ ...rec }, ...apInv]);
-
-    postGL(outlet, { date, accountId: "1300", description: `Purchase ${supId} Inv:${invNo}`, debit: grandTotal, credit: 0 });
-    postGL(outlet, { date, accountId: "2000", description: `AP ${supId} Inv:${invNo}`,       debit: 0, credit: grandTotal });
+    await addPurchase(outlet, { date, supplier: supId, items: lines, total: grandTotal, status: "received", notes: `Inv:${invNo}` });
+    await addAPInvoice(outlet, { supplier: supId, date, amount: grandTotal, paid: 0, status: "unpaid", ref: invNo });
+    await addGLEntry(outlet, { date, account_id: "1300", description: `Purchase ${supId} Inv:${invNo}`, debit: grandTotal, credit: 0, source: "purchase" });
+    await addGLEntry(outlet, { date, account_id: "2000", description: `AP ${supId} Inv:${invNo}`,       debit: 0, credit: grandTotal, source: "purchase" });
 
     toast_("Purchase saved ✓");
     setLines([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", unitCost: "", discount: "", amount: 0 }]);
@@ -109,30 +145,20 @@ export default function S_Purchase({ outlet, user, toast_ }) {
     setLateCharge("");
   }
 
-  // ── Save transfer ──
-  function saveTransfer() {
+  // ── Save transfer — same logic, Supabase storage ──
+  async function saveTransfer() {
     if (!trAcc || !trLines[0].itemCode) { toast_("Fill account and items", "err"); return; }
 
     const total = trLines.reduce((a, l) => a + (l.stockValue || 0), 0);
     const rec   = { id: uid(), date: trDate, type: trType, account: trAcc, lines: trLines, total, outlet, by: user.username };
 
-    const trs = ls(oKey(outlet, "transfers"), []);
-    lss(oKey(outlet, "transfers"), [rec, ...trs]);
+    await addTransfer({ from: trType === "out" ? outlet : trAcc, to: trType === "out" ? trAcc : outlet, date: trDate, items: trLines, status: "completed" });
 
     if (trType === "out") {
-      // Post to AR ledger with selected account ID
-      const arL = ls(oKey(outlet, "ar_ledger"), []);
-      lss(oKey(outlet, "ar_ledger"), [...arL, {
-        id:          uid(),
-        date:        trDate,
-        description: `Transfer Out to ${trAcc}`,
-        type:        "dr",
-        amount:      total,
-        accountId:   trAcc,
-      }]);
-      postGL(outlet, { date: trDate, accountId: trAcc, description: `Transfer Out to ${trAcc}`, debit: total, credit: 0 });
+      await addAREntry(outlet, { date: trDate, description: `Transfer Out to ${trAcc}`, debit: total, credit: 0, ref: trAcc });
+      await addGLEntry(outlet, { date: trDate, account_id: trAcc, description: `Transfer Out to ${trAcc}`, debit: total, credit: 0, source: "transfer" });
     } else {
-      postGL(outlet, { date: trDate, accountId: "2100", description: `Transfer In from ${trAcc}`, debit: 0, credit: total });
+      await addGLEntry(outlet, { date: trDate, account_id: "2100", description: `Transfer In from ${trAcc}`, debit: 0, credit: total, source: "transfer" });
     }
 
     toast_(`Transfer ${trType === "in" ? "In" : "Out"} saved ✓`);
@@ -140,18 +166,15 @@ export default function S_Purchase({ outlet, user, toast_ }) {
     setTrAcc(arAccList[0]?.id || "");
   }
 
-  // ── Save return ──
-  function saveReturn() {
+  // ── Save return — same logic, Supabase storage ──
+  async function saveReturn() {
     if (!retLines[0].itemCode) { toast_("Add at least one item", "err"); return; }
 
     const total = retLines.reduce((a, l) => a + (l.stockValue || 0), 0);
-    const rec   = { id: uid(), date: retDate, lines: retLines, total, outlet, by: user.username };
 
-    const rets = ls(oKey(outlet, "returns"), []);
-    lss(oKey(outlet, "returns"), [rec, ...rets]);
-
-    postCash(outlet, { date: retDate, description: "Return Goods", type: "out", amount: total });
-    postGL(outlet,   { date: retDate, accountId: "4001", description: "Return Goods", debit: total, credit: 0 });
+    await addReturn(outlet, { date: retDate, items: retLines, total });
+    await addCashEntry(outlet, { date: retDate, description: "Return Goods", type: "out", debit: 0, credit: total });
+    await addGLEntry(outlet,   { date: retDate, account_id: "4001", description: "Return Goods", debit: total, credit: 0, source: "return" });
 
     toast_("Return saved ✓");
     setRetLines([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", sellingPrice: "", stockValue: 0 }]);
@@ -209,17 +232,17 @@ export default function S_Purchase({ outlet, user, toast_ }) {
                         <select value={l.itemCode} onChange={e => updL(l.id, "itemCode", e.target.value)} style={{ width: 85 }}>
                           <option value="">Select…</option>
                           {(supId === "EMPTY PURCHASE"
-  ? emptyInv.filter(it => it.supplier === "EMPTY PURCHASE")
-  : [
-      ...inv.filter(it => it.supplier === supId && it.type !== "EMP"), // ← exclude EMP type
-      ...emptyInv.filter(it =>
-        it.supplier === supId ||
-        supId.endsWith(it.supplier)
-      )
-    ]
-).map(it => (
-  <option key={it.id || it.code} value={it.code}>{it.code}</option>
-))}
+                            ? emptyInv.filter(it => it.supplier === "EMPTY PURCHASE")
+                            : [
+                                ...inv.filter(it => it.supplier === supId && it.type !== "EMP"),
+                                ...emptyInv.filter(it =>
+                                  it.supplier === supId ||
+                                  supId.endsWith(it.supplier)
+                                )
+                              ]
+                          ).map(it => (
+                            <option key={it.id || it.code} value={it.code}>{it.code}</option>
+                          ))}
                         </select>
                       </td>
                       <td style={{ fontSize: 10.5, color: "var(--mut)" }}>{l.itemName || "—"}</td>
@@ -267,7 +290,6 @@ export default function S_Purchase({ outlet, user, toast_ }) {
           <div className="chd"><h3>Transfer Goods</h3></div>
           <div style={{ padding: 14 }}>
 
-            {/* In / Out toggle */}
             <div style={{ display: "flex", gap: 7, marginBottom: 12 }}>
               <button className={`btn ${trType === "in"  ? "btng" : "btnd"}`} onClick={() => setTrType("in")}>← Transfer In</button>
               <button className={`btn ${trType === "out" ? "btng" : "btnd"}`} onClick={() => setTrType("out")}>Transfer Out →</button>
@@ -428,4 +450,4 @@ export default function S_Purchase({ outlet, user, toast_ }) {
       )}
     </>
   );
-} 
+}

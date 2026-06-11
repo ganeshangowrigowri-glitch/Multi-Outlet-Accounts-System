@@ -1,30 +1,46 @@
 // src/components/staff/S_AR.jsx
-import { useState } from "react";
-import { ls, fmt, oKey } from "../../utils/helpers";
+import { useState, useEffect} from "react";
+import { fmt } from "../../utils/helpers";
 import { I } from "../../utils/icons";
 import Ledger from "../shared/Ledger";
-import { COA_DEF } from "../../data/seeds";
+import { supabase } from "../../supabase";
 
 export default function S_AR({ outlet }) {
 
   // AR accounts = admin-managed COA range 1100–1299
-  const allAccounts = ls("coa_accounts", COA_DEF);
-  const arAccounts  = allAccounts.filter(a => a.id >= "1200" && a.id <= "1299");
+  const [arAccounts, setArAccounts] = useState([]);
+const [arLedger,   setArLedger]   = useState([]);
+const [selId,      setSelId]      = useState("");
 
-  const [selId, setSelId] = useState(arAccounts[0]?.id || "1100");
+useEffect(() => {
+  supabase.from("coa_accounts")
+    .select("*")
+    .gte("id", "1200")
+    .lte("id", "1299")
+    .then(({ data }) => {
+      if (data) {
+        setArAccounts(data);
+        if (data.length > 0) setSelId(data[0].id);
+      }
+    });
+}, []);
 
-  // Full ar_ledger for this outlet
-  const arLedger = ls(oKey(outlet, "ar_ledger"), []);
+useEffect(() => {
+  if (!outlet) return;
+  supabase.from("ar_ledger")
+    .select("*")
+    .eq("outlet_id", outlet)
+    .then(({ data }) => { if (data) setArLedger(data); });
+}, [outlet]);
 
   // Rows for the selected account only
-  const filteredRows = arLedger.filter(e => e.accountId === selId);
+  const filteredRows = arLedger.filter(e => e.account_id === selId);
 
   // Balance per account (for summary strip)
-  const balanceOf = id =>
+const balanceOf = id =>
     arLedger
-      .filter(e => e.accountId === id)
-      .reduce((a, e) => a + (e.type === "dr" ? e.amount : -e.amount), 0);
-
+      .filter(e => e.account_id === id)
+      .reduce((a, e) => a + (Number(e.debit) || 0) - (Number(e.credit) || 0), 0);
   const selAcc    = arAccounts.find(a => a.id === selId);
   const selBal    = balanceOf(selId);
   const grandTotal = arAccounts.reduce((a, acc) => a + balanceOf(acc.id), 0);
@@ -153,10 +169,16 @@ export default function S_AR({ outlet }) {
         </div>
 
         <div style={{ padding: 12 }}>
-          {filteredRows.length === 0
-            ? <div className="empty">No Transfer Out entries for account {selId}.</div>
-            : <Ledger rows={filteredRows} bfBal={0} />
-          }
+          {filteredRows.length === 0 && (
+  <div className="empty">No Transfer Out entries for account {selId}.</div>
+)}
+{filteredRows.length > 0 && (
+  <Ledger rows={filteredRows.map(e => ({
+    ...e,
+    type:   (e.debit || 0) > 0 ? "in" : "out",
+    amount: (e.debit || 0) > 0 ? Number(e.debit) : Number(e.credit),
+  }))} bfBal={0} />
+)}
         </div>
       </div>
 

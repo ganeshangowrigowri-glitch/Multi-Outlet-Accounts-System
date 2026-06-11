@@ -1,24 +1,51 @@
 // src/components/staff/S_Dashboard.jsx
-import { ls, fmt, oKey, today, monthOf } from "../../utils/helpers";
+import { useState, useEffect } from "react";
+import { fmt, today, monthOf } from "../../utils/helpers";
+import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
 
 export default function S_Dashboard({ outlet, user }) {
-  const sales      = ls(oKey(outlet, "sales"), []);
-  const expenses   = ls(oKey(outlet, "expenses"), []);
-  const cashLedger = ls(oKey(outlet, "cash_ledger"), []);
-  const bankLedger = ls(oKey(outlet, "bank_ledger"), []);
-  const apInvoices = ls(oKey(outlet, "ap_invoices"), []);
-  const apPayments = ls(oKey(outlet, "ap_payments"), []);
-  const arLedger   = ls(oKey(outlet, "ar_ledger"), []);
+  const [sales,      setSales]      = useState([]);
+const [expenses,   setExpenses]   = useState([]);
+const [cashLedger, setCashLedger] = useState([]);
+const [bankLedger, setBankLedger] = useState([]);
+const [apInvoices, setApInvoices] = useState([]);
+const [apPayments, setApPayments] = useState([]);
+const [arLedger,   setArLedger]   = useState([]);
 
+useEffect(() => {
+  if (!outlet) return;
+
+  supabase.from("sales").select("*").eq("outlet_id", outlet)
+    .order("date", { ascending: false })
+    .then(({ data }) => { if (data) setSales(data); });
+
+  supabase.from("expenses").select("*").eq("outlet_id", outlet)
+    .then(({ data }) => { if (data) setExpenses(data); });
+
+  supabase.from("cash_ledger").select("*").eq("outlet_id", outlet)
+    .then(({ data }) => { if (data) setCashLedger(data); });
+
+  supabase.from("bank_ledger").select("*").eq("outlet_id", outlet)
+    .then(({ data }) => { if (data) setBankLedger(data); });
+
+  supabase.from("ap_invoices").select("*").eq("outlet_id", outlet)
+    .then(({ data }) => { if (data) setApInvoices(data); });
+
+  supabase.from("ap_payments").select("*").eq("outlet_id", outlet)
+    .then(({ data }) => { if (data) setApPayments(data); });
+
+  supabase.from("ar_ledger").select("*").eq("outlet_id", outlet)
+    .then(({ data }) => { if (data) setArLedger(data); });
+}, [outlet]);
   const mo         = today().slice(0, 7);
-  const mSales     = sales.filter(s => monthOf(s.date) === mo).reduce((a, s) => a + s.total, 0);
-  const mExp       = expenses.filter(e => monthOf(e.date) === mo).reduce((a, e) => a + e.amount, 0);
-  const cashBal    = (ls(oKey(outlet, "cash_bf"), 0) || 0) + cashLedger.reduce((a, t) => a + (t.type === "in" ? t.amount : -t.amount), 0);
-  const bankBal    = (ls(oKey(outlet, "bank_bf"), 0) || 0) + bankLedger.reduce((a, t) => a + (t.type === "in" ? t.amount : -t.amount), 0);
-  const apOut      = apInvoices.reduce((a, i) => a + i.grandTotal, 0) - apPayments.reduce((a, p) => a + p.payAmt, 0);
-  const arBal      = arLedger.reduce((a, e) => a + (e.type === "dr" ? e.amount : -e.amount), 0);
-  const todaySales = sales.filter(s => s.date === today()).reduce((a, s) => a + s.total, 0);
+  const mSales     = sales.filter(s => monthOf(s.date) === mo).reduce((a, s) => a + Number(s.total), 0);
+  const mExp       = expenses.filter(e => monthOf(e.date) === mo).reduce((a, e) => a + Number(e.amount), 0);
+  const cashBal = cashLedger.reduce((a, t) => a + (Number(t.debit) - Number(t.credit)), 0);
+  const bankBal = bankLedger.reduce((a, t) => a + (Number(t.debit) - Number(t.credit)), 0);
+  const apOut   = apInvoices.reduce((a, i) => a + Number(i.amount), 0) - apPayments.reduce((a, p) => a + Number(p.amount), 0);
+  const arBal   = arLedger.reduce((a, e) => a + (Number(e.debit) - Number(e.credit)), 0);
+  const todaySales = sales.filter(s => s.date === today()).reduce((a, s) => a + Number(s.total), 0);
 
   const hour    = new Date().getHours();
   const greet   = hour < 12 ? "Good Morning" : hour < 17 ? "Good Afternoon" : "Good Evening";
