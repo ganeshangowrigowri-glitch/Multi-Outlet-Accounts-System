@@ -749,7 +749,7 @@ const csData = useMemo(() => inv.map(item => {
 
   const totalBottleSale = opening + totalPurchase - inHandStock;
   const physicalStock   = inHandStock * uc;
-  const totalSaleAmt    = totalBottleSale - sp;   
+  const totalSaleAmt    = totalBottleSale * sp;   
   const profit          = mg * totalBottleSale;
 
   // ── Adj to stock (stock short/excess) ──

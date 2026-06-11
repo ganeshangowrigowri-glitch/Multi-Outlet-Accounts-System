@@ -43,6 +43,7 @@ export default function AdminDashboard({ user, onLogout }) {
   const mo = new Date().toISOString().slice(0,7);
 
  // ── initial load ──
+// ── initial load ──
 useEffect(() => {
   Promise.all([
     getClerks(),
@@ -56,7 +57,13 @@ useEffect(() => {
     setSelOutlet(list[0] || "");
     setInv(i);
     setAllCOA(coa);
-    setLoading(false);
+  }).catch(err => {
+    console.error("Initial load failed:", err);
+    // Fall back to seed data so the UI still renders
+    setOR(OUTLETS);
+    setSelOutlet(OUTLETS[0] || "");
+  }).finally(() => {
+    setLoading(false);  // ← always runs, even on error
   });
 }, []);
 
