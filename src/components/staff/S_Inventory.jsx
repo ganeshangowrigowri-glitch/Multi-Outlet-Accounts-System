@@ -76,11 +76,16 @@ const EMPTY_SEED_STAFF = [
 //  Override key is item.id (unique) NOT item.code, because the
 //  same code can exist under different empty suppliers.
 // ─────────────────────────────────────────────────────────────
-// AFTER
-function getOutletEmptyInventory(outlet, masterOverride) {
-  const master = masterOverride && masterOverride.length > 0
-    ? masterOverride.filter(i => i.type === "EMP")
-    : EMPTY_SEED_STAFF.filter(i => i.supplier !== "EMPTY PURCHASE");
+function getOutletEmptyInventory(outlet, masterOverride, emptyMasterData) {
+  const master = 
+    (emptyMasterData && emptyMasterData.length > 0)
+      ? emptyMasterData.filter(i => i.supplier !== "EMPTY PURCHASE")
+      : (masterOverride
+          ? masterOverride.filter(i => i.type === "EMP" && i.supplier !== "EMPTY PURCHASE")
+          : []
+        ).length > 0
+          ? masterOverride.filter(i => i.type === "EMP" && i.supplier !== "EMPTY PURCHASE")
+          : EMPTY_SEED_STAFF.filter(i => i.supplier !== "EMPTY PURCHASE");
 
   const overrides = ls(outletEmptyInvKey(outlet), {});
   return master
@@ -246,23 +251,28 @@ useEffect(() => {
   const mainScrollBy = useCallback(d => mainTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
   const empScrollBy  = useCallback(d => empTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
 
-  // Stable seed references
   const [masterInv, setMasterInv] = useState(() => ls("inv_main", SEED_INVENTORY));
+const [emptyMaster, setEmptyMaster] = useState([]);
 
+// ── Load master inventory from Supabase ──
 useEffect(() => {
   getInventoryMaster().then(data => {
     if (data && data.length > 0) {
-      
-    // AFTER
-const sorted = [...data].sort((a, b) => {
-  const oi = supOrder.indexOf(a.supplier);
-  const oj = supOrder.indexOf(b.supplier);
-  const supCmp = (oi === -1 ? 999 : oi) - (oj === -1 ? 999 : oj);
-  if (supCmp !== 0) return supCmp;
-  const numA = parseInt((a.code || "").replace(/\D/g, "")) || 0;
-  const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
-  return numA - numB;
-});
+      // EMP items → emptyMaster state
+      const empItems = data.filter(i => i.type === "EMP" && i.supplier !== "EMPTY PURCHASE");
+      setEmptyMaster(empItems);
+
+      // Main items → masterInv state (sorted)
+      const mainItems = data.filter(i => i.type !== "EMP");
+      const sorted = [...mainItems].sort((a, b) => {
+        const oi = supOrder.indexOf(a.supplier);
+        const oj = supOrder.indexOf(b.supplier);
+        const supCmp = (oi === -1 ? 999 : oi) - (oj === -1 ? 999 : oj);
+        if (supCmp !== 0) return supCmp;
+        const numA = parseInt((a.code || "").replace(/\D/g, "")) || 0;
+        const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
+        return numA - numB;
+      });
       lss("inv_main", sorted);
       setMasterInv(sorted);
     }
@@ -270,8 +280,9 @@ const sorted = [...data].sort((a, b) => {
 }, [supOrder]);
 
 const seedMain = useMemo(() => getOutletInventory(outlet, masterInv), [outlet, masterInv]);
-const seedEmp = useMemo(() => getOutletEmptyInventory(outlet, masterInv), [outlet, masterInv]);
-
+const seedEmp = useMemo(() => {
+  return getOutletEmptyInventory(outlet, masterInv, emptyMaster);
+}, [outlet, masterInv, emptyMaster]);
   // ── Supplier dropdown for Main tab (strip numeric prefix for display) ──
   const mainSuppliers = useMemo(() => {
     const stripped = seedMain.map(i => (i.supplier || "").replace(/^\d{4}-/, "").trim() || "—");
@@ -296,9 +307,6 @@ const empSuppliers = useMemo(() => {
       sold:"", rate: Number(i.sellingPrice) || 0, endStock:"",
     }))
   );
-
-  // ── Empty rows state ──
-  // AFTER
 const [empRows, setER] = useState(() =>
   seedEmp
     .filter(e => e.supplier !== "EMPTY PURCHASE")
@@ -310,194 +318,208 @@ const [empRows, setER] = useState(() =>
       return_:"", invIssue:"", issue:"",
       sold:"", rate: Number(e.sellingPrice) || Number(e.rate) || 0, endStock:"",
     }))
-  );
-
-  // ── Reload mainRows when outlet or date changes ──
-useEffect(() => {
+);
+  
+  useEffect(() => {
   const lsMain = getOutletInventory(outlet, masterInv);
-  const lsEmp  = getOutletEmptyInventory(outlet);
 
-  // Build outlet baseline from outlet overrides (ov.qty = admin-set opening per outlet)
   const baseMain = {};
   lsMain.forEach(i => { baseMain[i.code] = Number(i.qty) || 0; });
 
-  const prevDate = new Date(mainDate);
-  prevDate.setDate(prevDate.getDate() - 1);
-  const yDate = prevDate.toISOString().slice(0, 10);
+  const prev = new Date(mainDate);
+  prev.setDate(prev.getDate() - 1);
+  const yDate = prev.toISOString().slice(0, 10);
+
+  // Build purchase / transfer / return maps in the SAME effect
+  const pV = {}, tiV = {}, toV = {}, rV = {};
+
+  dbPurchases
+    .filter(r => r.date === mainDate)
+    .forEach(rec => (rec.items || []).forEach(l => {
+      if (!l.itemCode || l.isEmptyItem) return;
+      pV[l.itemCode] = (pV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
+    }));
+
+     dbTransfers
+      .filter(r => r.date === mainDate && (r.from_outlet_id ?? r.from) !== outlet)
+    .forEach(rec => (rec.items || []).forEach(l => {
+      if (!l.itemCode) return;
+      tiV[l.itemCode] = (tiV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
+    }));
+
+  dbTransfers
+  .filter(r => r.date === mainDate && (r.from_outlet_id ?? r.from) === outlet)
+    .forEach(rec => (rec.items || []).forEach(l => {
+      if (!l.itemCode) return;
+      toV[l.itemCode] = (toV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
+    }));
+
+  dbReturns
+    .filter(r => r.date === mainDate)
+    .forEach(rec => (rec.items || []).forEach(l => {
+      if (!l.itemCode) return;
+      rV[l.itemCode] = (rV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
+    }));
 
   (async () => {
-    // 1. Try today's explicit opening from Supabase
     let opening = await getOpeningStock(outlet, mainDate);
-
-    // 2. Try yesterday's saved opening from Supabase
     if (!opening) opening = await getOpeningStock(outlet, yDate);
-
-    // 3. Fall back to outlet override qty (set by admin in Tab 3)
     if (!opening) opening = { main: baseMain, emp: {} };
     else opening = { main: { ...baseMain, ...opening.main }, emp: opening.emp || {} };
 
-    // 4. Check Supabase sales for today
-    const todaySale = dbSales.find(s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem));
+    const todaySale = dbSales.find(
+      s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem)
+    );
     const savedMap = todaySale
-  ? Object.fromEntries(
-      (todaySale.items || [])
-        .filter(r => r.isEmptyItem && r.supplier !== "EMPTY PURCHASE")
-        .map(r => [r.id, r])
-    )
-  : {};
+      ? Object.fromEntries(
+          (todaySale.items || [])
+            .filter(r => !r.isEmptyItem)
+            .map(r => [r.id, r])
+        )
+      : {};
 
     setMR(() => lsMain.map(i => {
-      const adminSP = Number(i.sellingPrice) || 0;
-      const op = opening.main?.[i.code] ?? 0;
-      const saved = savedMap[i.id];
+      const adminSP     = Number(i.sellingPrice) || 0;
+      const key         = i.id || `${i.code}__${i.supplier}`;
+      const op          = opening.main?.[key] ?? opening.main?.[i.code] ?? 0;
+      const saved       = savedMap[i.id];
+      const purchase    = pV[i.code]  || 0;
+      const transferIn  = tiV[i.code] || 0;
+      const transferOut = toV[i.code] || 0;
+      const returns     = rV[i.code]  || 0;
+
       if (saved) {
         return {
-          ...i, adminSellingPrice:adminSP, openingStock:op,
-          purchase:    saved.purchase    || 0,
-          transferIn:  saved.transferIn  || 0,
-          transferOut: saved.transferOut || 0,
-          returns:     saved.returns     || 0,
-          sold:        saved.sold        ?? "",
-          rate:        Number(saved.rate) || adminSP,
-          endStock:    saved.endStock    ?? "",
+          ...i,
+          adminSellingPrice: adminSP,
+          openingStock:      op,
+          purchase,
+          transferIn,
+          transferOut,
+          returns,
+          sold:     saved.sold     ?? "",
+          rate:     Number(saved.rate) || adminSP,
+          endStock: saved.endStock ?? "",
         };
       }
       return {
-        ...i, adminSellingPrice:adminSP, openingStock:op,
-        purchase:0, transferIn:0, transferOut:0, returns:0,
-        sold:"", rate:adminSP, endStock:"",
+        ...i,
+        adminSellingPrice: adminSP,
+        openingStock:      op,
+        purchase,
+        transferIn,
+        transferOut,
+        returns,
+        sold:     "",
+        rate:     adminSP,
+        endStock: "",
       };
     }));
   })();
-}, [outlet, mainDate, masterInv, dbSales]); // eslint-disable-line
+}, [outlet, mainDate, masterInv, dbSales, dbPurchases, dbTransfers, dbReturns]); // eslint-disable-line
 
-  // ── Reload empRows when outlet or empDate changes ──
- // AFTER
-// AFTER
 useEffect(() => {
-  const lsEmp = getOutletEmptyInventory(outlet, masterInv);
+  const lsEmp = getOutletEmptyInventory(outlet, masterInv, emptyMaster);
 
   const baseEmp = {};
   lsEmp.forEach(e => { baseEmp[e.id] = Number(e.qty) || 0; });
 
-  const prevDate = new Date(empDate);
-  prevDate.setDate(prevDate.getDate() - 1);
-  const yDate = prevDate.toISOString().slice(0, 10);
+  const prev = new Date(empDate);
+  prev.setDate(prev.getDate() - 1);
+  const yDate = prev.toISOString().slice(0, 10);
 
+  // ── Build empty purchase maps in the SAME effect ──
+  const codes = new Set(lsEmp.map(e => e.code));
+  const pQ = {}, ipQ = {};
+
+// REPLACE WITH:
+dbPurchases
+  .filter(r => r.date === empDate)
+  .forEach(rec => (rec.items || []).forEach(l => {
+    if (!l.itemCode || !codes.has(l.itemCode)) return;
+    const qty = parseFloat(l.qty) || 0;
+    if (!qty) return;
+    const sid = rec.supplier_id || rec.supplier || "";
+
+    // Empty Purchase supplier → Purchase column (left column)
+    const isEmptyPurchaseSup = 
+      sid === EMPTY_PURCHASE_SUP_ID || 
+      sid === "EMPTY PURCHASE";
+
+    // DCSL / UG / Lion Brewery / Toddy / DCSL Beer → Invoice Purchase column (right column)  
+    const isMainSup = 
+      MAIN_EMPTY_SUP_IDS.has(sid) ||
+      ["2001-DCSL","2002-LION BREWERY","2003-UG",
+       "2006-DCSL BEER","2007-TODDY"].some(s => sid.includes(s) || s.includes(sid));
+
+    if (isEmptyPurchaseSup || l.emptyRoute === "purchase") {
+      // Empty Purchase → Purchase column
+      pQ[l.itemCode] = (pQ[l.itemCode] || 0) + qty;
+    } else if (isMainSup || l.emptyRoute === "invPurchase") {
+      // Main suppliers (DCSL etc) → Invoice Purchase column
+      ipQ[l.itemCode] = (ipQ[l.itemCode] || 0) + qty;
+    }
+  }));
   (async () => {
     let opening = await getOpeningStock(outlet, empDate);
     if (!opening) opening = await getOpeningStock(outlet, yDate);
     if (!opening) opening = { main: {}, emp: baseEmp };
     else opening = { main: opening.main || {}, emp: { ...baseEmp, ...opening.emp } };
 
-    const todaySale = dbSales.find(s => s.date === empDate && (s.items || []).some(r => r.isEmptyItem));
+    const todaySale = dbSales.find(
+      s => s.date === empDate && (s.items || []).some(r => r.isEmptyItem)
+    );
     const savedMap = todaySale
-      ? Object.fromEntries((todaySale.items || []).filter(r => r.isEmptyItem).map(r => [r.id, r]))
+      ? Object.fromEntries(
+          (todaySale.items || [])
+            .filter(r => r.isEmptyItem && r.supplier !== "EMPTY PURCHASE")
+            .map(r => [r.id, r])
+        )
       : {};
 
-       setER(() => lsEmp
-       .filter(e => e.supplier !== "EMPTY PURCHASE")
-       .map(e => {
-      const adminSP = Number(e.sellingPrice) || Number(e.rate) || 0;
-      const op = opening.emp?.[e.id] ?? 0;
-      const saved = savedMap[e.id];
-      if (saved) {
+    setER(() => lsEmp
+      .filter(e => e.supplier !== "EMPTY PURCHASE")
+      .map(e => {
+        const adminSP = Number(e.sellingPrice) || Number(e.unitCost) || 0;
+        const op      = opening.emp?.[e.id] ?? 0;
+        const saved   = savedMap[e.id];
+
+        if (saved) {
+          return {
+            ...e,
+            adminSellingPrice: adminSP,
+            openingStock:      op,
+            purchase:    pQ[e.code]  || 0,
+            invPurchase: ipQ[e.code] || 0,
+            received:    saved.received || "",
+            return_:     saved.return_  || "",
+            invIssue:    saved.invIssue || "",
+            issue:       saved.issue    || "",
+            sold:        saved.sold     || "",
+            rate:        Number(saved.rate) || adminSP,
+            endStock:    saved.endStock || "",
+          };
+        }
         return {
-          ...e, adminSellingPrice:adminSP, openingStock:op,
-          purchase:    saved.purchase    || 0,
-          invPurchase: saved.invPurchase || "",
-          received:    saved.received    || "",
-          return_:     saved.return_     || "",
-          invIssue:    saved.invIssue    || "",
-          issue:       saved.issue       || "",
-          sold:        saved.sold        || "",
-          rate:        Number(saved.rate) || adminSP,
-          endStock:    saved.endStock    || "",
+          ...e,
+          adminSellingPrice: adminSP,
+          openingStock:      op,
+          purchase:    pQ[e.code]  || 0,
+          invPurchase: ipQ[e.code] || 0,
+          received:    "",
+          return_:     "",
+          invIssue:    "",
+          issue:       "",
+          sold:        "",
+          rate:        adminSP,
+          endStock:    "",
         };
-      }
-      return {
-        ...e, adminSellingPrice:adminSP, openingStock:op,
-        purchase:0, invPurchase:"", received:"",
-        return_:"", invIssue:"", issue:"",
-        sold:"", rate:adminSP, endStock:"",
-      };
-    }));
+      })
+    );
   })();
-}, [outlet, empDate, dbSales, masterInv]); // eslint-disable-line
+}, [outlet, empDate, dbSales, dbPurchases, masterInv, emptyMaster]); // eslint-disable-line
 
-  // ── Auto-populate Purchase / TransferIn / TransferOut / Returns for Main ──
-  useEffect(() => {
-    const pV={}, tiV={}, toV={}, rV={};
-
-    
-    // ── Supabase (new data) ──
-    dbPurchases
-      .filter(r => r.date === mainDate)
-      .forEach(rec => (rec.items || []).forEach(l => {
-        if (!l.itemCode || l.isEmptyItem) return;
-        pV[l.itemCode] = (pV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
-      }));
-    dbTransfers
-      .filter(r => r.date === mainDate && r.from_outlet_id !== outlet)
-      .forEach(rec => (rec.items || []).forEach(l => {
-        if (!l.itemCode) return;
-        tiV[l.itemCode] = (tiV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
-      }));
-    dbTransfers
-      .filter(r => r.date === mainDate && r.from_outlet_id === outlet)
-      .forEach(rec => (rec.items || []).forEach(l => {
-        if (!l.itemCode) return;
-        toV[l.itemCode] = (toV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
-      }));
-    dbReturns
-      .filter(r => r.date === mainDate)
-      .forEach(rec => (rec.items || []).forEach(l => {
-        if (!l.itemCode) return;
-        rV[l.itemCode] = (rV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
-      }));
-
-    setMR(prev => prev.map(r => ({
-      ...r,
-      purchase:    pV[r.code]  || 0,
-      transferIn:  tiV[r.code] || 0,
-      transferOut: toV[r.code] || 0,
-      returns:     rV[r.code]  || 0,
-    })));
-  }, [outlet, mainDate, dbPurchases, dbTransfers, dbReturns]); // eslint-disable-line
-
-  // ── Auto-populate Purchase / InvPurchase for Empty ──
-  useEffect(() => {
-    const codes = new Set(seedEmp.map(e => e.code));
-    const pQ = {}, ipQ = {};
-
-    // ── Supabase only ──
-    dbPurchases
-      .filter(r => r.date === empDate)
-      .forEach(rec => (rec.items || []).forEach(l => {
-        if (!l.itemCode || !codes.has(l.itemCode)) return;
-        const qty = parseFloat(l.qty) || 0;
-        if (!qty) return;
-        const sid = rec.supplier_id || "";
-        // AFTER
-// AFTER — clean, unambiguous routing
-const isEmptyPurchaseSup = sid === EMPTY_PURCHASE_SUP_ID;
-const isMainSup = MAIN_EMPTY_SUP_IDS.has(sid);
-
-if (isEmptyPurchaseSup || l.emptyRoute === "invPurchase") {
-  // Empty Purchase supplier → Invoice Purchase column
-  ipQ[l.itemCode] = (ipQ[l.itemCode] || 0) + qty;
-} else if (isMainSup || l.emptyRoute === "purchase") {
-  // DCSL / UG / Lion / Toddy / DCSL Beer → Purchase column
-  pQ[l.itemCode] = (pQ[l.itemCode] || 0) + qty;
-}
-      }));
-
-    setER(prev => prev.map(r => ({
-      ...r,
-      purchase:    pQ[r.code]  || 0,
-      invPurchase: ipQ[r.code] || 0,
-    })));
-  }, [outlet, empDate, dbPurchases]); // eslint-disable-line
+  
 
   // ─────────────────────────────────────────────────────────
   //  DERIVE FUNCTIONS
@@ -515,13 +537,13 @@ if (isEmptyPurchaseSup || l.emptyRoute === "invPurchase") {
    *     if sold=0 → stkSE × adminSellingPrice
    *     if sold>0 → (stkSE × adminSellingPrice) + ((rate − adminSellingPrice) × sold)
    */
-  function deriveMain(r) {
+  // REPLACE WITH:
+function deriveMain(r) {
     const opening     = Number(r.openingStock) || 0;
     const purchase    = Number(r.purchase)     || 0;
     const transferIn  = Number(r.transferIn)   || 0;
     const transferOut = Number(r.transferOut)  || 0;
     const returns     = Number(r.returns)      || 0;
-    // ✅ Returns ADDED (not subtracted) — doc: Opening+Purchase+TransIn−TransOut+Returns
     const total       = opening + purchase + transferIn - transferOut + returns;
     const sold        = parseFloat(r.sold) || 0;
     const balance     = total - sold;
@@ -533,7 +555,7 @@ if (isEmptyPurchaseSup || l.emptyRoute === "invPurchase") {
     const amtSE  = sold === 0
       ? stkSE * r.adminSellingPrice
       : (stkSE * r.adminSellingPrice) + ((r.rate - r.adminSellingPrice) * sold);
-    return { total, sold, balance, amount, endStock, amtSE, stkSE };
+    return { total, sold, balance, amount, endStock, amtSE, stkSE, purchase, transferIn, transferOut, returns };
   }
 
   /**
@@ -597,14 +619,14 @@ if (isEmptyPurchaseSup || l.emptyRoute === "invPurchase") {
   nd.setDate(nd.getDate() + 1);
   const nextDay = nd.toISOString().slice(0, 10);
   const om = {};
-  mainRowsWithDerived.forEach(r => {
-    om[r.code] = r.endStock !== "" ? r.endStock : 0;
-  });
+mainRowsWithDerived.forEach(r => {
+  const key = r.id || `${r.code}__${r.supplier}`;
+  om[key] = deriveMain(r).endStock;
+});
 
   // Save opening for next day + propagate forward for past/future date support
   await saveOpeningStock(outlet, nextDay, om, null);
  await propagateOpeningForward(outlet, mainDate, om, null);
-  await propagateOpeningForward(outlet, mainDate, om, null);
 
   // Cash & GL postings
   await addSale(outlet, {
@@ -644,7 +666,7 @@ if (isEmptyPurchaseSup || l.emptyRoute === "invPurchase") {
   nd.setDate(nd.getDate() + 1);
   const nextDay = nd.toISOString().slice(0, 10);
   const oe = {};
-  empRows.forEach(r => { oe[r.id] = deriveEmp(r).endStock !== "" ? deriveEmp(r).endStock : 0; });
+  empRows.forEach(r => { oe[r.id] = deriveEmp(r).endStock; });
   await saveOpeningStock(outlet, nextDay, null, oe);
 await propagateOpeningForward(outlet, empDate, null, oe);
   const empRowsWithDerived = empRows.map(r => {
@@ -723,7 +745,7 @@ const csData = useMemo(() => inv.map(item => {
   // ── Transfers In ──
   let transferIn = 0;
   dbTransfers
-    .filter(t => t.date >= csFrom && t.date <= csTo && t.from_outlet_id !== outlet)
+    .filter(t => t.date >= csFrom && t.date <= csTo && (t.from_outlet_id ?? t.from) !== outlet)
     .forEach(t => (t.items || []).forEach(l => {
       if (l.itemCode === item.code) transferIn += parseFloat(l.qty) || 0;
     }));
@@ -731,7 +753,7 @@ const csData = useMemo(() => inv.map(item => {
   // ── Transfers Out ──
   let transferOut = 0;
   dbTransfers
-    .filter(t => t.date >= csFrom && t.date <= csTo && t.from_outlet_id === outlet)
+    .filter(t => t.date >= csFrom && t.date <= csTo && (t.from_outlet_id ?? t.from) === outlet)
     .forEach(t => (t.items || []).forEach(l => {
       if (l.itemCode === item.code) transferOut += parseFloat(l.qty) || 0;
     }));
@@ -903,7 +925,7 @@ const csData = useMemo(() => inv.map(item => {
                       <tr><td colSpan={17}><div className="empty">No items.</div></td></tr>
                     )}
                     {filteredMain.map(r => {
-                      const { total, sold, balance, amount, endStock, amtSE, stkSE } = deriveMain(r);
+                      const { total,sold, balance, amount, endStock, amtSE, stkSE, purchase, transferIn, transferOut, returns } = deriveMain(r);
                       return (
                         <tr key={r.id}>
                           <td className="mono" style={{ fontSize:10 }}>{r.code}</td>
@@ -913,10 +935,11 @@ const csData = useMemo(() => inv.map(item => {
                             {r.supplier?.replace(/^\d{4}-/, "") || "—"}
                           </td>
                           <td className="mono" style={{ textAlign:"right" }}>{r.openingStock || "—"}</td>
-                          <td className="mono cg" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{r.purchase || "—"}</td>
-                          <td className="mono cb" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{r.transferIn || "—"}</td>
-                          <td className="mono ca" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{r.transferOut || "—"}</td>
-                          <td className="mono cr" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{r.returns || "—"}</td>
+                          
+                         <td className="mono cg" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{purchase || "—"}</td>
+                         <td className="mono cb" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{transferIn || "—"}</td>
+                         <td className="mono ca" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{transferOut || "—"}</td>
+                         <td className="mono cr" style={{ textAlign:"right", ...roStyle, padding:"3px 6px" }}>{returns || "—"}</td>
                           <td className="mono bold" style={{ textAlign:"right" }}>{fmt(total)}</td>
                           <td>
                             <input

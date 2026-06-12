@@ -538,3 +538,43 @@ export const addSupplier = async (supplier) => {
   });
   if (error) console.error("addSupplier:", error);
 };
+
+export async function saveEmptyInventoryMaster(items) {
+  if (!items || items.length === 0) return;
+  const { error } = await supabase
+    .from("inventory_master")
+    .upsert(
+      items.map(i => ({
+        id:           i.id,
+        code:         i.code,
+        name:         i.name,
+        supplier_id:   i.supplier,  
+        type:         "EMP",
+        unit_cost:     Number(i.unitCost)     || 0,
+         selling_price: Number(i.sellingPrice) || 0,
+        qty:          Number(i.qty)          || 0,
+      })),
+      { onConflict: "id" }
+    );
+  if (error) console.error("saveEmptyInventoryMaster:", error);
+  else console.log("Empty saved to inventory_master ✓");
+}
+
+export async function getEmptyInventoryMaster() {
+  const { data, error } = await supabase
+    .from("inventory_master")
+    .select("*")
+    .eq("type", "EMP");
+  if (error) { console.error("getEmptyInventoryMaster:", error); return null; }
+  return data.map(i => ({
+    id:           i.id,
+    code:         i.code,
+    name:         i.name,
+    type:         i.type,
+    description:  i.description,
+    supplier:     i.supplier_id,       
+    unitCost:     Number(i.unit_cost), 
+    sellingPrice: Number(i.selling_price), 
+    qty:          Number(i.qty) || 0,
+  }));
+}

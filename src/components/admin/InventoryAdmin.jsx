@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect,  useRef} from "react";
 import { ls, lss } from "../../utils/helpers";
-import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getSales, getPurchases, getTransfers, getReturns } from "../../db";
+import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getSales, getPurchases, getTransfers, getReturns,saveEmptyInventoryMaster} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SEED_EMPTY, SUPPLIERS_LIST, SUP_COLOR, ITEM_TYPES, OUTLETS, OUTLET_INV_SEEDS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -441,10 +441,14 @@ export function loadEmptyFromStorage() {
 // ─────────────────────────────────────────────
 // OUTLET EMPTY INVENTORY PANEL
 // ─────────────────────────────────────────────
-function OutletEmptyPanel({ toast_ }) {
-  // Read directly from localStorage using the shared loader —
-  // this ensures seed data is written first, then read, every time Tab 4 mounts.
-  const [emptyInv, setEmptyInv] = useState(() => loadEmptyFromStorage());
+function OutletEmptyPanel({ toast_, emptyInv: emptyInvProp }) {
+  const [emptyInv, setEmptyInv] = useState(() => emptyInvProp || loadEmptyFromStorage());
+  useEffect(() => {
+    if (emptyInvProp) setEmptyInv(emptyInvProp);
+  }, [emptyInvProp]);
+useEffect(() => {
+  setEmptyInv(loadEmptyFromStorage());
+}, []); 
 
   const [selOutlet, setSelOutlet] = useState(OUTLETS[0]);
   const [supF,      setSupF]      = useState("ALL");
@@ -481,25 +485,25 @@ function openEdit(item) {
     sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
     unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
     hidden:       ov.hidden || false,
-    openingQty:   ov.qty          !== undefined ? ov.qty          : "",
+    qty:         ov.qty          !== undefined ? ov.qty          : "",
   });
   setEditItem(item);
 }
 
+
   // AFTER
-function saveEdit() {
+  function saveEdit() {
   const newOv = {
     ...overrides,
     [`${editItem.code}__${editItem.supplier}`]: {
       unitCost:     Number(ef.unitCost)     || 0,
       sellingPrice: Number(ef.sellingPrice) || 0,
       hidden:       ef.hidden,
-      qty:          ef.openingQty !== "" && ef.openingQty != null
-                      ? Number(ef.openingQty)
+      qty:          ef.qty !== "" && ef.qty != null
+                      ? Number(ef.qty)
                       : undefined,
     },
   };
-  // Remove qty key entirely if admin left it blank (so staff falls back to 0, not main stock)
   if (newOv[`${editItem.code}__${editItem.supplier}`].qty === undefined) {
     delete newOv[`${editItem.code}__${editItem.supplier}`].qty;
   }
@@ -732,11 +736,11 @@ function saveEdit() {
       <div className="ff">
         <label>Outlet Opening Quantity</label>
         <input
-          type="number"
-          min="0"
-          value={ef.qty ?? ""}
-          onChange={e => setEf({...ef, qty: e.target.value})}
-          placeholder={editItem.qty != null ? `Default: ${editItem.qty}` : "e.g. 10"}
+        type="number"
+        min="0"
+        value={ef.qty ?? ""}
+        onChange={e => setEf({...ef, qty: e.target.value})}
+        placeholder="e.g. 10 — outlet opening qty"
         />
       </div>
       <div className="ff" style={{visibility:"hidden"}} aria-hidden="true"/>
@@ -778,13 +782,26 @@ function EmptyStockPanel({ toast_, isAdmin, onInventoryChange }) {
   // EMPTY_SEED and loadEmptyFromStorage() are now at module level (shared with Tab 4)
   function loadEmpty() { return loadEmptyFromStorage(); }
 
-// FIX: notify parent whenever empty inventory changes so OutletEmptyPanel stays in sync
-function saveEmpty(data) {
+
+async function saveEmpty(data) {
+    console.log("saveEmpty called:", data.length, "items"); 
   setItems(data);
   lss("inv_empty_v2", data);
   if (onInventoryChange) onInventoryChange(data);
+  await saveEmptyInventoryMaster(data); 
+    console.log("saveEmptyInventoryMaster done ✓");
 }
   const [items,     setItems]     = useState(loadEmpty);
+  useEffect(() => {
+  const existing = loadEmptyFromStorage();
+  if (existing && existing.length > 0) {
+    console.log("Syncing empty inventory to Supabase:", existing.length, "items");
+    saveEmptyInventoryMaster(existing).then(() => {
+      console.log("Sync done ✓");
+    });
+  }
+}, []); 
+ 
   const [supF,      setSupF]      = useState("ALL");
   const [search,    setSearch]    = useState("");
   const [modal,     setModal]     = useState(null);
@@ -834,7 +851,7 @@ function saveEmpty(data) {
     return Object.entries(groups).map(([supplier, its]) => ({ supplier, items: its }));
   }, [filtItems, supF]);
 
-  function saveItem() {
+   async function saveItem() {
     if (!form.code || !form.name || !form.supplier) {
       toast_("Fill code, name and supplier", "err"); return;
     }
@@ -848,18 +865,19 @@ function saveEmpty(data) {
   qty:          Number(form.qty)          || 0,
   type:         form.type || "",
 };
-   if (modal === "add") {
+
+if (modal === "add") {
   if (items.find(i => i.code === form.code && i.supplier === form.supplier)) {
     toast_("Code already exists for this supplier", "err"); return;
   }
-  saveEmpty([...items, item]);
+  await saveEmpty([...items, item]);
   toast_("Empty item added ✓");
 } else {
-  saveEmpty(items.map(i => i.id === modal.id ? { ...i, ...item } : i));
+  await saveEmpty(items.map(i => i.id === modal.id ? { ...i, ...item } : i));
   toast_("Updated ✓");
 }
-    setModal(null);
-  }
+setModal(null);
+}
 
   function savePrice() {
     saveEmpty(items.map(i => i.id === priceM.id
@@ -1073,10 +1091,7 @@ function saveEmpty(data) {
         <input type="number" value={form.sellingPrice}
           onChange={e=>setForm({...form,sellingPrice:e.target.value})} placeholder="0.00"/>
       </div>
-      <div className="ff"><label>Opening Qty</label>
-        <input type="number" value={form.qty}
-          onChange={e=>setForm({...form,qty:e.target.value})} placeholder="0"/>
-      </div>
+      
     </div>
     {form.unitCost && form.sellingPrice && Number(form.unitCost) > 0 && (
       <div style={{background:"var(--s2)",borderRadius:6,padding:"7px 11px",fontSize:11.5,
