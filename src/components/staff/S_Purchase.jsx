@@ -8,13 +8,14 @@ import { loadEmptyFromStorage } from "../admin/InventoryAdmin";
 import {
   addPurchase, addAPInvoice, addGLEntry,
   addCashEntry, addTransfer, addAREntry, addReturn,
-  getCOA, getInventoryMaster, getSuppliers,
+  getCOA, getInventoryMaster, getSuppliers,getEmptyInventoryMaster,
 } from "../../db";
 
 export default function S_Purchase({ outlet, user, toast_ }) {
 
   // ── Load from Supabase (inv_main & COA) but keep emptyInv & extra suppliers from localStorage ──
   const [inv,            setInv]     = useState(SEED_INVENTORY);
+  const [emptyInvState,  setEmptyInv] = useState([]);
   const [allCOA,         setCOA]     = useState(COA_DEF);
   const [suppliersReady, setReady]   = useState(false);
 
@@ -28,9 +29,10 @@ const SUP_ORDER = [
 ];
 
 useEffect(() => {
+ // REPLACE WITH:
   getInventoryMaster().then(data => {
     if (data.length) {
-      const sorted = [...data].sort((a, b) => {
+      const sorted = [...data.filter(i => i.type !== "EMP")].sort((a, b) => {
         const oi = SUP_ORDER.indexOf(a.supplier);
         const oj = SUP_ORDER.indexOf(b.supplier);
         const supCmp = (oi === -1 ? 999 : oi) - (oj === -1 ? 999 : oj);
@@ -42,12 +44,15 @@ useEffect(() => {
       setInv(sorted);
     }
   });
+  getEmptyInventoryMaster().then(data => {
+    if (data && data.length) setEmptyInv(data);
+    else setEmptyInv(loadEmptyFromStorage());
+  });
   getCOA().then(data => { if (data.length) setCOA(data); });
   setReady(true);
 }, []);
 
-  // These still read from localStorage (not yet migrated)
-  const emptyInv       = loadEmptyFromStorage();
+    const emptyInv = emptyInvState.length > 0 ? emptyInvState : loadEmptyFromStorage();
   const extraSuppliers = (() => { try { return JSON.parse(localStorage.getItem("extra_suppliers") || "[]"); } catch { return []; } })();
   const extraSupIds    = extraSuppliers.map(s => s.id);
   const mergedSuppliers = [

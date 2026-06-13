@@ -468,8 +468,7 @@ useEffect(() => {
 
 function loadOutlet(o) {
   setSelOutlet(o);
-  const validCodes = emptyInv.map(i => i.code);
-  setOverridesState(pruneOverrides(outletEmptyInvKey(o), validCodes));
+  setOverridesState(ls(outletEmptyInvKey(o), {}));
   setSupF("ALL"); setSearch(""); setShowOnly("all");
 }
 
@@ -539,8 +538,8 @@ function openEdit(item) {
         v.toLowerCase().includes(search.toLowerCase())
       ))
     );
-    if (showOnly === "custom") items = items.filter(i => overrides[i.code]);
-    if (showOnly === "hidden") items = items.filter(i => overrides[i.code]?.hidden);
+    if (showOnly === "custom") items = items.filter(i => overrides[`${i.code}__${i.supplier}`]);
+    if (showOnly === "hidden") items = items.filter(i => overrides[`${i.code}__${i.supplier}`]?.hidden);
     return items;
   }, [emptyInv, supF, search, overrides, showOnly]);
 
@@ -631,7 +630,7 @@ function openEdit(item) {
                 <tr><td colSpan={11}><div className="empty">No items found.</div></td></tr>
               )}
               {filtInv.map((item, idx) => {
-                const ov           = overrides[item.code];
+                const ov           = overrides[`${item.code}__${item.supplier}`];
                 const hasOv        = !!ov;
                 const isHidden     = ov?.hidden;
                 const col          = getSupColor(item.supplier);
@@ -682,7 +681,7 @@ function openEdit(item) {
                         </button>
                         {hasOv && (
                           <button className="btndel" title="Reset to main"
-                            onClick={()=>{if(confirm("Reset to main empty price?"))resetOverride(item.code);}}>
+                            onClick={()=>{if(confirm("Reset to main empty price?"))resetOverride(`${item.code}__${item.supplier}`);}}>
                             {I.trash}
                           </button>
                         )}
@@ -1185,6 +1184,14 @@ export default function InventoryAdmin({ toast_, isAdmin, adminOutlets }) {
 
 useEffect(() => {
   loadInvFromSupabase().then(data => setIR(data));
+
+  // Sync empty inventory to Supabase on admin load
+  const existingEmpty = loadEmptyFromStorage();
+  if (existingEmpty && existingEmpty.length > 0) {
+    saveEmptyInventoryMaster(existingEmpty).then(() => {
+      console.log("Empty inventory synced to Supabase ✓");
+    });
+  }
 }, []);
   const [empty,    setER] = useState(() => ls("inv_empty", SEED_EMPTY));
   const [invTab,   setInvTab]  = useState("main");

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
-import { addSale, addCashEntry, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
+import { addSale, addCashEntry, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
 import { outletInvKey, outletEmptyInvKey } from "../admin/InventoryAdmin";
@@ -256,11 +256,20 @@ const [emptyMaster, setEmptyMaster] = useState([]);
 
 // ── Load master inventory from Supabase ──
 useEffect(() => {
+  // Load empty master separately to guarantee prices from Tab 2
+  getEmptyInventoryMaster().then(empData => {
+    if (empData && empData.length > 0) {
+      const empItems = empData.filter(i => i.supplier !== "EMPTY PURCHASE");
+      setEmptyMaster(empItems);
+    }
+  });
+
+
   getInventoryMaster().then(data => {
     if (data && data.length > 0) {
-      // EMP items → emptyMaster state
+      // EMP items already handled above — skip them here
       const empItems = data.filter(i => i.type === "EMP" && i.supplier !== "EMPTY PURCHASE");
-      setEmptyMaster(empItems);
+      if (empItems.length > 0) setEmptyMaster(prev => prev.length > 0 ? prev : empItems);
 
       // Main items → masterInv state (sorted)
       const mainItems = data.filter(i => i.type !== "EMP");

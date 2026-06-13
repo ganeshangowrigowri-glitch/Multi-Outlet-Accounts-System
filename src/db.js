@@ -539,42 +539,48 @@ export const addSupplier = async (supplier) => {
   if (error) console.error("addSupplier:", error);
 };
 
+const EMPTY_SUP_MAP = {
+  "DCSL":         "2001-DCSL",
+  "LION BREWERY": "2002-LION BREWERY",
+  "UG":           "2003-UG",
+  "DCSL BEER":    "2006-DCSL BEER",
+  "TODDY":        "2007-TODDY",
+};
+// REPLACE WITH:
 export async function saveEmptyInventoryMaster(items) {
   if (!items || items.length === 0) return;
   const { error } = await supabase
-    .from("inventory_master")
+    .from("inventory_empty")
     .upsert(
       items.map(i => ({
-        id:           i.id,
-        code:         i.code,
-        name:         i.name,
-        supplier_id:   i.supplier,  
-        type:         "EMP",
+        id:            i.id,
+        code:          i.code,
+        name:          i.name,
+        supplier_id:   i.supplier,
+        type:          "EMP",
         unit_cost:     Number(i.unitCost)     || 0,
-         selling_price: Number(i.sellingPrice) || 0,
-        qty:          Number(i.qty)          || 0,
+        selling_price: Number(i.sellingPrice) || 0,
+        qty:           Number(i.qty)          || 0,
       })),
       { onConflict: "id" }
     );
   if (error) console.error("saveEmptyInventoryMaster:", error);
-  else console.log("Empty saved to inventory_master ✓");
+  else console.log("Empty saved to inventory_empty ✓");
 }
 
 export async function getEmptyInventoryMaster() {
   const { data, error } = await supabase
-    .from("inventory_master")
-    .select("*")
-    .eq("type", "EMP");
-  if (error) { console.error("getEmptyInventoryMaster:", error); return null; }
+    .from("inventory_empty")
+    .select("*");
+  if (error) { console.error("getEmptyInventoryMaster:", error); return []; }
   return data.map(i => ({
     id:           i.id,
     code:         i.code,
     name:         i.name,
-    type:         i.type,
-    description:  i.description,
-    supplier:     i.supplier_id,       
-    unitCost:     Number(i.unit_cost), 
-    sellingPrice: Number(i.selling_price), 
-    qty:          Number(i.qty) || 0,
+    type:         i.type || "EMP",
+    supplier:     i.supplier_id,
+    unitCost:     Number(i.unit_cost)     || 0,
+    sellingPrice: Number(i.selling_price) || 0,
+    qty:          Number(i.qty)           || 0,
   }));
 }
