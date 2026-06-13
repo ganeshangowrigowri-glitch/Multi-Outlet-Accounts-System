@@ -334,7 +334,8 @@ useEffect(() => {
                       <td>
                         <select value={l.itemCode} onChange={e => updTL(l.id, "itemCode", e.target.value)} style={{ width: 85 }}>
                           <option value="">Select…</option>
-                          {inv.map(it => <option key={it.code} value={it.code}>{it.code} — {it.name}</option>)}
+                          // REPLACE WITH:
+                           {inv.map(it => <option key={`${it.code}__${it.supplier}`} value={it.code}>{it.code} — {it.name}</option>)}
                         </select>
                       </td>
                       <td style={{ fontSize: 10.5, color: "var(--mut)" }}>{l.itemName || "—"}</td>
@@ -408,7 +409,7 @@ useEffect(() => {
                       <td>
                         <select value={l.itemCode} onChange={e => updRL(l.id, "itemCode", e.target.value)} style={{ width: 85 }}>
                           <option value="">Select…</option>
-                          {inv.map(it => <option key={it.code} value={it.code}>{it.code} — {it.name}</option>)}
+                          {inv.map(it => <option key={`${it.code}__${it.supplier}`} value={it.code}>{it.code} — {it.name}</option>)}
                         </select>
                       </td>
                       <td style={{ fontSize: 10.5, color: "var(--mut)" }}>{l.itemName || "—"}</td>
