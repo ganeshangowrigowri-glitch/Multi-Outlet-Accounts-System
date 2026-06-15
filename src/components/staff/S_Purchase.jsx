@@ -8,7 +8,7 @@ import { loadEmptyFromStorage } from "../admin/InventoryAdmin";
 import {
   addPurchase, addAPInvoice, addGLEntry,
   addCashEntry, addTransfer, addAREntry, addReturn,
-  getCOA, getInventoryMaster, getSuppliers,getEmptyInventoryMaster,
+  getCOA, getInventoryMaster, getSuppliers, getEmptyInventoryMaster,
 } from "../../db";
 
 export default function S_Purchase({ outlet, user, toast_ }) {
@@ -74,7 +74,7 @@ useEffect(() => {
 
   const arAccList = allCOA.filter(a => a.id >= "1200" && a.id <= "1299");
   const [trAcc, setTrAcc] = useState(arAccList[0]?.id || "");
-  useEffect(() => { if (arAccList.length && !trAcc) setTrAcc(arAccList[0]?.id || ""); }, [allCOA]);
+  useEffect(() => { if (arAccList.length && !trAcc) setTrAcc(arAccList[0]?.id || ""); }, [allCOA]); // eslint-disable-line
 
   const [retDate,  setRetDate]  = useState(today());
   const [retLines, setRetLines] = useState([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", sellingPrice: "", stockValue: 0 }]);
@@ -150,14 +150,22 @@ useEffect(() => {
     setLateCharge("");
   }
 
-  // ── Save transfer — same logic, Supabase storage ──
+  // ── Save transfer — UI uses AR/AP accounts; DB outlet FK uses staff outlet + type in notes ──
   async function saveTransfer() {
     if (!trAcc || !trLines[0].itemCode) { toast_("Fill account and items", "err"); return; }
 
     const total = trLines.reduce((a, l) => a + (l.stockValue || 0), 0);
-    const rec   = { id: uid(), date: trDate, type: trType, account: trAcc, lines: trLines, total, outlet, by: user.username };
 
-    await addTransfer({ from: trType === "out" ? outlet : trAcc, to: trType === "out" ? trAcc : outlet, date: trDate, items: trLines, status: "completed" });
+    const ok = await addTransfer({
+      from: outlet,
+      to:   outlet,
+      date: trDate,
+      items: trLines,
+      status: "completed",
+      type: trType,
+      notes: `type:${trType}|account:${trAcc}`,
+    });
+    if (!ok?.ok) { toast_(ok?.message || "Transfer save failed", "err"); return; }
 
     if (trType === "out") {
       await addAREntry(outlet, { date: trDate, description: `Transfer Out to ${trAcc}`, debit: total, credit: 0, ref: trAcc });
@@ -339,8 +347,7 @@ useEffect(() => {
                       <td>
                         <select value={l.itemCode} onChange={e => updTL(l.id, "itemCode", e.target.value)} style={{ width: 85 }}>
                           <option value="">Select…</option>
-                          // REPLACE WITH:
-                           {inv.map(it => <option key={`${it.code}__${it.supplier}`} value={it.code}>{it.code} — {it.name}</option>)}
+                          {inv.map(it => <option key={`${it.code}__${it.supplier}`} value={it.code}>{it.code} — {it.name}</option>)}
                         </select>
                       </td>
                       <td style={{ fontSize: 10.5, color: "var(--mut)" }}>{l.itemName || "—"}</td>

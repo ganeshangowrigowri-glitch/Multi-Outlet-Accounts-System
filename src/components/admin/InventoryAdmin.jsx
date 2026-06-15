@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect,  useRef} from "react";
 import { ls, lss } from "../../utils/helpers";
-import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getSales, getPurchases, getTransfers, getReturns,saveEmptyInventoryMaster} from "../../db";
+import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns,saveEmptyInventoryMaster} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SEED_EMPTY, SUPPLIERS_LIST, SUP_COLOR, ITEM_TYPES, OUTLETS, OUTLET_INV_SEEDS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -117,19 +117,26 @@ function loadOutlet(o) {
 }
 
   async function syncOpeningToDb(newOv) {
-    const mainMap = {};
-    Object.entries(newOv).forEach(([key, ov]) => {
-      if (ov?.qty !== undefined) mainMap[key.split("__")[0]] = Number(ov.qty) || 0;
-    });
-    if (Object.keys(mainMap).length) await saveOpeningStock(selOutlet, today(), mainMap, null);
+  const mainMap = {};
+  Object.entries(newOv).forEach(([key, ov]) => {
+    if (ov?.qty !== undefined) {
+      // Save BOTH by composite key AND by code alone so staff side finds it
+      const code = key.split("__")[0];
+      mainMap[key]  = Number(ov.qty) || 0;   // composite: D0001__2001-DCSL
+      mainMap[code] = Number(ov.qty) || 0;   
+    }
+  });
+  if (Object.keys(mainMap).length) {
+    
+    const existing = await getOpeningStock(selOutlet, today());
+    await saveOpeningStock(
+      selOutlet,
+      today(),
+      { ...(existing?.main || {}), ...mainMap },
+      existing?.emp || null
+    );
   }
-
-  async function saveOverrides(newOv) {
-    setOverridesState(newOv);
-    lss(outletInvKey(selOutlet), newOv);
-    await syncOpeningToDb(newOv);
-  }
-
+}
   function openEdit(item) {
     const ov = overrides[`${item.code}__${item.supplier}`] || {};
     setEf({
@@ -142,21 +149,40 @@ function loadOutlet(o) {
     setEditItem(item);
   }
 
-  async function saveEdit() {
+
+   async function saveOverrides(newOv) {
+  try {
+    setOverridesState(newOv);
+    lss(outletInvKey(selOutlet), newOv);
+    await syncOpeningToDb(newOv);
+  } catch (err) {
+    console.error("saveOverrides error:", err);
+    toast_("Save failed — check console", "err");
+  }
+}
+
+async function saveEdit() {
+  try {
+    const qty = ef.qty !== "" && ef.qty != null ? Number(ef.qty) : undefined;
+    const ovEntry = {
+      unitCost:     Number(ef.unitCost)     || 0,
+      sellingPrice: Number(ef.sellingPrice) || 0,
+      hidden:       ef.hidden,
+    };
+    if (qty !== undefined) ovEntry.qty = qty;
+
     const newOv = {
       ...overrides,
-      [`${editItem.code}__${editItem.supplier}`]: {
-        unitCost:     Number(ef.unitCost)     || 0,
-        sellingPrice: Number(ef.sellingPrice) || 0,
-        hidden:       ef.hidden,
-        qty:          Number(ef.qty)          || 0,
-      },
+      [`${editItem.code}__${editItem.supplier}`]: ovEntry,
     };
     await saveOverrides(newOv);
     toast_(`${editItem.code} updated for ${selOutlet} ✓`);
     setEditItem(null);
+  } catch (err) {
+    console.error("saveEdit error:", err);
+    toast_("Save failed — check console", "err");
   }
-
+}
   function resetOverride(itemKey) {
     const newOv = { ...overrides };
     delete newOv[itemKey];
@@ -1207,6 +1233,9 @@ useEffect(() => {
   const [supForm,  setSupForm] = useState({id:"",name:"",color:"#94a3b8"});
   const [typeInput,setTypeInput]= useState("");
   const [csMode,   setCsMode]  = useState("monthly");
+  const [repairOutlet, setRepairOutlet] = useState(outletNames[0] || "");
+  const [repairDate,   setRepairDate]   = useState(today());
+  const [repairing,    setRepairing]    = useState(false);
   const [csDate,   setCsDate]  = useState(today());
   const [csWeekOf, setCsWeekOf]= useState(today());
   const [csMonth,  setCsMonth] = useState(today().slice(0,7));
@@ -1447,6 +1476,39 @@ useEffect(() => {
     setIModal(null); setTypeInput("");
   }
 
+  // ── REPAIR OPENING STOCK ──
+async function repairOpeningFromDate(outlet, fromDate) {
+  const sales = await getSales(outlet);
+  const targetSale = sales.find(s => s.date === fromDate);
+  if (!targetSale) {
+    toast_(`No sale found for ${fromDate} at ${outlet}`, "err");
+    return;
+  }
+  const om = {};
+  const oe = {};
+  (targetSale.items || []).forEach(r => {
+    if (r.isEmptyItem) {
+      if (r.id) oe[r.id] = parseFloat(r.endStock) || 0;
+    } else {
+      const key = r.id || `${r.code}__${r.supplier}`;
+      om[key] = parseFloat(r.endStock) || 0;
+    }
+  });
+  for (let i = 1; i <= 30; i++) {
+    const d = new Date(fromDate);
+    d.setDate(d.getDate() + i);
+    const dateStr = d.toISOString().slice(0, 10);
+    const existing = await getOpeningStock(outlet, dateStr);
+    const mergedMain = Object.keys(om).length
+      ? { ...(existing?.main || {}), ...om }
+      : existing?.main || null;
+    const mergedEmp = Object.keys(oe).length
+      ? { ...(existing?.emp || {}), ...oe }
+      : existing?.emp || null;
+    await saveOpeningStock(outlet, dateStr, mergedMain, mergedEmp);
+  }
+  toast_(`Opening stock repaired from ${fromDate} for ${outlet} ✓`);
+}
   // AFTER
 async function saveSupplier() {
   if (!supForm.id||!supForm.name){toast_("Fill ID and Name","err");return;}
@@ -1549,6 +1611,51 @@ async function saveSupplier() {
             <strong style={{color:"var(--acc2,#818cf8)"}}>Master Inventory</strong> — These items are visible to all outlets.
             Use <strong style={{color:"var(--txt)"}}>Outlet Inventory</strong> to customise prices per outlet.
           </div>
+          {isAdmin && (
+  <div style={{
+    background:"rgba(239,68,68,.07)", border:"1px solid rgba(239,68,68,.2)",
+    borderRadius:8, padding:"10px 14px", marginBottom:12,
+    display:"flex", alignItems:"flex-end", gap:10, flexWrap:"wrap"
+  }}>
+    <div>
+      <label style={{fontSize:10,fontWeight:700,textTransform:"uppercase",
+        color:"var(--mut)",display:"block",marginBottom:3}}>
+        🔧 Repair Opening Stock — From Date
+      </label>
+      <input
+        type="date" value={repairDate}
+        onChange={e => setRepairDate(e.target.value)}
+        style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
+          borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}}
+      />
+    </div>
+    <div>
+      <label style={{fontSize:10,fontWeight:700,textTransform:"uppercase",
+        color:"var(--mut)",display:"block",marginBottom:3}}>Outlet</label>
+      <select value={repairOutlet} onChange={e => setRepairOutlet(e.target.value)}
+        style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
+          borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}}>
+        {outletNames.map(o => <option key={o}>{o}</option>)}
+      </select>
+    </div>
+    <button
+      className="btn btnd"
+      style={{borderColor:"var(--red)",color:"var(--red)"}}
+      disabled={repairing}
+      onClick={async () => {
+        if (!confirm(`Re-propagate opening from ${repairDate} for ${repairOutlet}?`)) return;
+        setRepairing(true);
+        await repairOpeningFromDate(repairOutlet, repairDate);
+        setRepairing(false);
+      }}
+    >
+      {repairing ? "Repairing…" : "🔧 Repair Opening"}
+    </button>
+    <span style={{fontSize:11,color:"var(--mut)",alignSelf:"center"}}>
+      Use when a day was skipped and next day shows 0 opening.
+    </span>
+  </div>
+)}
 
           <div style={{display:"flex",alignItems:"flex-start",gap:8,marginBottom:6}}>
             <div className="stabs" style={{flex:1,flexWrap:"wrap"}}>

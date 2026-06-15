@@ -113,14 +113,42 @@ function prevDate(dateStr) {
   d.setDate(d.getDate() - 1);
   return d.toISOString().slice(0, 10);
 }
+
+function txnDate(rec) {
+  return (rec.date || "").slice(0, 10);
+}
+
+function txnItems(rec) {
+  return rec.items || rec.lines || [];
+}
+
+function isTransferIn(rec, outlet) {
+  const notes = rec.notes || "";
+  if (notes.includes("type:in")) return true;
+  if (notes.includes("type:out")) return false;
+  return (rec.to_outlet_id ?? rec.to) === outlet;
+}
+
+function isTransferOut(rec, outlet) {
+  const notes = rec.notes || "";
+  if (notes.includes("type:out")) return true;
+  if (notes.includes("type:in")) return false;
+  return (rec.from_outlet_id ?? rec.from) === outlet;
+}
 async function propagateOpeningForward(outlet, fromDate, endStockMain, endStockEmp) {
   for (let i = 1; i <= 30; i++) {
     const d = new Date(fromDate);
     d.setDate(d.getDate() + i);
     const dateStr = d.toISOString().slice(0, 10);
     const existing = await getOpeningStock(outlet, dateStr);
-    if (existing) break;
-    await saveOpeningStock(outlet, dateStr, endStockMain, endStockEmp);
+    const mergedMain = endStockMain
+      ? { ...(existing?.main || {}), ...endStockMain }
+      : existing?.main || null;
+    const mergedEmp = endStockEmp
+      ? { ...(existing?.emp || {}), ...endStockEmp }
+      : existing?.emp || null;
+    await saveOpeningStock(outlet, dateStr, mergedMain, mergedEmp);
+    // removed the break — now writes all 30 days
   }
 }
 
@@ -226,10 +254,13 @@ useEffect(() => {
 }, []);
 
 
+
   const [mainDate,      setMainDate]      = useState(today());
   const [mainSupFilter, setMainSupFilter] = useState("ALL");
   const [empDate,       setEmpDate]       = useState(today());
   const [empSupFilter,  setEmpSupFilter]  = useState("ALL");
+  const [justSaved,     setJustSaved]     = useState(false);
+  const [justSavedEmp,  setJustSavedEmp]  = useState(false);
   const [csFrom,        setCsFrom]        = useState(() => today().slice(0, 7) + "-01");
   const [csTo,          setCsTo]          = useState(today);
   const [physStock,     setPhysStock]     = useState({});
@@ -237,17 +268,30 @@ useEffect(() => {
 const [dbTransfers, setDbTransfers] = useState([]);
 const [dbReturns,   setDbReturns]   = useState([]);
 const [dbSales,     setDbSales]     = useState([]);
-
-useEffect(() => {
+const dbSalesRef = useRef([]);
+const refreshTxnData = useCallback(() => {
   getPurchases(outlet).then(setDbPurchases);
   getTransfers(outlet).then(setDbTransfers);
   getReturns(outlet).then(setDbReturns);
-  getSales(outlet).then(setDbSales);
 }, [outlet]);
+
+useEffect(() => {
+  refreshTxnData();
+  getSales(outlet).then(data => { setDbSales(data); dbSalesRef.current = data; });
+}, [outlet, refreshTxnData]);
+
+
+useEffect(() => {
+  const onFocus = () => refreshTxnData();
+  window.addEventListener("focus", onFocus);
+  return () => window.removeEventListener("focus", onFocus);
+}, [refreshTxnData]);
 
   const mainTableRef = useRef(null);
   const empTableRef  = useRef(null);
   const csTableRef = useRef(null);
+  const skipNextReloadRef = useRef(false);
+  const skipNextEmpReloadRef = useRef(false);
   const mainScrollBy = useCallback(d => mainTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
   const empScrollBy  = useCallback(d => empTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
 
@@ -330,6 +374,10 @@ const [empRows, setER] = useState(() =>
 );
   
   useEffect(() => {
+  if (skipNextReloadRef.current) {
+    skipNextReloadRef.current = false;
+    return;
+  }
   const lsMain = getOutletInventory(outlet, masterInv);
 
   const baseMain = {};
@@ -343,29 +391,29 @@ const [empRows, setER] = useState(() =>
   const pV = {}, tiV = {}, toV = {}, rV = {};
 
   dbPurchases
-    .filter(r => r.date === mainDate)
-    .forEach(rec => (rec.items || []).forEach(l => {
+    .filter(r => txnDate(r) === mainDate)
+    .forEach(rec => txnItems(rec).forEach(l => {
       if (!l.itemCode || l.isEmptyItem) return;
       pV[l.itemCode] = (pV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
     }));
 
-     dbTransfers
-      .filter(r => r.date === mainDate && (r.from_outlet_id ?? r.from) !== outlet)
-    .forEach(rec => (rec.items || []).forEach(l => {
+  dbTransfers
+    .filter(r => txnDate(r) === mainDate && isTransferIn(r, outlet))
+    .forEach(rec => txnItems(rec).forEach(l => {
       if (!l.itemCode) return;
       tiV[l.itemCode] = (tiV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
     }));
 
   dbTransfers
-  .filter(r => r.date === mainDate && (r.from_outlet_id ?? r.from) === outlet)
-    .forEach(rec => (rec.items || []).forEach(l => {
+    .filter(r => txnDate(r) === mainDate && isTransferOut(r, outlet))
+    .forEach(rec => txnItems(rec).forEach(l => {
       if (!l.itemCode) return;
       toV[l.itemCode] = (toV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
     }));
 
   dbReturns
-    .filter(r => r.date === mainDate)
-    .forEach(rec => (rec.items || []).forEach(l => {
+    .filter(r => txnDate(r) === mainDate)
+    .forEach(rec => txnItems(rec).forEach(l => {
       if (!l.itemCode) return;
       rV[l.itemCode] = (rV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
     }));
@@ -373,11 +421,11 @@ const [empRows, setER] = useState(() =>
   (async () => {
     let opening = await getOpeningStock(outlet, mainDate);
     if (!opening) opening = await getOpeningStock(outlet, yDate);
-    if (!opening) opening = { main: baseMain, emp: {} };
-    else opening = { main: { ...baseMain, ...opening.main }, emp: opening.emp || {} };
+   const mergedMain = { ...baseMain, ...(opening?.main || {}) };
+  opening = { main: mergedMain, emp: opening?.emp || {} };
 
-    const todaySale = dbSales.find(
-      s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem)
+    const todaySale = dbSalesRef.current.find(
+    s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem)
     );
     const savedMap = todaySale
       ? Object.fromEntries(
@@ -390,7 +438,10 @@ const [empRows, setER] = useState(() =>
     setMR(() => lsMain.map(i => {
       const adminSP     = Number(i.sellingPrice) || 0;
       const key         = i.id || `${i.code}__${i.supplier}`;
-      const op          = opening.main?.[key] ?? opening.main?.[i.code] ?? 0;
+      const op = opening.main?.[key] 
+        ?? opening.main?.[`${i.code}__${i.supplier}`]
+        ?? opening.main?.[i.code] 
+        ?? 0;
       const saved       = savedMap[i.id];
       const purchase    = pV[i.code]  || 0;
       const transferIn  = tiV[i.code] || 0;
@@ -406,9 +457,10 @@ const [empRows, setER] = useState(() =>
           transferIn,
           transferOut,
           returns,
-          sold:     saved.sold     ?? "",
+          sold:     saved.sold !== undefined && saved.sold !== null ? String(saved.sold) : "",
           rate:     Number(saved.rate) || adminSP,
-          endStock: saved.endStock ?? "",
+          endStock: saved.endStockEdited ? saved.endStock : null,
+          endStockEdited: saved.endStockEdited || false,
         };
       }
       return {
@@ -421,13 +473,17 @@ const [empRows, setER] = useState(() =>
         returns,
         sold:     "",
         rate:     adminSP,
-        endStock: "",
+        endStock: null,
       };
     }));
   })();
-}, [outlet, mainDate, masterInv, dbSales, dbPurchases, dbTransfers, dbReturns]); // eslint-disable-line
+}, [outlet, mainDate, masterInv, dbPurchases, dbTransfers, dbReturns]); // eslint-disable-line
 
 useEffect(() => {
+  if (skipNextEmpReloadRef.current) {
+    skipNextEmpReloadRef.current = false;
+    return;
+  }
   const lsEmp = getOutletEmptyInventory(outlet, masterInv, emptyMaster);
 
   const baseEmp = {};
@@ -441,7 +497,6 @@ useEffect(() => {
   const codes = new Set(lsEmp.map(e => e.code));
   const pQ = {}, ipQ = {};
 
-// REPLACE WITH:
 dbPurchases
   .filter(r => r.date === empDate)
   .forEach(rec => (rec.items || []).forEach(l => {
@@ -472,11 +527,10 @@ dbPurchases
   (async () => {
     let opening = await getOpeningStock(outlet, empDate);
     if (!opening) opening = await getOpeningStock(outlet, yDate);
-    if (!opening) opening = { main: {}, emp: baseEmp };
-    else opening = { main: opening.main || {}, emp: { ...baseEmp, ...opening.emp } };
-
-    const todaySale = dbSales.find(
-      s => s.date === empDate && (s.items || []).some(r => r.isEmptyItem)
+    const mergedEmp = { ...baseEmp, ...(opening?.emp || {}) };
+    opening = { main: opening?.main || {}, emp: mergedEmp };
+    const todaySale = dbSalesRef.current.find(
+    s => s.date === empDate && (s.items || []).some(r => r.isEmptyItem)
     );
     const savedMap = todaySale
       ? Object.fromEntries(
@@ -506,7 +560,8 @@ dbPurchases
             issue:       saved.issue    || "",
             sold:        saved.sold     || "",
             rate:        Number(saved.rate) || adminSP,
-            endStock:    saved.endStock || "",
+            endStock: saved.endStockEdited ? saved.endStock : null,
+            endStockEdited: saved.endStockEdited || false,
           };
         }
         return {
@@ -521,12 +576,12 @@ dbPurchases
           issue:       "",
           sold:        "",
           rate:        adminSP,
-          endStock:    "",
+          endStock: null,
         };
       })
     );
   })();
-}, [outlet, empDate, dbSales, dbPurchases, masterInv, emptyMaster]); // eslint-disable-line
+}, [outlet, empDate, dbPurchases, masterInv, emptyMaster]); // eslint-disable-line
 
   
 
@@ -557,9 +612,9 @@ function deriveMain(r) {
     const sold        = parseFloat(r.sold) || 0;
     const balance     = total - sold;
     const amount      = sold * r.rate;
-    const endStock    = r.endStock !== "" && r.endStock !== undefined
-      ? parseFloat(r.endStock) || 0
-      : balance;
+   const endStock = (r.endStock !== null && r.endStock !== "" && r.endStock !== undefined)
+  ? parseFloat(r.endStock)
+  : balance;
     const stkSE  = endStock - balance;
     const amtSE  = sold === 0
       ? stkSE * r.adminSellingPrice
@@ -587,9 +642,9 @@ function deriveMain(r) {
     // ✅ Sold deducted from balance — doc: purchase+invPurchase+received+return−invIssue−issue−sold
     const balance  = opening + purchase + invPurchase + received + return_ - invIssue - issue - sold;
     const amount   = sold * r.rate;
-    const endStock = r.endStock !== "" && r.endStock !== undefined
-      ? parseFloat(r.endStock) || 0
-      : balance;
+    const endStock = (r.endStock !== null && r.endStock !== "" && r.endStock !== undefined)
+  ? parseFloat(r.endStock)
+  : balance;
     const stkSE = endStock - balance;
     const amtSE = sold === 0
       ? stkSE * r.adminSellingPrice
@@ -600,16 +655,30 @@ function deriveMain(r) {
   // ─────────────────────────────────────────────────────────
   //  FIELD UPDATERS
   // ─────────────────────────────────────────────────────────
-  const updM = (id, field, val) => setMR(prev => prev.map(r =>
-    r.id !== id ? r : {
-      ...r,
-      [field]: field === "sold" || field === "endStock" ? val : parseFloat(val) || 0,
-    }
-  ));
+const updM = (id, field, val) => setMR(prev => prev.map(r => {
+  if (r.id !== id) return r;
+  // When sold changes, clear endStock so it auto-follows balance
+if (field === "sold") {
+  return { ...r, sold: val, endStock: null };
+}
+  // When endStock is manually edited, keep it
+if (field === "endStock") {
+  return { ...r, endStock: val, endStockEdited: true };
+}
+  return { ...r, [field]: parseFloat(val) || 0 };
+}));
 
-  const updE = (id, field, val) => setER(prev => prev.map(r =>
-    r.id !== id ? r : { ...r, [field]: val }
-  ));
+ const updE = (id, field, val) => setER(prev => prev.map(r => {
+  if (r.id !== id) return r;
+  // When any balance-affecting field changes, clear endStock so it auto-follows
+  if (["sold", "received", "return_", "invIssue", "issue"].includes(field)) {
+  return { ...r, [field]: val, endStock: null };
+}
+  if (field === "endStock") {
+  return { ...r, endStock: val, endStockEdited: true };
+}
+return { ...r, [field]: val };
+}));
 
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
@@ -617,27 +686,29 @@ function deriveMain(r) {
   async function saveMainSale() {
   const totalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
 
-  // Embed derived stkSE and endStock into each row
   const mainRowsWithDerived = mainRows.map(r => {
     const { stkSE, endStock } = deriveMain(r);
-    return { ...r, stkSE, endStock };
+    return { 
+      ...r, 
+      stkSE, 
+      endStock, 
+      endStockEdited: r.endStockEdited || false,
+      sold: parseFloat(r.sold) || 0,
+    };
   });
 
-  // Carry end stock to next day's opening (keyed by code for main)
   const nd = new Date(mainDate);
   nd.setDate(nd.getDate() + 1);
   const nextDay = nd.toISOString().slice(0, 10);
   const om = {};
-mainRowsWithDerived.forEach(r => {
-  const key = r.id || `${r.code}__${r.supplier}`;
-  om[key] = deriveMain(r).endStock;
-});
+  mainRowsWithDerived.forEach(r => {
+    const key = r.id || `${r.code}__${r.supplier}`;
+    om[key] = deriveMain(r).endStock;
+  });
 
-  // Save opening for next day + propagate forward for past/future date support
   await saveOpeningStock(outlet, nextDay, om, null);
- await propagateOpeningForward(outlet, mainDate, om, null);
+  await propagateOpeningForward(outlet, mainDate, om, null);
 
-  // Cash & GL postings
   await addSale(outlet, {
     date: mainDate,
     items: mainRowsWithDerived,
@@ -660,13 +731,12 @@ mainRowsWithDerived.forEach(r => {
     source: "sale",
   });
 
-  // ✅ Re-fetch so rows stay visible after save
   const freshSales = await getSales(outlet);
+  dbSalesRef.current = freshSales;
   setDbSales(freshSales);
-
   toast_("Main stock daily sale saved ✓");
 }
-  // ─────────────────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────
   //  SAVE EMPTY DAILY SALE
   // ─────────────────────────────────────────────────────────
   // AFTER
@@ -694,11 +764,16 @@ await propagateOpeningForward(outlet, empDate, null, oe);
     if (p > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Purchase: ${e.name} (${e.supplier})`, debit: 0, credit: p * rate });
   }
 
-  // ✅ Re-fetch so rows stay visible after save
-  const [freshSales] = await Promise.all([getSales(outlet)]);
-  setDbSales(freshSales);
-
-  toast_("Empty stock daily sale saved ✓");
+setJustSavedEmp(true);
+const freshSales = await getSales(outlet);
+skipNextEmpReloadRef.current = true;
+const updatedSales = [
+  ...dbSalesRef.current.filter(s => !(s.date === empDate && s.items?.some(r => r.isEmptyItem))),
+  ...freshSales.filter(s => s.date === empDate)
+];
+dbSalesRef.current = updatedSales;
+setDbSales(updatedSales);
+toast_("Empty stock daily sale saved ✓");
   }
    
   // ─────────────────────────────────────────────────────────
@@ -754,16 +829,16 @@ const csData = useMemo(() => inv.map(item => {
   // ── Transfers In ──
   let transferIn = 0;
   dbTransfers
-    .filter(t => t.date >= csFrom && t.date <= csTo && (t.from_outlet_id ?? t.from) !== outlet)
-    .forEach(t => (t.items || []).forEach(l => {
+    .filter(t => txnDate(t) >= csFrom && txnDate(t) <= csTo && isTransferIn(t, outlet))
+    .forEach(t => txnItems(t).forEach(l => {
       if (l.itemCode === item.code) transferIn += parseFloat(l.qty) || 0;
     }));
 
   // ── Transfers Out ──
   let transferOut = 0;
   dbTransfers
-    .filter(t => t.date >= csFrom && t.date <= csTo && (t.from_outlet_id ?? t.from) === outlet)
-    .forEach(t => (t.items || []).forEach(l => {
+    .filter(t => txnDate(t) >= csFrom && txnDate(t) <= csTo && isTransferOut(t, outlet))
+    .forEach(t => txnItems(t).forEach(l => {
       if (l.itemCode === item.code) transferOut += parseFloat(l.qty) || 0;
     }));
 
@@ -975,7 +1050,8 @@ const csData = useMemo(() => inv.map(item => {
                           <td>
                             <input
                               type="number"
-                              value={r.endStock !== "" && r.endStock !== undefined ? r.endStock : balance}
+                              value={r.endStock !== null && r.endStock !== "" && r.endStock !== undefined ? 
+                              r.endStock : balance}
                               onChange={e => updM(r.id, "endStock", e.target.value)}
                               style={{ width:53, borderColor:"var(--acc,#f59e0b)" }}
                             />
@@ -1095,7 +1171,8 @@ const csData = useMemo(() => inv.map(item => {
                           <td>
                             <input
                               type="number"
-                              value={r.endStock !== "" && r.endStock !== undefined ? r.endStock : balance}
+                              value={r.endStock !== null && r.endStock !== "" && r.endStock !== undefined ? 
+                              r.endStock : balance}
                               onChange={e => updE(r.id, "endStock", e.target.value)}
                               style={{ width:53, borderColor:"var(--acc,#f59e0b)" }}
                             />

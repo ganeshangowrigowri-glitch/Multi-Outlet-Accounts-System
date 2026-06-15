@@ -278,24 +278,29 @@ export const addReturn = async (outlet, ret) => {
  
 // ─── TRANSFERS ──────────────────────────────────────────────
 export const getTransfers = async (outlet) => {
-  const { data, error } = await supabase
-    .from("transfers").select("*")
-    .or(`from_outlet_id.eq.${outlet},to_outlet_id.eq.${outlet}`)
-    .order("date", { ascending: false });
-  if (error) { console.error("getTransfers:", error); return []; }
-  return data;
+  const [fromRes, toRes] = await Promise.all([
+    supabase.from("transfers").select("*").eq("from_outlet_id", outlet).order("date", { ascending: false }),
+    supabase.from("transfers").select("*").eq("to_outlet_id", outlet).order("date", { ascending: false }),
+  ]);
+  if (fromRes.error) console.error("getTransfers from:", fromRes.error);
+  if (toRes.error)   console.error("getTransfers to:", toRes.error);
+  const byId = new Map();
+  [...(fromRes.data || []), ...(toRes.data || [])].forEach(r => byId.set(r.id, r));
+  return [...byId.values()].sort((a, b) => (b.date || "").localeCompare(a.date || ""));
 };
- 
+
 export const addTransfer = async (transfer) => {
+  const notes = transfer.notes || (transfer.type ? `type:${transfer.type}` : "");
   const { error } = await supabase.from("transfers").insert({
     from_outlet_id: transfer.from,
     to_outlet_id:   transfer.to,
     date:           transfer.date,
     items:          transfer.items,
     status:         transfer.status || "completed",
-    notes:          transfer.notes || "",
+    notes,
   });
-  if (error) console.error("addTransfer:", error);
+  if (error) { console.error("addTransfer:", error); return { ok: false, message: error.message }; }
+  return { ok: true };
 };
  
 // ─── AP INVOICES ─────────────────────────────────────────────
