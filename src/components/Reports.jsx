@@ -128,17 +128,25 @@ function useReportData(outlet, month, outletList) {
       const mStart = monthStart(month);
       const mEnd   = monthEnd(month);
 
-      const arrayFetches = outlets.map(o => Promise.all([
-        getSales(o), getPurchases(o), getReturns(o), getTransfers(o),
-        getExpenses(o), getCashLedger(o), getBankLedger(o),
-        getARLedger(o), getAPInvoices(o), getAPPayments(o),
-      ]));
-      const scalarFetches = outlets.map(o => Promise.all([getCashBF(o), getBankBF(o)]));
+      const arrayResults = [];
+for (const o of outlets) {
+  const result = await Promise.all([
+    getSales(o), getPurchases(o), getReturns(o), getTransfers(o),
+    getExpenses(o), getCashLedger(o), getBankLedger(o),
+    getARLedger(o), getAPInvoices(o), getAPPayments(o),
+  ]);
+  arrayResults.push(result);
+}
 
-      const [inv, coa, arrayResults, scalarResults] = await Promise.all([
-        getInventoryMaster(), getCOA(),
-        Promise.all(arrayFetches), Promise.all(scalarFetches),
-      ]);
+const scalarResults = [];
+for (const o of outlets) {
+  const result = await Promise.all([getCashBF(o), getBankBF(o)]);
+  scalarResults.push(result);
+}
+
+const [inv, coa] = await Promise.all([
+  getInventoryMaster(), getCOA(),
+]);
 
       const inMonth = arr => {
         if (!Array.isArray(arr)) return [];
@@ -1017,5 +1025,4 @@ export default function Reports({ user }) {
     </div>
   );
 }
-
 // updated
