@@ -255,6 +255,18 @@ export const addPurchase = async (outlet, purchase) => {
   });
   if (error) console.error("addPurchase:", error);
 };
+export const deleteSaleForDate = async (outlet, date, isEmptyBatch) => {
+  const { data, error } = await supabase
+    .from("sales").select("id, items")
+    .eq("outlet_id", outlet).eq("date", date);
+  if (error) { console.error("deleteSaleForDate (select):", error); return; }
+  const idsToDelete = (data || [])
+    .filter(r => (r.items || []).some(i => !!i.isEmptyItem) === !!isEmptyBatch)
+    .map(r => r.id);
+  if (idsToDelete.length === 0) return;
+  const { error: delErr } = await supabase.from("sales").delete().in("id", idsToDelete);
+  if (delErr) console.error("deleteSaleForDate (delete):", delErr);
+};
  
 // ─── RETURNS ────────────────────────────────────────────────
 export const getReturns = async (outlet) => {
@@ -503,7 +515,7 @@ export const addExpense = async (outlet, expense) => {
   });
   if (error) console.error("addExpense:", error);
 };
- // ─── DAILY OPENING STOCK ─────────────────────────────────────
+// ─── DAILY OPENING STOCK ─────────────────────────────────────
 
 export const getOpeningStock = async (outlet, date) => {
   const { data, error } = await supabase
@@ -511,29 +523,72 @@ export const getOpeningStock = async (outlet, date) => {
     .select("*")
     .eq("outlet_id", outlet)
     .eq("date", date);
-  if (error) { console.error("getOpeningStock:", error); return null; }
-  if (!data || data.length === 0) return null;
+  
+  if (error) { 
+    console.error("getOpeningStock error:", error); 
+    return null; 
+  }
+  
+  if (!data || data.length === 0) {
+    console.log(`No opening stock found for ${outlet} on ${date}`);
+    return null;
+  }
+  
   const main = {}, emp = {};
   data.forEach(r => {
-    if (r.type === "emp") emp[r.item_code] = Number(r.qty);
-    else                  main[r.item_code] = Number(r.qty);
+    // Store by composite key: code__supplier (or just item_code if already composite)
+    if (r.type === "emp") {
+      emp[r.item_code] = Number(r.qty);
+    } else {
+      main[r.item_code] = Number(r.qty);
+    }
   });
+  
+  console.log("✓ getOpeningStock loaded:", { main, emp });
   return { main, emp };
 };
 
 export const saveOpeningStock = async (outlet, date, mainMap, empMap) => {
   const rows = [];
+  
+  // mainMap keys are like "D0001__DCSL"
   Object.entries(mainMap || {}).forEach(([code, qty]) => {
-    rows.push({ outlet_id: outlet, date, item_code: code, qty: Number(qty) || 0, type: "main" });
+    rows.push({
+      outlet_id: outlet,
+      date: date,
+      item_code: code,  // ← Store the full composite key
+      qty: Number(qty) || 0,
+      type: "main"
+    });
   });
+  
+  // empMap keys are like "DCSL__DEMP_Q" or item id
   Object.entries(empMap || {}).forEach(([id, qty]) => {
-    rows.push({ outlet_id: outlet, date, item_code: id, qty: Number(qty) || 0, type: "emp" });
+    rows.push({
+      outlet_id: outlet,
+      date: date,
+      item_code: id,    // ← Store the full composite key or id
+      qty: Number(qty) || 0,
+      type: "emp"
+    });
   });
-  if (rows.length === 0) return;
+  
+  if (rows.length === 0) {
+    console.log("saveOpeningStock: no rows to save");
+    return;
+  }
+  
+  console.log("Saving opening stock:", rows);
+  
   const { error } = await supabase
     .from("outlet_daily_opening")
     .upsert(rows, { onConflict: "outlet_id,date,item_code,type" });
-  if (error) console.error("saveOpeningStock:", error);
+  
+  if (error) {
+    console.error("saveOpeningStock error:", error);
+  } else {
+    console.log("✓ Opening stock saved for", outlet, date);
+  }
 };
 export const addSupplier = async (supplier) => {
   const { error } = await supabase.from("suppliers").insert({

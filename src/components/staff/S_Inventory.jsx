@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
-import { addSale, addCashEntry, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
+import { addSale, deleteSaleForDate, addCashEntry, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
 import { outletInvKey, outletEmptyInvKey } from "../admin/InventoryAdmin";
@@ -88,7 +88,8 @@ function getOutletEmptyInventory(outlet, masterOverride, emptyMasterData) {
           : EMPTY_SEED_STAFF.filter(i => i.supplier !== "EMPTY PURCHASE");
 
   const overrides = ls(outletEmptyInvKey(outlet), {});
-  return master
+
+  const result = master
     .filter(item => item.supplier !== "EMPTY PURCHASE" && !overrides[`${item.code}__${item.supplier}`]?.hidden)
     .map(item => {
       const ovKey = `${item.code}__${item.supplier}`;
@@ -101,7 +102,17 @@ function getOutletEmptyInventory(outlet, masterOverride, emptyMasterData) {
         qty:          ov?.qty          !== undefined ? ov.qty          : 0,
       };
     });
+
+  // Deduplicate by code__supplier
+  const seen = new Set();
+  return result.filter(item => {
+    const key = `${item.code}__${item.supplier}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
+
 
 // ─────────────────────────────────────────────────────────────
 //  OPENING STOCK HELPER
@@ -136,20 +147,17 @@ function isTransferOut(rec, outlet) {
   return (rec.from_outlet_id ?? rec.from) === outlet;
 }
 async function propagateOpeningForward(outlet, fromDate, endStockMain, endStockEmp) {
-  for (let i = 1; i <= 30; i++) {
-    const d = new Date(fromDate);
-    d.setDate(d.getDate() + i);
-    const dateStr = d.toISOString().slice(0, 10);
-    const existing = await getOpeningStock(outlet, dateStr);
-    const mergedMain = endStockMain
-      ? { ...(existing?.main || {}), ...endStockMain }
-      : existing?.main || null;
-    const mergedEmp = endStockEmp
-      ? { ...(existing?.emp || {}), ...endStockEmp }
-      : existing?.emp || null;
-    await saveOpeningStock(outlet, dateStr, mergedMain, mergedEmp);
-    // removed the break — now writes all 30 days
-  }
+  const d = new Date(fromDate);
+  d.setDate(d.getDate() + 1);
+  const nextDay = d.toISOString().slice(0, 10);
+  const existing = await getOpeningStock(outlet, nextDay);
+  const mergedMain = endStockMain
+    ? { ...(existing?.main || {}), ...endStockMain }
+    : existing?.main || null;
+  const mergedEmp = endStockEmp
+    ? { ...(existing?.emp || {}), ...endStockEmp }
+    : existing?.emp || null;
+  await saveOpeningStock(outlet, nextDay, mergedMain, mergedEmp);
 }
 
 function getOpeningForDate(outlet, date, seedMain, seedEmp) {
@@ -378,11 +386,14 @@ const [empRows, setER] = useState(() =>
     skipNextReloadRef.current = false;
     return;
   }
-  const lsMain = getOutletInventory(outlet, masterInv);
+ const lsMain = getOutletInventory(outlet, masterInv);
 
-  const baseMain = {};
-  lsMain.forEach(i => { baseMain[i.code] = Number(i.qty) || 0; });
+const baseMaster = masterInv || ls("inv_main", SEED_INVENTORY);
+const baseQtyByCode = {};
+baseMaster.forEach(i => { baseQtyByCode[i.code] = Number(i.qty) || 0; });
 
+const baseMain = {};
+lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
   const prev = new Date(mainDate);
   prev.setDate(prev.getDate() - 1);
   const yDate = prev.toISOString().slice(0, 10);
@@ -419,30 +430,34 @@ const [empRows, setER] = useState(() =>
     }));
 
   (async () => {
-    let opening = await getOpeningStock(outlet, mainDate);
-    if (!opening) opening = await getOpeningStock(outlet, yDate);
-   const mergedMain = { ...baseMain, ...(opening?.main || {}) };
-  opening = { main: mergedMain, emp: opening?.emp || {} };
-
+    const opening = await getOpeningStock(outlet, mainDate);
+     console.log("🔍 Opening stock loaded for", mainDate, ":", opening); // ← ADD THIS
+    const mergedMain = opening?.main
+      ? { ...baseMain, ...opening.main }
+      : baseMain;
+    const resolvedOpening = { main: mergedMain, emp: opening?.emp || {} };
     const todaySale = dbSalesRef.current.find(
     s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem)
     );
     const savedMap = todaySale
-      ? Object.fromEntries(
-          (todaySale.items || [])
-            .filter(r => !r.isEmptyItem)
-            .map(r => [r.id, r])
-        )
-      : {};
+  ? Object.fromEntries(
+      (todaySale.items || [])
+        .filter(r => !r.isEmptyItem)
+        .flatMap(r => {
+          const entries = [[r.id, r]];
+          if (r.code) entries.push([r.code, r]);
+          return entries;
+        })
+    )
+  : {};
 
     setMR(() => lsMain.map(i => {
       const adminSP     = Number(i.sellingPrice) || 0;
       const key         = i.id || `${i.code}__${i.supplier}`;
-      const op = opening.main?.[key] 
-        ?? opening.main?.[`${i.code}__${i.supplier}`]
-        ?? opening.main?.[i.code] 
-        ?? 0;
-      const saved       = savedMap[i.id];
+      const op = resolvedOpening.main?.[`${i.code}__${i.supplier}`]
+      ?? resolvedOpening.main?.[i.code]
+      ?? 0;
+      const saved = savedMap[i.id] || savedMap[i.code];
       const purchase    = pV[i.code]  || 0;
       const transferIn  = tiV[i.code] || 0;
       const transferOut = toV[i.code] || 0;
@@ -524,11 +539,12 @@ dbPurchases
       ipQ[l.itemCode] = (ipQ[l.itemCode] || 0) + qty;
     }
   }));
-  (async () => {
-    let opening = await getOpeningStock(outlet, empDate);
-    if (!opening) opening = await getOpeningStock(outlet, yDate);
-    const mergedEmp = { ...baseEmp, ...(opening?.emp || {}) };
-    opening = { main: opening?.main || {}, emp: mergedEmp };
+   (async () => {
+    const opening = await getOpeningStock(outlet, empDate);
+    const mergedEmp = opening?.emp
+      ? { ...baseEmp, ...opening.emp }
+      : baseEmp;
+    const resolvedOpening = { main: opening?.main || {}, emp: mergedEmp };
     const todaySale = dbSalesRef.current.find(
     s => s.date === empDate && (s.items || []).some(r => r.isEmptyItem)
     );
@@ -544,7 +560,9 @@ dbPurchases
       .filter(e => e.supplier !== "EMPTY PURCHASE")
       .map(e => {
         const adminSP = Number(e.sellingPrice) || Number(e.unitCost) || 0;
-        const op      = opening.emp?.[e.id] ?? 0;
+        const op = resolvedOpening.emp?.[`${e.code}__${e.supplier}`]
+        ?? resolvedOpening.emp?.[e.id]
+        ?? 0;
         const saved   = savedMap[e.id];
 
         if (saved) {
@@ -683,7 +701,9 @@ return { ...r, [field]: val };
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
   // ─────────────────────────────────────────────────────────
+
   async function saveMainSale() {
+  skipNextReloadRef.current = true;   
   const totalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
 
   const mainRowsWithDerived = mainRows.map(r => {
@@ -706,9 +726,7 @@ return { ...r, [field]: val };
     om[key] = deriveMain(r).endStock;
   });
 
-  await saveOpeningStock(outlet, nextDay, om, null);
   await propagateOpeningForward(outlet, mainDate, om, null);
-
   await addSale(outlet, {
     date: mainDate,
     items: mainRowsWithDerived,
@@ -731,29 +749,49 @@ return { ...r, [field]: val };
     source: "sale",
   });
 
+// ── Restore display immediately from local data (no async wait) ──
+  const localSavedMap = Object.fromEntries(
+    mainRowsWithDerived.map(r => [r.id, r])
+  );
+  setMR(prev => prev.map(r => {
+    const sv = localSavedMap[r.id];
+    if (!sv) return r;
+    return {
+      ...r,
+      sold:           sv.sold !== undefined && sv.sold !== null ? String(sv.sold) : r.sold,
+      rate:           Number(sv.rate) || r.rate,
+      endStock:       sv.endStockEdited ? sv.endStock : null,
+      endStockEdited: sv.endStockEdited || false,
+    };
+  }));
+
+  // ── Update sales ref AFTER setMR ──
   const freshSales = await getSales(outlet);
-  dbSalesRef.current = freshSales;
-  setDbSales(freshSales);
-  toast_("Main stock daily sale saved ✓");
+skipNextReloadRef.current = true;
+dbSalesRef.current = freshSales;
+setDbSales(freshSales);
+setJustSaved(true);
+toast_("Main stock daily sale saved ✓");
 }
     // ─────────────────────────────────────────────────────────
   //  SAVE EMPTY DAILY SALE
   // ─────────────────────────────────────────────────────────
-  // AFTER
-   async function saveEmpSale() {
+
+ async function saveEmpSale() {
+  skipNextEmpReloadRef.current = true; 
   const nd = new Date(empDate);
   nd.setDate(nd.getDate() + 1);
   const nextDay = nd.toISOString().slice(0, 10);
   const oe = {};
   empRows.forEach(r => { oe[r.id] = deriveEmp(r).endStock; });
-  await saveOpeningStock(outlet, nextDay, null, oe);
-await propagateOpeningForward(outlet, empDate, null, oe);
+  await propagateOpeningForward(outlet, empDate, null, oe);
   const empRowsWithDerived = empRows.map(r => {
     const d = deriveEmp(r);
     return { ...r, ...d, isEmptyItem: true };
   });
+  await deleteSaleForDate(outlet, empDate, true);
   await addSale(outlet, { date: empDate, items: empRowsWithDerived, total: 0, paymentMethod: "empty" });
-
+  
   for (const e of empRows) {
     const s    = parseFloat(e.sold)    || 0;
     const rr   = parseFloat(e.return_) || 0;
@@ -766,7 +804,6 @@ await propagateOpeningForward(outlet, empDate, null, oe);
 
 setJustSavedEmp(true);
 const freshSales = await getSales(outlet);
-skipNextEmpReloadRef.current = true;
 const updatedSales = [
   ...dbSalesRef.current.filter(s => !(s.date === empDate && s.items?.some(r => r.isEmptyItem))),
   ...freshSales.filter(s => s.date === empDate)
@@ -973,8 +1010,14 @@ const csData = useMemo(() => inv.map(item => {
           {/* ── MAIN STOCK TAB ── */}
           {dailyTab === "main" && (
             <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
-              <CtrlBar
-                date={mainDate} setDate={setMainDate}
+             <CtrlBar
+             date={mainDate} setDate={d => {
+             setMainDate(d);
+             getSales(outlet).then(data => {
+             dbSalesRef.current = data;
+             setDbSales(data);
+             });
+             }}
                 supFilter={mainSupFilter} setSupFilter={setMainSupFilter}
                 suppliers={mainSuppliers}
                 onSave={saveMainSale} saveLabel="Save Daily Sale"
@@ -1074,7 +1117,13 @@ const csData = useMemo(() => inv.map(item => {
           {dailyTab === "empty" && (
             <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
               <CtrlBar
-                date={empDate} setDate={setEmpDate}
+              date={empDate} setDate={d => {
+              setEmpDate(d);
+              getSales(outlet).then(data => {
+              dbSalesRef.current = data;
+              setDbSales(data);
+              });
+              }}
                 supFilter={empSupFilter} setSupFilter={setEmpSupFilter}
                 suppliers={empSuppliers}
                 onSave={saveEmpSale} saveLabel="Save Empty Sale"

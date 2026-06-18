@@ -94,6 +94,7 @@ function OutletInventoryPanel({ inv, toast_, allSupColors, adminOutlets }) {
   const [search,    setSearch]    = useState("");
   const [editItem,  setEditItem]  = useState(null);
   const [ef,        setEf]        = useState({});
+  const [openingDate, setOpeningDate] = useState(today()); 
   const [showOnly,  setShowOnly]  = useState("all");
 
 // AFTER — no inv reference needed
@@ -116,45 +117,37 @@ function loadOutlet(o) {
   setSupF("ALL"); setSearch(""); setShowOnly("all");
 }
 
-  async function syncOpeningToDb(newOv) {
-  const mainMap = {};
-  Object.entries(newOv).forEach(([key, ov]) => {
-    if (ov?.qty !== undefined) {
-      // Save BOTH by composite key AND by code alone so staff side finds it
-      const code = key.split("__")[0];
-      mainMap[key]  = Number(ov.qty) || 0;   // composite: D0001__2001-DCSL
-      mainMap[code] = Number(ov.qty) || 0;   
-    }
-  });
-  if (Object.keys(mainMap).length) {
-    
-    const existing = await getOpeningStock(selOutlet, today());
-    await saveOpeningStock(
-      selOutlet,
-      today(),
-      { ...(existing?.main || {}), ...mainMap },
-      existing?.emp || null
-    );
-  }
+async function saveOpeningQtyForDate(item, qty, dateStr, outlet) {
+  const key1 = `${item.code}__${item.supplier}`;
+  const existing = await getOpeningStock(outlet, dateStr);
+  const mainMap = {
+    ...(existing?.main || {}),
+    [key1]: Number(qty) || 0,
+  };
+  await saveOpeningStock(outlet, dateStr, mainMap, existing?.emp || null);
 }
-  function openEdit(item) {
-    const ov = overrides[`${item.code}__${item.supplier}`] || {};
-    setEf({
-      sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
-      unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
-      hidden:       ov.hidden || false,
-      qty:          ov.qty          !== undefined ? ov.qty          : (item.qty || 0),
-      openingQty:   ov.qty          !== undefined ? ov.qty          : (item.qty || 0),
-    });
-    setEditItem(item);
-  }
 
+async function openEdit(item) {
+  const ovKey = `${item.code}__${item.supplier}`;
+  const ov = overrides[ovKey] || {};
+  
+  const existing = await getOpeningStock(selOutlet, openingDate);
+  const savedQty = existing?.main?.[ovKey] || existing?.main?.[item.code] || existing?.main?.[item.id] || "";
+  
+  setEf({
+    sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
+    unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
+    hidden:       ov.hidden || false,
+    qty:          savedQty,
+  });
+  setOpeningDate(openingDate);     
+  setEditItem(item);
+}
 
    async function saveOverrides(newOv) {
   try {
     setOverridesState(newOv);
     lss(outletInvKey(selOutlet), newOv);
-    await syncOpeningToDb(newOv);
   } catch (err) {
     console.error("saveOverrides error:", err);
     toast_("Save failed — check console", "err");
@@ -163,19 +156,24 @@ function loadOutlet(o) {
 
 async function saveEdit() {
   try {
-    const qty = ef.qty !== "" && ef.qty != null ? Number(ef.qty) : undefined;
     const ovEntry = {
       unitCost:     Number(ef.unitCost)     || 0,
       sellingPrice: Number(ef.sellingPrice) || 0,
       hidden:       ef.hidden,
+      // NOTE: qty is intentionally NOT stored here anymore —
+      // it must only apply to the chosen date, not every date.
     };
-    if (qty !== undefined) ovEntry.qty = qty;
-
     const newOv = {
       ...overrides,
       [`${editItem.code}__${editItem.supplier}`]: ovEntry,
     };
-    await saveOverrides(newOv);
+    setOverridesState(newOv);
+    lss(outletInvKey(selOutlet), newOv);
+
+    if (ef.qty !== "" && ef.qty != null) {
+      await saveOpeningQtyForDate(editItem, ef.qty, openingDate, selOutlet);
+    }
+
     toast_(`${editItem.code} updated for ${selOutlet} ✓`);
     setEditItem(null);
   } catch (err) {
@@ -183,6 +181,7 @@ async function saveEdit() {
     toast_("Save failed — check console", "err");
   }
 }
+
   function resetOverride(itemKey) {
     const newOv = { ...overrides };
     delete newOv[itemKey];
@@ -389,7 +388,7 @@ async function saveEdit() {
                 onChange={e=>setEf({...ef,sellingPrice:e.target.value})} placeholder="0.00"/>
             </div>
           </div>
-          {ef.unitCost && ef.sellingPrice && Number(ef.unitCost)>0 && (
+                     {ef.unitCost && ef.sellingPrice && Number(ef.unitCost)>0 && (
             <div style={{background:"var(--s2)",borderRadius:6,padding:"7px 11px",fontSize:11.5,
               border:"1px solid var(--bdr)",marginBottom:10}}>
               Outlet margin: <strong style={{color:"var(--gld2)"}}>
@@ -397,22 +396,30 @@ async function saveEdit() {
               </strong>
             </div>
           )}
-              {/* Opening Quantity — outlet override */}
-            <div className="fg" style={{marginTop:4}}>
-      <div className="ff">
-        <label>Outlet Opening Quantity</label>
-        <input
-          type="number"
-          value={ef.qty ?? ""}
-          onChange={e => setEf({...ef, qty: e.target.value})}
-          
-           placeholder={`Main stock: ${editItem.qty ?? 0} — enter outlet qty`}
-          min="0"
-        />
-      </div>
-      {/* Spacer so it doesn't stretch full width */}
-      <div className="ff" style={{visibility:"hidden"}} aria-hidden="true"/>
-    </div>
+          {/* Opening Quantity — date-specific */}
+          <div className="fg" style={{marginTop:4}}>
+            <div className="ff">
+              <label>Opening Date</label>
+              <input
+                type="date"
+                value={openingDate}
+                onChange={e => setOpeningDate(e.target.value)}
+              />
+            </div>
+            <div className="ff">
+              <label>Outlet Opening Quantity</label>
+              <input
+                type="number"
+                value={ef.qty ?? ""}
+                onChange={e => setEf({...ef, qty: e.target.value})}
+                placeholder={`Main stock: ${editItem.qty ?? 0} — enter outlet qty`}
+                min="0"
+              />
+            </div>
+          </div>
+          <div style={{fontSize:11,color:"var(--mut)",marginTop:-6,marginBottom:8}}>
+            This quantity applies only to <strong>{openingDate}</strong> and won't appear on other dates.
+          </div>
           <div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 0 2px",
             borderTop:"1px solid var(--bdr)",marginTop:4}}>
             <input type="checkbox" id="hide-item-ov" checked={ef.hidden}
@@ -481,6 +488,7 @@ useEffect(() => {
   const [search,    setSearch]    = useState("");
   const [editItem,  setEditItem]  = useState(null);
   const [ef,        setEf]        = useState({});
+  const [openingDate, setOpeningDate] = useState(today()); 
   const [showOnly,  setShowOnly]  = useState("all");
 
   // AFTER
@@ -497,44 +505,65 @@ function loadOutlet(o) {
   setOverridesState(ls(outletEmptyInvKey(o), {}));
   setSupF("ALL"); setSearch(""); setShowOnly("all");
 }
-
+  async function saveOpeningQtyForDate(item, qty, dateStr, outlet) {
+  const key1 = `${item.code}__${item.supplier}`;
+  const existing = await getOpeningStock(outlet, dateStr);
+  const empMap = {
+    ...(existing?.emp || {}),
+    [key1]: Number(qty) || 0,
+  };
+  await saveOpeningStock(outlet, dateStr, existing?.main || null, empMap);
+}
   function saveOverrides(newOv) {
     setOverridesState(newOv);
     lss(outletEmptyInvKey(selOutlet), newOv);
   }
 
   
-function openEdit(item) {
+async function openEdit(item) {
   const ov = overrides[`${item.code}__${item.supplier}`] || {};
+  
+  const existing = await getOpeningStock(selOutlet, openingDate);  //  use openingDate
+  const savedQty = existing?.emp?.[`${item.code}__${item.supplier}`] || 
+                   existing?.emp?.[item.code] || 
+                   existing?.emp?.[item.id] || "";
+  
   setEf({
     sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
     unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
     hidden:       ov.hidden || false,
-    qty:         ov.qty          !== undefined ? ov.qty          : "",
+    qty:          savedQty,
   });
+  setOpeningDate(openingDate);  // Keep current selected date
   setEditItem(item);
 }
 
 
-  // AFTER
-  function saveEdit() {
-  const newOv = {
-    ...overrides,
-    [`${editItem.code}__${editItem.supplier}`]: {
+ // AFTER
+async function saveEdit() {
+  try {
+    const ovEntry = {
       unitCost:     Number(ef.unitCost)     || 0,
       sellingPrice: Number(ef.sellingPrice) || 0,
       hidden:       ef.hidden,
-      qty:          ef.qty !== "" && ef.qty != null
-                      ? Number(ef.qty)
-                      : undefined,
-    },
-  };
-  if (newOv[`${editItem.code}__${editItem.supplier}`].qty === undefined) {
-    delete newOv[`${editItem.code}__${editItem.supplier}`].qty;
+      // qty NOT stored permanently — only saved to specific date below
+    };
+    const newOv = {
+      ...overrides,
+      [`${editItem.code}__${editItem.supplier}`]: ovEntry,
+    };
+    saveOverrides(newOv);
+
+    if (ef.qty !== "" && ef.qty != null) {
+      await saveOpeningQtyForDate(editItem, ef.qty, openingDate, selOutlet);
+    }
+
+    toast_(`${editItem.code} updated for ${selOutlet} ✓`);
+    setEditItem(null);
+  } catch (err) {
+    console.error("saveEdit error:", err);
+    toast_("Save failed — check console", "err");
   }
-  saveOverrides(newOv);
-  toast_(`${editItem.code} updated for ${selOutlet} ✓`);
-  setEditItem(null);
 }
 
   function resetOverride(code) {
@@ -756,20 +785,30 @@ function openEdit(item) {
               </strong>
             </div>
           )}
-          {/* Opening Quantity */}
-    <div className="fg" style={{marginTop:2}}>
-      <div className="ff">
-        <label>Outlet Opening Quantity</label>
-        <input
-        type="number"
-        min="0"
-        value={ef.qty ?? ""}
-        onChange={e => setEf({...ef, qty: e.target.value})}
-        placeholder="e.g. 10 — outlet opening qty"
-        />
-      </div>
-      <div className="ff" style={{visibility:"hidden"}} aria-hidden="true"/>
-    </div>
+    {/* Opening Quantity — date-specific (same as Tab 3) */}
+<div className="fg" style={{marginTop:4}}>
+  <div className="ff">
+    <label>Opening Date</label>
+    <input
+      type="date"
+      value={openingDate}
+      onChange={e => setOpeningDate(e.target.value)}
+    />
+  </div>
+  <div className="ff">
+    <label>Outlet Opening Quantity</label>
+    <input
+      type="number"
+      min="0"
+      value={ef.qty ?? ""}
+      onChange={e => setEf({...ef, qty: e.target.value})}
+      placeholder={`Main stock: ${editItem.qty ?? 0} — enter outlet qty`}
+    />
+  </div>
+</div>
+<div style={{fontSize:11,color:"var(--mut)",marginTop:-6,marginBottom:8}}>
+  This quantity applies only to <strong>{openingDate}</strong> and won't appear on other dates.
+</div>
 
     {/* Opening qty override hint */}
     {ef.qty !== "" && ef.qty  != null && (
@@ -904,14 +943,15 @@ if (modal === "add") {
 setModal(null);
 }
 
-  function savePrice() {
-    saveEmpty(items.map(i => i.id === priceM.id
-      ? { ...i, unitCost: Number(pf.unitCost) || 0, sellingPrice: Number(pf.sellingPrice) || 0 }
-      : i
-    ));
-    toast_("Prices updated ✓");
-    setPriceM(null);
-  }
+
+async function savePrice() {
+  await saveEmpty(items.map(i => i.id === priceM.id
+    ? { ...i, unitCost: Number(pf.unitCost) || 0, sellingPrice: Number(pf.sellingPrice) || 0 }
+    : i
+  ));
+  toast_("Prices updated ✓");
+  setPriceM(null);
+}
 
  function deleteItem(item) {
   if (!confirm(`Remove ${item.code} — ${item.name} (${item.supplier})?`)) return;
