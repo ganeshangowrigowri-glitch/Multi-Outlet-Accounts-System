@@ -285,8 +285,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
 .cs-input{width:70px;padding:3px 5px;background:var(--s3);border:1px solid var(--bdr);border-radius:4px;font-size:11px;font-family:'JetBrains Mono',monospace;color:var(--txt);outline:none;text-align:center;}
 .cs-input:focus{border-color:var(--gld);}
 
-/* ── PRINT ── */
-@media print{.sidebar,.sb-backdrop,.topbar,.no-print{display:none!important;}.page{padding:0;overflow:visible;}}
+
 /* ── Bank / Shared Tab Styles ── */
 .stabs {
   display: flex;
@@ -347,14 +346,42 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
 /* cb = cyan balance colour */
 .cb { color: #0891b2; }
 
-/* ── Print styles ── */
+/* ── PRINT ── */
 @media print {
-  .no-print { display: none !important; }
-  .print-statement { border: none !important; box-shadow: none !important; }
-  body { background: #fff !important; }
-  .sidebar, .sb-backdrop, .topbar { display: none !important; }
-  .main { margin: 0 !important; padding: 0 !important; }
-  .page { padding: 0 !important; }
+  /* Hide the app chrome */
+  .sidebar,
+  .sb-backdrop,
+  .topbar,
+  .no-print,
+  .page > .shell > aside {
+    display: none !important;
+  }
+
+  /* Reset layout so report fills the page */
+  html, body, #root {
+    height: auto !important;
+    overflow: visible !important;
+    background: #fff !important;
+  }
+
+  .main {
+    overflow: visible !important;
+    height: auto !important;
+  }
+
+  .page {
+    overflow: visible !important;
+    height: auto !important;
+    padding: 0 !important;
+    position: static !important;
+  }
+
+  /* Make the report shell a simple block, not flex with sidebar */
+  .page .shell {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
 }
 /* ── SCROLL FIX ── */
 html, body, #root { height: 100% !important; overflow: hidden !important; }

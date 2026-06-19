@@ -447,13 +447,7 @@ const EMPTY_SEED = [
 { id:"TODD_TEMPQ",  code:"TEMP Q",  name:"TOD EMP",  supplier:"TODDY",          unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
 { id:"UG_UEMPQ",    code:"UEMP Q",  name:"UG EMP",   supplier:"UG",             unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
 { id:"BEER_HEMPQ",  code:"HEMP Q",  name:"HEI EMP",  supplier:"DCSL BEER",      unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
-{ id:"EP_DEMP1Q",   code:"DEMP1 Q", name:"DES EMP",  supplier:"EMPTY PURCHASE", unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
-{ id:"EP_DEMPP",    code:"DEMP P",  name:"DES EMP",  supplier:"EMPTY PURCHASE", unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
-{ id:"EP_DEMPN",    code:"DEMP N",  name:"DES EMP",  supplier:"EMPTY PURCHASE", unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
-{ id:"EP_BEMPQ",    code:"BEMP Q",  name:"BEER EMP", supplier:"EMPTY PURCHASE", unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
-{ id:"EP_TEMPQ",    code:"TEMP Q",  name:"TOD EMP",  supplier:"EMPTY PURCHASE", unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
-{ id:"EP_UEMPQ",    code:"UEMP Q",  name:"UG EMP",   supplier:"EMPTY PURCHASE", unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
-{ id:"EP_HEMPQ",    code:"HEMP Q",  name:"HEI EMP",  supplier:"EMPTY PURCHASE", unitCost:0, sellingPrice:0, qty:0, type:"EMP" },
+
 ];
 
 export function loadEmptyFromStorage() {

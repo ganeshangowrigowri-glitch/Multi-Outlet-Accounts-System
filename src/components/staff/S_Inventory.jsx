@@ -509,36 +509,37 @@ useEffect(() => {
   const yDate = prev.toISOString().slice(0, 10);
 
   // ── Build empty purchase maps in the SAME effect ──
+  
   const codes = new Set(lsEmp.map(e => e.code));
-  const pQ = {}, ipQ = {};
+const pQ = {}, ipQ = {};
 
-dbPurchases
-  .filter(r => r.date === empDate)
+
+   dbPurchases
+  .filter(r => txnDate(r) === empDate)
   .forEach(rec => (rec.items || []).forEach(l => {
-    if (!l.itemCode || !codes.has(l.itemCode)) return;
+    const itemCode = l.itemCode || l.code || "";
+    if (!itemCode || !codes.has(itemCode)) return;
     const qty = parseFloat(l.qty) || 0;
     if (!qty) return;
     const sid = rec.supplier_id || rec.supplier || "";
 
-    // Empty Purchase supplier → Purchase column (left column)
-    const isEmptyPurchaseSup = 
-      sid === EMPTY_PURCHASE_SUP_ID || 
-      sid === "EMPTY PURCHASE";
+    const isEmptyPurchaseSup =
+      sid === "EMPTY PURCHASE" ||
+      sid === EMPTY_PURCHASE_SUP_ID;
 
-    // DCSL / UG / Lion Brewery / Toddy / DCSL Beer → Invoice Purchase column (right column)  
-    const isMainSup = 
-      MAIN_EMPTY_SUP_IDS.has(sid) ||
+    const isMainSup =
       ["2001-DCSL","2002-LION BREWERY","2003-UG",
-       "2006-DCSL BEER","2007-TODDY"].some(s => sid.includes(s) || s.includes(sid));
+       "2006-DCSL BEER","2007-TODDY"].some(s =>
+        sid === s || sid.includes(s) || s.includes(sid)
+      );
 
-    if (isEmptyPurchaseSup || l.emptyRoute === "purchase") {
-      // Empty Purchase → Purchase column
-      pQ[l.itemCode] = (pQ[l.itemCode] || 0) + qty;
-    } else if (isMainSup || l.emptyRoute === "invPurchase") {
-      // Main suppliers (DCSL etc) → Invoice Purchase column
-      ipQ[l.itemCode] = (ipQ[l.itemCode] || 0) + qty;
+    if (isEmptyPurchaseSup) {
+      pQ[itemCode] = (pQ[itemCode] || 0) + qty;
+    } else if (isMainSup) {
+      ipQ[itemCode] = (ipQ[itemCode] || 0) + qty;
     }
   }));
+ 
    (async () => {
     const opening = await getOpeningStock(outlet, empDate);
     const mergedEmp = opening?.emp

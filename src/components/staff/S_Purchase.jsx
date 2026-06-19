@@ -87,14 +87,16 @@ useEffect(() => {
       if (f === "itemCode") {
         const isEmptySup = supId === "EMPTY PURCHASE";
         const it = isEmptySup
-          ? emptyInv.find(i => i.code === v && i.supplier === "EMPTY PURCHASE")
-          : inv.find(i => i.code === v && i.supplier === supId)
-            || emptyInv.find(i =>
-                i.code === v && (
-                  i.supplier === supId ||
-                  supId.endsWith(i.supplier)
-                )
-              );
+  ? emptyInv.find(i => i.code === v && i.supplier === "EMPTY PURCHASE")
+  : inv.find(i => i.code === v && i.supplier === supId)
+    || emptyInv.find(i =>
+        i.code === v && (
+          i.supplier === supId ||
+          supId.endsWith(i.supplier) ||
+          supId.includes(i.supplier) ||
+          i.supplier.includes(supId.replace(/^\d{4}-/, ""))
+        )
+      );
         if (it) { u.itemName = it.name; u.unitCost = it.unitCost; }
       }
       const g  = (parseFloat(u.qty) || 0) * (parseFloat(u.unitCost) || 0);
@@ -244,18 +246,38 @@ useEffect(() => {
                       <td>
                         <select value={l.itemCode} onChange={e => updL(l.id, "itemCode", e.target.value)} style={{ width: 85 }}>
                           <option value="">Select…</option>
-                          {(supId === "EMPTY PURCHASE"
-                            ? emptyInv.filter(it => it.supplier === "EMPTY PURCHASE")
-                            : [
-                                ...inv.filter(it => it.supplier === supId && it.type !== "EMP"),
-                                ...emptyInv.filter(it =>
-                                  it.supplier === supId ||
-                                  supId.endsWith(it.supplier)
-                                )
-                              ]
-                          ).map(it => (
-                            <option key={it.id || it.code} value={it.code}>{it.code}</option>
-                          ))}
+                        {(() => {
+                      let items = [];
+                      if (supId === "EMPTY PURCHASE") {
+                      const seen = new Set();
+                      items = emptyInv
+                      .filter(it => it.supplier === "EMPTY PURCHASE")
+                      .filter(it => {
+                      if (seen.has(it.code)) return false;
+                      seen.add(it.code);
+                      return true;
+                      });
+                      } else {
+                     const mainItems = inv.filter(it => it.supplier === supId && it.type !== "EMP");
+                     const emptyItems = emptyInv.filter(it =>
+                     it.supplier === supId ||
+                     supId.endsWith(it.supplier)
+                     );
+                      // Deduplicate empty items by code
+                      const seen = new Set();
+                      const dedupedEmpty = emptyItems.filter(it => {
+                      if (seen.has(it.code)) return false;
+                      seen.add(it.code);
+                      return true;
+                     });
+                     items = [...mainItems, ...dedupedEmpty];
+                     }
+                     return items.map(it => (
+                     <option key={it.id || `${it.code}__${it.supplier}`} value={it.code}>
+                      {it.code} — {it.name}
+                      </option>
+                     ));
+                    })()}
                         </select>
                       </td>
                       <td style={{ fontSize: 10.5, color: "var(--mut)" }}>{l.itemName || "—"}</td>
