@@ -1266,13 +1266,11 @@ useEffect(() => {
   const [supModal, setSupModal]= useState(false);
   const [supForm,  setSupForm] = useState({id:"",name:"",color:"#94a3b8"});
   const [typeInput,setTypeInput]= useState("");
-  const [csMode,   setCsMode]  = useState("monthly");
+  const [csFrom,   setCsFrom]  = useState(() => today().slice(0, 7) + "-01");
+  const [csTo,     setCsTo]    = useState(today);
   const [repairOutlet, setRepairOutlet] = useState(outletNames[0] || "");
   const [repairDate,   setRepairDate]   = useState(today());
   const [repairing,    setRepairing]    = useState(false);
-  const [csDate,   setCsDate]  = useState(today());
-  const [csWeekOf, setCsWeekOf]= useState(today());
-  const [csMonth,  setCsMonth] = useState(today().slice(0,7));
   const [csOutlet, setCsOutlet]= useState("ALL");
   const [physStock,setPhysStock]= useState({});
   const [statusDb, setStatusDb]   = useState({ sales: {}, purchases: {}, transfers: {}, returns: {} });
@@ -1325,7 +1323,7 @@ useEffect(() => {
       .map(sup => ({ supplier: sup, items: groups[sup] }));
   }, [filtInv, supF]);
 
-  useEffect(() => {
+useEffect(() => {
     if (invTab !== "status") return;
     const toLoad = csOutlet === "ALL" ? outletNames : [csOutlet];
     (async () => {
@@ -1338,33 +1336,11 @@ useEffect(() => {
       }));
       setStatusDb({ sales, purchases, transfers, returns });
     })();
-  }, [invTab, csOutlet, csMode, csDate, csWeekOf, csMonth, outletNames]);
+  }, [invTab, csOutlet, outletNames]);
 
-  const csData = useMemo(() => {
-  let csFrom, csTo;
-  if (csMode === "daily") {
-    csFrom = csDate;
-    csTo   = csDate;
-  } else if (csMode === "weekly") {
-    const d   = new Date(csWeekOf);
-    const day = d.getDay();
-    const mon = new Date(d); mon.setDate(d.getDate() - ((day + 6) % 7));
-    const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
-    csFrom = mon.toISOString().slice(0, 10);
-    csTo   = sun.toISOString().slice(0, 10);
-  } else {
-    csFrom = csMonth + "-01";
-    const lastDay = new Date(
-      parseInt(csMonth.slice(0, 4)),
-      parseInt(csMonth.slice(5, 7)),
-      0
-    ).getDate();
-    csTo = csMonth + "-" + String(lastDay).padStart(2, "0");
-  }
-
-  const outlets = csOutlet === "ALL" ? outletNames : [csOutlet];
-
-  return inv.map(item => {
+   const csData = useMemo(() => {
+   const outlets = csOutlet === "ALL" ? outletNames : [csOutlet];
+   return inv.map(item => {
     const sp = (() => {
       if (csOutlet !== "ALL") {
         const ov = ls(outletInvKey(csOutlet), {})[`${item.code}__${item.supplier}`];
@@ -1396,22 +1372,18 @@ useEffect(() => {
         .sort((a, b) => a.date.localeCompare(b.date));
 
       if (salesInRange.length > 0) {
-        const firstRow = (salesInRange[0].items || salesInRange[0].mainRows || []).find(
-          r => r.code === item.code && r.id === item.id && !r.isEmptyItem
-        ) || (salesInRange[0].items || salesInRange[0].mainRows || []).find(
-          r => r.code === item.code && r.supplier === item.supplier && !r.isEmptyItem
-        );
+      const firstRow = (salesInRange[0].items || salesInRange[0].mainRows || []).find(
+      r => !r.isEmptyItem && (r.id === item.id || (r.code === item.code && r.supplier === item.supplier))
+      );
         if (firstRow) firstOpening = Number(firstRow.openingStock) || 0;
       }
 
       for (let i = salesInRange.length - 1; i >= 0; i--) {
         const row = (salesInRange[i].items || salesInRange[i].mainRows || []).find(
-          r => r.code === item.code && r.id === item.id && !r.isEmptyItem
-        ) || (salesInRange[i].items || salesInRange[i].mainRows || []).find(
-          r => r.code === item.code && r.supplier === item.supplier && !r.isEmptyItem
+        r => !r.isEmptyItem && (r.id === item.id || (r.code === item.code && r.supplier === item.supplier))
         );
         if (row) {
-          hasSaleEntry = true;
+          if ((parseFloat(row.sold) || 0) > 0) hasSaleEntry = true;
           if (row.stkSE !== undefined) adjStock = Number(row.stkSE) || 0;
           if (row.endStock !== "" && row.endStock !== undefined) {
             lastEndStock = parseFloat(row.endStock);
@@ -1427,19 +1399,31 @@ useEffect(() => {
             totalPurchase += parseFloat(l.qty) || 0;
         }));
 
-      (statusDb.transfers[outlet] || [])
-        .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.from_outlet_id !== outlet)
-        .forEach(t => (t.items || t.lines || []).forEach(l => {
-          if (l.itemCode === item.code)
-            transferIn += parseFloat(l.qty) || 0;
-        }));
+     (statusDb.transfers[outlet] || [])
+  .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
+  .filter(t => {
+    const notes = t.notes || "";
+    if (notes.includes("type:in")) return true;
+    if (notes.includes("type:out")) return false;
+    return (t.to_outlet_id ?? t.to) === outlet;
+  })
+  .forEach(t => (t.items || t.lines || []).forEach(l => {
+    if (l.itemCode === item.code)
+      transferIn += parseFloat(l.qty) || 0;
+  }));
 
-      (statusDb.transfers[outlet] || [])
-        .filter(t => t.date && t.date >= csFrom && t.date <= csTo && t.from_outlet_id === outlet)
-        .forEach(t => (t.items || t.lines || []).forEach(l => {
-          if (l.itemCode === item.code)
-            transferOut += parseFloat(l.qty) || 0;
-        }));
+(statusDb.transfers[outlet] || [])
+  .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
+  .filter(t => {
+    const notes = t.notes || "";
+    if (notes.includes("type:out")) return true;
+    if (notes.includes("type:in")) return false;
+    return (t.from_outlet_id ?? t.from) === outlet;
+  })
+  .forEach(t => (t.items || t.lines || []).forEach(l => {
+    if (l.itemCode === item.code)
+      transferOut += parseFloat(l.qty) || 0;
+  }));
 
       (statusDb.returns[outlet] || [])
         .filter(r => r.date && r.date >= csFrom && r.date <= csTo)
@@ -1460,7 +1444,7 @@ useEffect(() => {
     const inHandStock     = lastEndStock !== null ? lastEndStock : 0;
     const totalBottleSale = opening + totalPurchase - inHandStock;
     const physicalStock   = inHandStock * uc;
-    const totalSaleAmt    = totalBottleSale - sp;
+    const totalSaleAmt    = totalBottleSale * sp;
     const profit          = mg * totalBottleSale;
     const physKey         = `${item.code}_${csFrom}_${csTo}_${csOutlet}`;
 
@@ -1485,15 +1469,14 @@ useEffect(() => {
       csTo,
     };
 
-   }).filter(r =>
+    }).filter(r =>
     r._hasSaleEntry === true ||
     r.totalPurchase > 0 ||
     r.transferIn > 0 ||
     r.transferOut > 0 ||
-    r.totalReturn > 0 ||
-    r.opening > 0
+    r.totalReturn > 0
   );
-}, [inv, csMode, csDate, csWeekOf, csMonth, csOutlet, physStock, statusDb, outletNames]);
+}, [inv, csFrom, csTo, csOutlet, physStock, statusDb, outletNames]);
 
   function saveItem() {
     if (!iForm.code||!iForm.name){toast_("Fill code and name","err");return;}
@@ -1848,50 +1831,21 @@ async function saveSupplier() {
         .cs-wrap::-webkit-scrollbar { display: none; }
     `}</style>
 
-    {/* Controls */}
     <div className="ctrls no-print" style={{marginBottom:14,flexWrap:"wrap",gap:8}}>
       <div className="ff" style={{marginBottom:0}}>
         <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",
-          color:"var(--mut)",display:"block",marginBottom:3}}>View Mode</label>
-        <div style={{display:"flex",gap:4}}>
-          {["daily","weekly","monthly"].map(m=>(
-            <button key={m} onClick={()=>setCsMode(m)}
-              className={`btn btnsm ${csMode===m?"btng":"btnd"}`}
-              style={{textTransform:"capitalize"}}>
-              {m}
-            </button>
-          ))}
-        </div>
+          color:"var(--mut)",display:"block",marginBottom:3}}>From Date</label>
+        <input type="date" value={csFrom} onChange={e=>setCsFrom(e.target.value)}
+          style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
+            borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}}/>
       </div>
-
-      {csMode==="daily" && (
-        <div className="ff" style={{marginBottom:0}}>
-          <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",
-            color:"var(--mut)",display:"block",marginBottom:3}}>Date</label>
-          <input type="date" value={csDate} onChange={e=>setCsDate(e.target.value)}
-            style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
-              borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}}/>
-        </div>
-      )}
-      {csMode==="weekly" && (
-        <div className="ff" style={{marginBottom:0}}>
-          <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",
-            color:"var(--mut)",display:"block",marginBottom:3}}>Any Day in Week</label>
-          <input type="date" value={csWeekOf} onChange={e=>setCsWeekOf(e.target.value)}
-            style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
-              borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}}/>
-        </div>
-      )}
-      {csMode==="monthly" && (
-        <div className="ff" style={{marginBottom:0}}>
-          <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",
-            color:"var(--mut)",display:"block",marginBottom:3}}>Month</label>
-          <input type="month" value={csMonth} onChange={e=>setCsMonth(e.target.value)}
-            style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
-              borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}}/>
-        </div>
-      )}
-
+      <div className="ff" style={{marginBottom:0}}>
+        <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",
+          color:"var(--mut)",display:"block",marginBottom:3}}>To Date</label>
+        <input type="date" value={csTo} onChange={e=>setCsTo(e.target.value)}
+          style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
+            borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}}/>
+      </div>
       <div className="ff" style={{marginBottom:0}}>
         <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",
           color:"var(--mut)",display:"block",marginBottom:3}}>Outlet</label>
@@ -1902,7 +1856,6 @@ async function saveSupplier() {
           {outletNames.map(o=><option key={o}>{o}</option>)}
         </select>
       </div>
-
       <div style={{marginLeft:"auto",fontSize:11,color:"var(--mut)",alignSelf:"flex-end",paddingBottom:2}}>
         {csData.length} items with activity
       </div>
@@ -1915,9 +1868,7 @@ async function saveSupplier() {
           <div>
             <h3>Current Status</h3>
             <p>
-              {csMode==="daily"   && csDate}
-              {csMode==="weekly"  && csData[0] ? `${csData[0].csFrom} → ${csData[0].csTo}` : csMode==="weekly" ? "Week" : ""}
-              {csMode==="monthly" && csMonth}
+              {csFrom} → {csTo}
               {" · "}{csOutlet==="ALL"?"All Outlets":csOutlet}
             </p>
           </div>
@@ -1941,11 +1892,9 @@ async function saveSupplier() {
         </div>
 
         {/* Print-only title */}
-        <div className="cs-print-title" style={{display:"none"}}>
+         <div className="cs-print-title" style={{display:"none"}}>
           Current Status — {csOutlet==="ALL"?"All Outlets":csOutlet} &nbsp;|&nbsp;
-          {csMode==="daily" && csDate}
-          {csMode==="weekly" && csData[0] ? `${csData[0].csFrom} → ${csData[0].csTo}` : ""}
-          {csMode==="monthly" && csMonth}
+          {csFrom} → {csTo}
         </div>
 
         <div

@@ -367,7 +367,7 @@ function IncomeStatement({ d, outlet, month }) {
     <ReportWrap title="Income Statement" outlet={outlet} month={month}>
       {/* Sales Revenue */}
       <TR label="Sales Revenue" val={totalSalesAmt} bold />
-      {totalReturns > 0 && <TR label="(Less) Returns on Sale" val={totalReturns} neg indent={1} />}
+      {totalReturns > 0 && <TR label="(-) Returns on Sale" val={totalReturns} neg indent={1} />}
       {totalReturns > 0 && <TR label="Net Sales" val={netSalesAmt} bold total />}
 
       {/* Cost of Sales */}
@@ -377,15 +377,15 @@ function IncomeStatement({ d, outlet, month }) {
         <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
       ))}
 
-      <TR label="(Plus) Purchases" col2={totalPurchase} indent={1} />
+      <TR label="(+) Purchases" col2={totalPurchase} indent={1} />
       {Object.entries(purBySup).map(([supId, sup]) => (
         <TR key={`pur-${supId}`} label={supId.replace(/^\d{4}-/, "")} col2={sup.total} indent={2} />
       ))}
 
-      {transInAmt > 0  && <TR label="(Plus) Transfer In"  col2={transInAmt}  indent={1} />}
-      {transOutAmt > 0 && <TR label="(Less) Transfer Out" col2={transOutAmt} neg indent={1} />}
+      {transInAmt > 0  && <TR label="(+) Transfer In"  col2={transInAmt}  indent={1} />}
+      {transOutAmt > 0 && <TR label="(-) Transfer Out" col2={transOutAmt} neg indent={1} />}
 
-      <TR label="(Less) End Stock (Current Status)" col2={endStockVal} neg indent={1} />
+      <TR label="(-) End Stock" col2={endStockVal} neg indent={1} />
 
       <TR label="Cost of Sales" val={costOfSales} neg total />
       <TR label="Gross Profit / (Loss)" val={grossProfit} bold total />
@@ -468,7 +468,7 @@ function BalanceSheet({ d, outlet, month }) {
 
       {/* Current Assets */}
       <SH>Current Assets (1000–1499)</SH>
-      <TRSplit label="Main Stock (Current Status End Stock)"  col2={endStockVal}   indent={1} />
+      <TRSplit label="Main Stock"  col2={endStockVal}   indent={1} />
       <TRSplit label="Empty Stock"                            col2={emptyStockVal}  indent={1} />
       <TRSplit label="Cash in Hand"                          col2={cashBal}         indent={1} />
       <TRSplit label="Bank"                                  col2={bankBal}         indent={1} />
@@ -507,9 +507,9 @@ function CapitalSheet({ d, outlet, month }) {
     <ReportWrap title="Capital Sheet" outlet={outlet} month={month}>
       <SH>Capital Summary</SH>
       <TR label="Owner's Capital" col2={0} indent={1} />
-      <TR label="(Plus) Net Profit / (Loss)" col2={netProfit} indent={1} />
+      <TR label=" Net Profit / (Loss)" col2={netProfit} indent={1} />
       {coaCapital.filter(a => a.id >= "3003").map(a => (
-        <TR key={a.id} label={`(Less) ${a.name}`} col2={0} neg indent={1} />
+        <TR key={a.id} label={`(-) ${a.name}`} col2={0} neg indent={1} />
       ))}
       <TR label="Total Capital" val={netProfit} bold total />
 
