@@ -21,14 +21,15 @@ export default function Ledger({ rows, bfBal = 0 }) {
       </div>
       {rows.length === 0 && <div className="empty">No entries yet.</div>}
       {rows.map(e => {
-        if (e.type === "in") bal += e.amount;
-        else bal -= e.amount;
+        const debit  = e.debit  ?? (e.type === "in"  ? e.amount : 0) ?? 0;
+        const credit = e.credit ?? (e.type === "out" ? e.amount : 0) ?? 0;
+        bal += debit - credit;
         return (
           <div className="lrow" key={e.id || Math.random()}>
             <div className="lc mono">{e.date}</div>
             <div className="lc">{e.description}</div>
-            <div className="lc lout">{e.type === "out" ? `Rs.${fmt(e.amount)}` : ""}</div>
-            <div className="lc lin">{e.type === "in" ? `Rs.${fmt(e.amount)}` : ""}</div>
+            <div className="lc lout">{credit ? `Rs.${fmt(credit)}` : ""}</div>
+            <div className="lc lin">{debit ? `Rs.${fmt(debit)}` : ""}</div>
             <div className="lc lbal" style={{ color: bal >= 0 ? "var(--txt)" : "var(--red)" }}>
               Rs.{fmt(bal)}
             </div>
