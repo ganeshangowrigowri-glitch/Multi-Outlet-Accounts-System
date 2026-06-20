@@ -2,6 +2,7 @@
 import { useState, useEffect } from "react";
 import { fmt, today, monthOf } from "../../utils/helpers";
 import { I } from "../../utils/icons";
+import { addCashEntry, addBankEntry, addGLEntry } from "../../db";
 import { supabase } from "../../supabase";
 
 
@@ -35,33 +36,34 @@ export default function S_Expenses({ outlet, user, toast_ }) {
   const amt = parseFloat(amount);
   const acc = accounts.find(a => a.id === accId);
   const rec = {
-    date, acc_id: accId, acc_name: acc?.name || accId,
-    desc, amount: amt, pay_method: payMethod,
-    outlet, by: user.username
+    date, account_id: accId,
+    description: desc, amount: amt, paid_via: payMethod,
+    outlet_id: outlet
   };
-
   const { data, error } = await supabase.from("expenses").insert([rec]).select().single();
   if (error) { toast_("Save failed: " + error.message, "err"); return; }
 
   setRec(prev => [data, ...prev]);
 
-  // Cash/Bank ledger
-  if (payMethod === "Cash" || payMethod === "Bank") {
-    await supabase.from("cash_bank_ledger").insert([{
-      outlet, date,
-      description: `Expense: ${acc?.name || accId}`,
-      type: "out", amount: amt,
-      ledger_type: payMethod === "Cash" ? "cash" : "bank"
-    }]);
+ // Cash/Bank ledger
+  if (payMethod === "Cash") {
+    await addCashEntry(outlet, {
+      date, description: `Expense: ${acc?.name || accId}`,
+      type: "out", debit: 0, credit: amt,
+    });
+  } else if (payMethod === "Bank") {
+    await addBankEntry(outlet, {
+      date, description: `Expense: ${acc?.name || accId}`,
+      type: "out", debit: 0, credit: amt,
+    });
   }
 
   // GL entry
-  await supabase.from("gl_entries").insert([{
-    outlet, date,
-    account_id: accId,
+  await addGLEntry(outlet, {
+    date, account_id: accId,
     description: acc?.name || accId,
-    debit: amt, credit: 0
-  }]);
+    debit: amt, credit: 0, source: "expense",
+  });
 
   toast_("Expense saved ✓");
   setDesc(""); setAmount("");
@@ -71,8 +73,11 @@ export default function S_Expenses({ outlet, user, toast_ }) {
   const mTotal = records.filter(r => monthOf(r.date) === mo).reduce((a, r) => a + r.amount, 0);
   const byCat  = records
     .filter(r => monthOf(r.date) === mo)
-    .reduce((a, r) => { a[r.accName] = (a[r.accName] || 0) + r.amount; return a; }, {});
-
+    .reduce((a, r) => {
+      const name = accounts.find(acc => acc.id === r.account_id)?.name || r.account_id;
+      a[name] = (a[name] || 0) + r.amount;
+      return a;
+    }, {});
   return (
     <>
       {/* ── Record Expense ── */}
@@ -154,9 +159,9 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             {records.slice(0, 25).map(r => (
               <tr key={r.id}>
                 <td className="mono">{r.date}</td>
-                <td style={{ fontSize: 11 }}>{r.acc_name}</td>
-                <td style={{ fontSize: 11, color: "var(--mut)" }}>{r.desc || "—"}</td>
-                <td><span className={`badge ${r.pay_method === "Cash" ? "ba" : "bb"}`}>{r.payMethod}</span></td>
+                 <td style={{ fontSize: 11 }}>{accounts.find(a => a.id === r.account_id)?.name || r.account_id}</td>
+                 <td style={{ fontSize: 11, color: "var(--mut)" }}>{r.description || "—"}</td>
+                 <td><span className={`badge ${r.paid_via === "Cash" ? "ba" : "bb"}`}>{r.paid_via}</span></td>
                 <td className="rt mono cr bold">Rs.{fmt(r.amount)}</td>
               </tr>
             ))}

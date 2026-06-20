@@ -670,7 +670,7 @@ function PurchaseSummary({ d, outlet, month }) {
             p.items?.filter(l => !l.isEmptyItem).map((l, i) => (
               <tr key={`${p.id||p.date}_${i}`} style={{ borderBottom: "1px solid rgba(63,63,70,.3)" }}>
                 <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)", fontFamily: "'JetBrains Mono',monospace" }}>{i === 0 ? p.date : ""}</td>
-                <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)" }}>{i === 0 ? (p.ref || p.invoice_no || "—") : ""}</td>
+                <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)" }}>{i === 0 ? (p.ref || p.invoice_no || p.notes?.replace(/^Inv:/, "") || "—") : ""}</td>
                 <td style={{ padding: "5px 10px", fontSize: 11.5, fontWeight: 600 }}>{l.itemName || l.name || l.itemCode}</td>
                 <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{l.qty}</td>
                 <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--grn)" }}>Rs.{fmt(l.amount || (Number(l.qty) * Number(l.unitCost)) || 0)}</td>

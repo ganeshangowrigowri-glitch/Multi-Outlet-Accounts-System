@@ -15,7 +15,7 @@ export default function LoginScreen({ onLogin }) {
     const p = (form.password || "").trim();
     if (tab === "admin") {
       if (u === "admin" && p === "admin123") onLogin({ role: "admin", username: "admin" });
-      else setErr("Wrong credentials. Try admin / admin123");
+      else setErr("Wrong credentials. Try again");
     } else {
       if (!form.outlet) { setErr("Select your outlet first."); return; }
       const clerks = ls("clerks", SEED_CLERKS);
