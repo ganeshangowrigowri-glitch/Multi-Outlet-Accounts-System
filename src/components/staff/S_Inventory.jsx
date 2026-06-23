@@ -431,7 +431,6 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
 
   (async () => {
     const opening = await getOpeningStock(outlet, mainDate);
-     console.log("🔍 Opening stock loaded for", mainDate, ":", opening); // ← ADD THIS
     const mergedMain = opening?.main
       ? { ...baseMain, ...opening.main }
       : baseMain;
@@ -728,6 +727,7 @@ return { ...r, [field]: val };
   });
 
   await propagateOpeningForward(outlet, mainDate, om, null);
+  await deleteSaleForDate(outlet, mainDate, false);
   await addSale(outlet, {
     date: mainDate,
     items: mainRowsWithDerived,
@@ -831,30 +831,86 @@ const csData = useMemo(() => inv.map(item => {
 
   // ── All daily sales for this item in the date range, sorted by date ──
   const salesInRange = dbSales
-    .filter(s => s.date >= csFrom && s.date <= csTo)
-    .sort((a, b) => a.date.localeCompare(b.date));
-
+  .filter(s => s.date >= csFrom && s.date <= csTo && 
+    (s.items || []).some(r => !r.isEmptyItem))
+  .sort((a, b) => a.date.localeCompare(b.date));
+  
   // ── Last known end stock (= in-hand stock) ──
-  let lastEndStock = null;
+let lastEndStock = null;
+
+// Collect ALL matching rows from csTo date across all sale records
+const csToSales = salesInRange.filter(s => s.date === csTo);
+const csToRows = [];
+for (const sale of csToSales) {
+  const row = (sale.items || []).find(
+    r => !r.isEmptyItem && (
+      (r.id && r.id === item.id) ||
+      (r.code && r.code === item.code && r.supplier === item.supplier)
+    )
+  );
+  if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined) {
+    csToRows.push(row);
+  }
+}
+
+if (csToRows.length > 0) {
+  // Prefer the row with sold > 0; otherwise take the highest endStock
+  const soldRow = csToRows.find(r => parseFloat(r.sold) > 0);
+  if (soldRow) {
+    lastEndStock = parseFloat(soldRow.endStock);
+  } else {
+    lastEndStock = Math.max(...csToRows.map(r => parseFloat(r.endStock)));
+  }
+}
+
+// Fallback: search entire range
+if (lastEndStock === null) {
   for (let i = salesInRange.length - 1; i >= 0; i--) {
     const row = (salesInRange[i].items || []).find(
-      r => r.code === item.code && r.id === item.id && !r.isEmptyItem
+      r => !r.isEmptyItem && (
+        (r.id && r.id === item.id) ||
+        (r.code && r.code === item.code && r.supplier === item.supplier)
+      )
     );
-    if (row && row.endStock !== "" && row.endStock !== undefined) {
-      lastEndStock = parseFloat(row.endStock) ?? null;
+    if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined && parseFloat(row.endStock) > 0) {
+      lastEndStock = parseFloat(row.endStock);
       break;
     }
   }
+}
+
+// Check if a saved sale record exists for this item on csTo date
+ const hasSavedRecord = salesInRange.some(s =>
+  (s.items || []).some(r =>
+    !r.isEmptyItem && (
+      (r.id && r.id === item.id) ||
+      (r.code && r.code === item.code && r.supplier === item.supplier)
+    )
+  )
+);
 
   // ── First opening in range ──
-  let firstOpening = null;
-  if (salesInRange.length > 0) {
-    const firstRow = (salesInRange[0].items || []).find(
-      r => r.code === item.code && r.id === item.id && !r.isEmptyItem
+   let firstOpening = null;
+if (salesInRange.length > 0) {
+  // Get all records for the earliest date in range
+  const firstDate = salesInRange[0].date;
+  const firstDateSales = salesInRange.filter(s => s.date === firstDate);
+  // Pick the row with the highest openingStock (most reliable save)
+  for (const sale of firstDateSales) {
+    const row = (sale.items || []).find(
+      r => !r.isEmptyItem && (
+        (r.id && r.id === item.id) ||
+        (r.code && r.code === item.code && r.supplier === item.supplier)
+      )
     );
-    if (firstRow) firstOpening = Number(firstRow.openingStock) ?? null;
+    if (row && row.openingStock !== null && row.openingStock !== undefined) {
+      const op = Number(row.openingStock);
+      if (firstOpening === null || op > firstOpening) {
+        firstOpening = op;
+      }
+    }
   }
-
+}
   // ── Purchases ──
   let totalPurchase = 0;
   dbPurchases
@@ -888,8 +944,8 @@ const csData = useMemo(() => inv.map(item => {
       if (l.itemCode === item.code) totalReturn += parseFloat(l.qty) || 0;
     }));
 
-  const inHandStock   = lastEndStock  !== null ? lastEndStock  : 0;
-  const opening       = firstOpening  !== null ? firstOpening  : (Number(item.qty) || 0);
+  const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+  const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
 
   const totalBottleSale = opening + totalPurchase - inHandStock;
   const physicalStock   = inHandStock * uc;
@@ -915,6 +971,7 @@ const csData = useMemo(() => inv.map(item => {
     inHandStock,
     physicalStock,
     physicalStockOverride: physStock[pk] ?? "",
+    hasSavedRecord,
     totalBottleSale,
     totalSaleAmt,
     totalPurchase,
@@ -928,9 +985,15 @@ const csData = useMemo(() => inv.map(item => {
     sellingPrice: sp,
     physKey: pk,
   };
-}).filter(r =>
-  r.totalBottleSale > 0 || r.totalPurchase > 0 ||
-  r.transferIn > 0 || r.transferOut > 0 || r.totalReturn > 0
+}
+ ).filter(r =>
+  (r.opening > 0 || r.inHandStock > 0) &&
+  (
+    r.totalBottleSale > 0 || r.totalPurchase > 0 ||
+    r.transferIn > 0 || r.transferOut > 0 || r.totalReturn > 0 ||
+    r.hasSavedRecord === true
+  )
+
 ), [inv, outlet, csFrom, csTo, physStock, dbSales, dbPurchases, dbTransfers, dbReturns]);
   // ─────────────────────────────────────────────────────────
   //  FILTERED VIEWS
@@ -938,8 +1001,7 @@ const csData = useMemo(() => inv.map(item => {
   const roStyle  = { background:"var(--s2)", cursor:"not-allowed", opacity:0.75 };
   const iS       = { padding:"4px 8px", background:"var(--s2)", border:"1px solid var(--bdr)", borderRadius:6, fontSize:12, color:"var(--txt)", outline:"none" };
   const lbl      = { fontSize:9, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--mut)", display:"block", marginBottom:2 };
-  const tblWrap  = { flex:1, minHeight:0, overflowX:"auto", overflowY:"auto", scrollbarWidth:"none", msOverflowStyle:"none" };
-
+  const tblWrap  = { flex:1, minHeight:0, overflowX:"auto", overflowY:"auto", maxHeight:"calc(100vh - 180px)" };
   const filteredMain = useMemo(() => {
     if (mainSupFilter === "ALL") return mainRows;
     return mainRows.filter(r => {
@@ -989,7 +1051,7 @@ const csData = useMemo(() => inv.map(item => {
   //  RENDER
   // ─────────────────────────────────────────────────────────
   return (
-    <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0, width:"100%" }}>
+  <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden", width:"100%" }}>
 
       <style>{`
         [data-inv-tbl]::-webkit-scrollbar { display:none }
@@ -1005,12 +1067,12 @@ const csData = useMemo(() => inv.map(item => {
       `}</style>
 
       {/* ════════════════ DAILY SALE ════════════════ */}
-      {subTab === "daily" && (
-        <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
+        {subTab === "daily" && (
+  <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
 
           {/* ── MAIN STOCK TAB ── */}
           {dailyTab === "main" && (
-            <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
+  <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
              <CtrlBar
              date={mainDate} setDate={d => {
              setMainDate(d);
@@ -1025,7 +1087,7 @@ const csData = useMemo(() => inv.map(item => {
                 count={filteredMain.length} supLabel="Supplier"
               />
               <ScrollArrows scrollBy={mainScrollBy} />
-              <div data-inv-tbl ref={mainTableRef} style={tblWrap}>
+              <div data-inv-tbl ref={mainTableRef} style={{ flex:1, overflowX:"auto", overflowY:"auto", minHeight:0 }}>
                 <table className="tbl tin" style={{ minWidth:1100, width:"100%" }}>
                   <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
                     <tr>
@@ -1115,8 +1177,8 @@ const csData = useMemo(() => inv.map(item => {
           )}
 
           {/* ── EMPTY STOCK TAB ── */}
-          {dailyTab === "empty" && (
-            <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
+           {dailyTab === "empty" && (
+           <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
               <CtrlBar
               date={empDate} setDate={d => {
               setEmpDate(d);
@@ -1131,7 +1193,7 @@ const csData = useMemo(() => inv.map(item => {
                 count={filteredEmp.length} supLabel="Supplier / Type"
               />
               <ScrollArrows scrollBy={empScrollBy} />
-              <div data-inv-tbl ref={empTableRef} style={tblWrap}>
+              <div data-inv-tbl ref={empTableRef} style={{ flex:1, overflowX:"auto", overflowY:"auto", minHeight:0 }}>
                 <table className="tbl tin" style={{ minWidth:1200, width:"100%" }}>
                   <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
                     <tr>
@@ -1239,27 +1301,71 @@ const csData = useMemo(() => inv.map(item => {
       )}
 {/* ════════════════ CURRENT STATUS ════════════════ */}
 {subTab === "status" && (
-  <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
+  <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
 
-    <style>{`
-      @media print {
-        @page { size: legal landscape; margin: 8mm; }
-        .no-print, button, select, input[type=date] { display:none !important; }
-        body, html { background:#fff !important; color:#000 !important; }
-        .cs-tbl { width:100% !important; font-size:7.5px !important; border-collapse:collapse !important; table-layout:fixed !important; }
-        .cs-tbl th, .cs-tbl td { border:1px solid #bbb !important; padding:2px 4px !important; word-break:break-word !important; }
-        .cs-tbl th { background:#f0f0f0 !important; color:#000 !important; font-weight:700 !important; }
-        .cs-tbl .rt { text-align:right !important; }
-        .cs-tbl .mono { font-family:monospace !important; }
-        .cs-tbl .bold { font-weight:700 !important; }
-        .ctag { background:#e8e8e8 !important; color:#111 !important; border-radius:3px; padding:1px 4px; font-family:monospace; font-size:7px; }
-        .tpill { background:#ddd !important; color:#333 !important; border-radius:3px; padding:1px 4px; font-size:7px; }
-        [data-cs-tbl] { overflow:visible !important; height:auto !important; }
-        .cs-print-header { display:block !important; font-size:11px; font-weight:700; margin-bottom:4px; }
-      }
-      .cs-print-header { display:none; }
-      [data-cs-tbl]::-webkit-scrollbar { display:none; }
-    `}</style>
+   <style>{`
+  @media print {
+    @page { size: legal landscape; margin: 8mm; }
+    .no-print, button, select, input[type=date] { display:none !important; }
+    body, html { background:#fff !important; color:#000 !important; font-size:6.5px !important; }
+    .cs-tbl {
+      width:100% !important;
+      font-size:6.5px !important;
+      border-collapse:collapse !important;
+      table-layout:auto !important;
+      page-break-inside:auto !important;
+    }
+    .cs-tbl thead {
+      display:table-header-group !important;
+      background:#f0f0f0 !important;
+    }
+    .cs-tbl tbody { display:table-row-group !important; }
+    .cs-tbl tfoot { display:table-footer-group !important; }
+    .cs-tbl tr {
+      page-break-inside:avoid !important;
+      page-break-after:auto !important;
+    }
+    .cs-tbl th {
+      background:#f0f0f0 !important;
+      color:#000 !important;
+      font-weight:700 !important;
+      font-size:6px !important;
+      border:1px solid #999 !important;
+      padding:2px 3px !important;
+      white-space:nowrap !important;
+    }
+    .cs-tbl td {
+      border:1px solid #bbb !important;
+      padding:2px 3px !important;
+      white-space:nowrap !important;
+      font-size:6.5px !important;
+    }
+    .cs-tbl .rt { text-align:right !important; }
+    .cs-tbl .mono { font-family:monospace !important; }
+    .cs-tbl .bold { font-weight:700 !important; }
+    .ctag {
+      background:#e8e8e8 !important; color:#111 !important;
+      border-radius:2px; padding:1px 2px;
+      font-family:monospace; font-size:6px;
+    }
+    .tpill {
+      background:#ddd !important; color:#333 !important;
+      border-radius:2px; padding:1px 2px; font-size:6px;
+    }
+    [data-cs-tbl] {
+      overflow:visible !important;
+      height:auto !important;
+      max-height:none !important;
+      display:block !important;
+    }
+    .cs-print-header {
+      display:block !important;
+      font-size:10px; font-weight:700; margin-bottom:4px;
+    }
+  }
+  .cs-print-header { display:none; }
+  [data-cs-tbl]::-webkit-scrollbar { display:none; }
+`}</style>
 
     {/* ── Controls ── */}
     <div style={{ display:"flex", alignItems:"flex-end", gap:8, flexWrap:"wrap", padding:"6px 0" }}>
@@ -1313,7 +1419,7 @@ const csData = useMemo(() => inv.map(item => {
     </div>
 
     {/* ── Table ── */}
-    <div data-cs-tbl ref={csTableRef} style={tblWrap}>
+    <div data-cs-tbl ref={csTableRef} style={{ flex:1, overflowX:"auto", overflowY:"auto", minHeight:0 }}>
       <table className="cs-tbl" style={{ width:"100%", minWidth:1100 }}>
         <thead>
           <tr>
@@ -1321,18 +1427,18 @@ const csData = useMemo(() => inv.map(item => {
             <th style={{ width:72 }}>Item Code</th>
             <th>Description</th>
             <th style={{ width:70 }}>Item Type</th>
-            <th className="rt" style={{ width:82 }}>Opening Stock</th>
-            <th className="rt" style={{ width:82 }}>Total Purchase</th>
-            <th className="rt" style={{ width:82 }}>In Hand Stock</th>
-            <th className="rt" style={{ width:90 }}>Total Bottle Sale</th>
-            <th className="rt" style={{ width:108 }}>Physical Stock (Rs.)</th>
+            <th className="rt" style={{ width:82 }}>Opening Stk</th>
+            <th className="rt" style={{ width:82 }}>Total Pur</th>
+            <th className="rt" style={{ width:82 }}>In Hand Stk</th>
+            <th className="rt" style={{ width:90 }}>Total Btle Sale</th>
+            <th className="rt" style={{ width:108 }}>Phy Stk (Rs.)</th>
             <th className="rt" style={{ width:100 }}>Total Sale (Rs.)</th>
             <th className="rt" style={{ width:100 }}>Profit (Rs.)</th>
             <th className="rt" style={{ width:80 }}>Margin</th>
-            <th className="rt" style={{ width:76 }}>Transfer In</th>
-            <th className="rt" style={{ width:76 }}>Transfer Out</th>
+            <th className="rt" style={{ width:76 }}>Trans.In</th>
+            <th className="rt" style={{ width:76 }}>Trans.Out</th>
             <th className="rt" style={{ width:70 }}>Return</th>
-            <th className="rt" style={{ width:80 }}>Adj. to Stock</th>
+            <th className="rt" style={{ width:80 }}>Adj. to Stk</th>
           </tr>
         </thead>
         <tbody>
