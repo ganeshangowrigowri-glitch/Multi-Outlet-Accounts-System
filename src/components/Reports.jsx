@@ -173,34 +173,68 @@ const [inv, coa] = await Promise.all([
 
       const invMap = {};
       (inv||[]).forEach(i => { invMap[i.code]=i; if(i.id) invMap[i.id]=i; });
+       // ── Sales Revenue ──
+      // Exactly mirrors Current Status totalSaleAmt:
+      // For each item: totalBottleSale (opening + purchase + transIn - transOut - endStock) × sellingPrice
+      const lastSaleRecord = [...sales]
+        .filter(s => (s.items||[]).some(r => !r.isEmptyItem))
+        .sort((a,b) => (a.date||"").localeCompare(b.date||""))
+        .pop();
 
-      // ── Sales Revenue ──
-      const totalSalesAmt = sales.reduce((a,s) => {
-        const mt = (s.items||[]).filter(r=>!r.isEmptyItem)
-          .reduce((sum,r)=>sum+(parseFloat(r.sold)||0)*(parseFloat(r.rate)||0),0);
-        return a+(Number(s.total)||mt||0);
-      }, 0);
+      let totalSalesAmt = 0;
+      if (lastSaleRecord) {
+        (lastSaleRecord.items||[]).filter(r => !r.isEmptyItem).forEach(r => {
+          const item = invMap[r.code] || invMap[r.id];
+          const sp   = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
+          const uc   = Number(item?.unitCost) || Number(r.unitCost) || 0;
+
+          // opening and endStock from the last sale record — same fields Current Status reads
+          const opening     = parseFloat(r.openingStock) || 0;
+          const purchase    = parseFloat(r.purchase)     || 0;
+          const transIn     = parseFloat(r.transferIn)   || 0;
+          const transOut    = parseFloat(r.transferOut)  || 0;
+          const endStockQty = parseFloat(r.endStock)     || 0;
+
+          const totalBottleSale = opening + purchase - endStockQty;
+          totalSalesAmt += totalBottleSale * sp;
+        });
+      }
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
       const netSalesAmt  = totalSalesAmt - totalReturns;
 
       // ── Opening Stock ──
+      // Mirrors Current Status: firstOpening = r.openingStock from first sale record in month
       let openingStockVal=0;
       const openingStockByCode={};
-      if (mStart) {
-        const opRes = await Promise.all(outlets.map(o=>getOpeningStock(o,mStart)));
-        opRes.forEach(op => {
-          if (!op?.main) return;
-          Object.entries(op.main).forEach(([code,qty]) => {
-            const item=invMap[code]; const uc=Number(item?.unitCost)||0; const q=Number(qty)||0;
-            openingStockVal += q*uc;
-            if (q>0 && uc>0) {
-              if (!openingStockByCode[code]) openingStockByCode[code]={name:item?.name||code,qty:0,unitCost:uc};
-              openingStockByCode[code].qty += q;
-            }
-          });
-        });
-      }
+      const salesSortedAsc = [...sales]
+        .filter(s => (s.items||[]).some(r => !r.isEmptyItem))
+        .sort((a,b) => (a.date||"").localeCompare(b.date||""));
 
+      // Same as Current Status: get all records on the first date, pick highest openingStock per item
+      const firstDate = salesSortedAsc[0]?.date;
+      const firstDateSales = firstDate
+        ? salesSortedAsc.filter(s => s.date === firstDate)
+        : [];
+
+      firstDateSales.forEach(sale => {
+        (sale.items||[]).filter(r => !r.isEmptyItem).forEach(r => {
+          const item = invMap[r.code] || invMap[r.id];
+          const uc = Number(item?.unitCost) || Number(r.unitCost) || 0;
+          const q  = parseFloat(r.openingStock) || 0;
+          if (q > 0 && uc > 0) {
+            if (!openingStockByCode[r.code]) {
+              openingStockByCode[r.code] = { name: r.name || item?.name || r.code, qty: 0, unitCost: uc };
+            }
+            // Same as Current Status: keep highest openingStock per item
+            if (q > openingStockByCode[r.code].qty) {
+              openingStockByCode[r.code].qty = q;
+            }
+          }
+        });
+      });
+      openingStockVal = Object.values(openingStockByCode)
+        .reduce((a, v) => a + v.qty * v.unitCost, 0);
+        
       // ── Purchases by supplier ──
       const purBySup={};
       let totalPurchase=0;
@@ -221,22 +255,52 @@ const [inv, coa] = await Promise.all([
         .filter(t=>outlet==="ALL"||(t.from_outlet_id??t.from)===outlet)
         .reduce((a,t)=>{ const am=(t.items||[]).reduce((s,l)=>s+(Number(l.amount)||0),0); return a+(Number(t.total)||am||0); },0);
 
-      // ── End Stock ──
+        // ── End Stock ──
+      // Mirrors Current Status: lastEndStock = r.endStock from last sale record on mEnd date
       let endStockVal=0;
       const endStockByCode={};
-      const salesSorted=[...sales].sort((a,b)=>(b.date||"").localeCompare(a.date||""));
-      const latestSale=salesSorted.find(s=>(s.items||[]).some(r=>!r.isEmptyItem));
-      if (latestSale) {
-        (latestSale.items||[]).filter(r=>!r.isEmptyItem).forEach(r=>{
-          const es=parseFloat(r.endStock);
-          if (!isNaN(es)) {
-            const item=invMap[r.code]||invMap[r.id];
-            const uc=Number(item?.unitCost)||Number(r.unitCost)||0;
-            endStockVal+=es*uc;
-            endStockByCode[r.code]={name:r.name||item?.name||r.code,qty:es,unitCost:uc};
+      const salesSorted = [...sales]
+        .filter(s => (s.items||[]).some(r => !r.isEmptyItem))
+        .sort((a,b) => (b.date||"").localeCompare(a.date||""));
+
+      // Same as Current Status: get all records on mEnd date first, fallback to latest available
+      const endDateSales = mEnd
+        ? salesSorted.filter(s => s.date === mEnd)
+        : [];
+      const endSalesToUse = endDateSales.length > 0
+        ? endDateSales
+        : salesSorted.slice(0, 1);
+
+      // Same as Current Status: per item prefer sold>0 row, else take highest endStock
+      const endStockItemMap = {};
+      endSalesToUse.forEach(sale => {
+        (sale.items||[]).filter(r => !r.isEmptyItem).forEach(r => {
+          const es = parseFloat(r.endStock);
+          if (isNaN(es)) return;
+          const existing = endStockItemMap[r.code];
+          const soldQty = parseFloat(r.sold) || 0;
+          if (!existing) {
+            endStockItemMap[r.code] = { ...r, _sold: soldQty };
+          } else {
+            // Prefer row with sold > 0; otherwise keep highest endStock
+            if (soldQty > 0 && existing._sold === 0) {
+              endStockItemMap[r.code] = { ...r, _sold: soldQty };
+            } else if (es > parseFloat(existing.endStock)) {
+              endStockItemMap[r.code] = { ...r, _sold: soldQty };
+            }
           }
         });
-      }
+      });
+
+      Object.entries(endStockItemMap).forEach(([code, r]) => {
+        const item = invMap[code] || invMap[r.id];
+        const uc = Number(item?.unitCost) || Number(r.unitCost) || 0;
+        const q  = parseFloat(r.endStock) || 0;
+        if (q > 0 && uc > 0) {
+          endStockVal += q * uc;
+          endStockByCode[code] = { name: r.name || item?.name || code, qty: q, unitCost: uc };
+        }
+      });
 
       const costOfSales = openingStockVal+totalPurchase+transInAmt-transOutAmt-endStockVal;
       const grossProfit = netSalesAmt-costOfSales;
@@ -295,8 +359,16 @@ const [inv, coa] = await Promise.all([
 
       // ── Sales by day ──
       const salesByDay={};
-      sales.forEach(s=>{ const d=dayOf(s.date); const amt=(s.items||[]).filter(r=>!r.isEmptyItem).reduce((a,r)=>a+(parseFloat(r.sold)||0)*(parseFloat(r.rate)||0),0); salesByDay[d]=(salesByDay[d]||0)+(Number(s.total)||amt); });
-
+      salesSortedAsc.forEach((s, idx) => {
+        const d = dayOf(s.date);
+        const todayAmt = (s.items||[]).filter(r=>!r.isEmptyItem)
+          .reduce((a,r)=>a+(parseFloat(r.sold)||0)*(parseFloat(r.rate)||0), 0);
+        const prevAmt = idx > 0
+          ? (salesSortedAsc[idx-1].items||[]).filter(r=>!r.isEmptyItem)
+              .reduce((a,r)=>a+(parseFloat(r.sold)||0)*(parseFloat(r.rate)||0), 0)
+          : 0;
+        salesByDay[d] = (salesByDay[d]||0) + (todayAmt - prevAmt);
+      });
       // ── Expenses by day ──
       const expByDay={};
       expenses.forEach(e=>{ const d=dayOf(e.date); expByDay[d]=(expByDay[d]||0)+(Number(e.amount)||0); });

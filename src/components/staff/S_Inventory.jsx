@@ -1054,7 +1054,11 @@ if (salesInRange.length > 0) {
   <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden", width:"100%" }}>
 
       <style>{`
-        [data-inv-tbl]::-webkit-scrollbar { display:none }
+        [data-inv-tbl]::-webkit-scrollbar { width: 8px; height: 0px; }
+        [data-inv-tbl]::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 4px; }
+        [data-inv-tbl]::-webkit-scrollbar-thumb:hover { background: #fbbf24; }
+        [data-inv-tbl]::-webkit-scrollbar-track { background: var(--s2, #1e1e3a); }
+        [data-inv-tbl]::-webkit-scrollbar-corner { background: var(--s2, #1e1e3a); }
         @media print {
           .no-print, button, select, input[type=date] { display:none !important; }
           body, html { background:#fff !important; color:#000 !important; }
@@ -1067,12 +1071,11 @@ if (salesInRange.length > 0) {
       `}</style>
 
       {/* ════════════════ DAILY SALE ════════════════ */}
-        {subTab === "daily" && (
-  <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
-
+      {subTab === "daily" && (
+      <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
           {/* ── MAIN STOCK TAB ── */}
           {dailyTab === "main" && (
-  <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
+          <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
              <CtrlBar
              date={mainDate} setDate={d => {
              setMainDate(d);
@@ -1087,7 +1090,7 @@ if (salesInRange.length > 0) {
                 count={filteredMain.length} supLabel="Supplier"
               />
               <ScrollArrows scrollBy={mainScrollBy} />
-              <div data-inv-tbl ref={mainTableRef} style={{ flex:1, overflowX:"auto", overflowY:"auto", minHeight:0 }}>
+              <div data-inv-tbl ref={mainTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
                 <table className="tbl tin" style={{ minWidth:1100, width:"100%" }}>
                   <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
                     <tr>
@@ -1193,7 +1196,7 @@ if (salesInRange.length > 0) {
                 count={filteredEmp.length} supLabel="Supplier / Type"
               />
               <ScrollArrows scrollBy={empScrollBy} />
-              <div data-inv-tbl ref={empTableRef} style={{ flex:1, overflowX:"auto", overflowY:"auto", minHeight:0 }}>
+               <div data-inv-tbl ref={empTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
                 <table className="tbl tin" style={{ minWidth:1200, width:"100%" }}>
                   <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
                     <tr>
@@ -1301,7 +1304,7 @@ if (salesInRange.length > 0) {
       )}
 {/* ════════════════ CURRENT STATUS ════════════════ */}
 {subTab === "status" && (
-  <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
+  <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
 
    <style>{`
   @media print {
@@ -1364,7 +1367,12 @@ if (salesInRange.length > 0) {
     }
   }
   .cs-print-header { display:none; }
-  [data-cs-tbl]::-webkit-scrollbar { display:none; }
+  [data-cs-tbl]::-webkit-scrollbar { width: 8px; height: 0px; }
+  [data-cs-tbl]::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 4px; }
+  [data-cs-tbl]::-webkit-scrollbar-thumb:hover { background: #fbbf24; }
+  [data-cs-tbl]::-webkit-scrollbar-track { background: var(--s2, #1e1e3a); }
+  [data-cs-tbl]::-webkit-scrollbar-corner { background: var(--s2, #1e1e3a); }
+
 `}</style>
 
     {/* ── Controls ── */}
@@ -1419,10 +1427,10 @@ if (salesInRange.length > 0) {
     </div>
 
     {/* ── Table ── */}
-    <div data-cs-tbl ref={csTableRef} style={{ flex:1, overflowX:"auto", overflowY:"auto", minHeight:0 }}>
+    <div data-cs-tbl ref={csTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
       <table className="cs-tbl" style={{ width:"100%", minWidth:1100 }}>
-        <thead>
-          <tr>
+      <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
+      <tr>
             <th style={{ width:30 }}>#</th>
             <th style={{ width:72 }}>Item Code</th>
             <th>Description</th>
