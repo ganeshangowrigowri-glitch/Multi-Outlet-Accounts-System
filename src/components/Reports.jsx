@@ -373,15 +373,36 @@ const [inv, coa] = await Promise.all([
       const expByDay={};
       expenses.forEach(e=>{ const d=dayOf(e.date); expByDay[d]=(expByDay[d]||0)+(Number(e.amount)||0); });
 
-      // ── Cost of Sales by item ──
-      const cosByItem={};
-      sales.forEach(s=>(s.items||[]).filter(r=>!r.isEmptyItem&&(parseFloat(r.sold)||0)>0).forEach(r=>{
-        const item=invMap[r.code]||invMap[r.id]; const uc=Number(item?.unitCost)||Number(r.unitCost)||0;
-        if(!cosByItem[r.code]) cosByItem[r.code]={code:r.code,name:r.name||item?.name||r.code,type:r.type||item?.type||"",sold:0,purchase:0,transIn:0,transOut:0,returns:0,adj:0,unitCost:uc};
-        cosByItem[r.code].sold+=parseFloat(r.sold)||0; cosByItem[r.code].purchase+=parseFloat(r.purchase)||0;
-        cosByItem[r.code].transIn+=parseFloat(r.transferIn)||0; cosByItem[r.code].transOut+=parseFloat(r.transferOut)||0;
-        cosByItem[r.code].returns+=parseFloat(r.returns)||0; cosByItem[r.code].adj+=parseFloat(r.stkSE)||0;
-      }));
+     // ── Cost of Sales by item ──
+     const cosByItem = {};
+     const soldQtyByCode = {}; // real daily sold qty, used only to decide which items to show
+
+    sales.forEach(s => (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
+    const item = invMap[r.code] || invMap[r.id];
+    const uc = Number(item?.unitCost) || Number(r.unitCost) || 0;
+    if (!cosByItem[r.code]) cosByItem[r.code] = { code: r.code, name: r.name || item?.name || r.code, type: r.type || item?.type || "", purchase: 0, transIn: 0, transOut: 0, returns: 0, adj: 0, unitCost: uc };
+
+   cosByItem[r.code].purchase += parseFloat(r.purchase)    || 0;
+   cosByItem[r.code].transIn  += parseFloat(r.transferIn)  || 0;
+   cosByItem[r.code].transOut += parseFloat(r.transferOut) || 0;
+   cosByItem[r.code].returns  += parseFloat(r.returns)     || 0;
+   cosByItem[r.code].adj      += parseFloat(r.stkSE)       || 0; // same field as Current Status "ADJ. TO STK"
+
+  // track real sold qty separately — purely to decide inclusion, not displayed
+  soldQtyByCode[r.code] = (soldQtyByCode[r.code] || 0) + (parseFloat(r.sold) || 0);
+}));
+
+// Derive Sold per formula: Opening + Purchase + TransIn − TransOut − Adj
+Object.keys(cosByItem).forEach(code => {
+  const it = cosByItem[code];
+  it.opening = openingStockByCode[code]?.qty || 0;
+  it.sold = it.opening + it.purchase + it.transIn - it.transOut - it.adj;
+});
+
+// Only keep items that were actually sold this month (real activity, not the derived figure)
+Object.keys(cosByItem).forEach(code => {
+  if (!(soldQtyByCode[code] > 0)) delete cosByItem[code];
+});
 
       // ── Cash Flow ──
       const bankDeposit=bankLedger.filter(t=>Number(t.debit)>0).reduce((a,t)=>a+Number(t.debit),0);
