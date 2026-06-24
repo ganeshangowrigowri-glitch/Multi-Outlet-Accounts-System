@@ -225,16 +225,23 @@ function ScrollArrows({ scrollBy }) {
 //  subTab  → "daily" | "status"
 //  dailyTab → "main"  | "empty"
 // ─────────────────────────────────────────────────────────────
-function CsTotals({ csData, fmt, physStock }) {
-  const totSale   = csData.reduce((a, r) => a + r.totalSaleAmt,   0);
-  const totProfit = csData.reduce((a, r) => a + r.profit,         0);
-  const totPhys   = csData.reduce((a, r) =>
+ function CsTotals({ csData, fmt, physStock }) {
+  const totSale      = csData.reduce((a, r) => a + r.totalSaleAmt,   0);
+  const totProfit    = csData.reduce((a, r) => a + r.profit,         0);
+  const totPhys      = csData.reduce((a, r) =>
     a + Number(r.physicalStockOverride !== "" ? r.physicalStockOverride : r.physicalStock), 0);
-  const totTBS    = csData.reduce((a, r) => a + r.totalBottleSale, 0);
+  const totTBS       = csData.reduce((a, r) => a + r.totalBottleSale, 0);
+  const totOpening   = csData.reduce((a, r) => a + (Number(r.opening)     || 0), 0);
+  const totInHand    = csData.reduce((a, r) => a + (Number(r.inHandStock)  || 0), 0);
+  const totPurchase  = csData.reduce((a, r) => a + (Number(r.totalPurchase)|| 0), 0);
   return (
     <tfoot>
       <tr style={{ background:"var(--s3)", fontWeight:700 }}>
-        <td colSpan={7} className="rt" style={{ paddingRight:11, fontSize:11.5 }}>Totals:</td>
+        <td colSpan={3} className="rt" style={{ paddingRight:11, fontSize:11.5 }}>Totals:</td>
+        <td />
+        <td className="rt mono bold">{totOpening}</td>
+        <td className="rt mono bold">{totPurchase || "—"}</td>
+        <td className="rt mono bold" style={{ color:"var(--grn)" }}>{totInHand}</td>
         <td className="rt mono bold">{totTBS}</td>
         <td className="rt mono bold">Rs.{fmt(totPhys)}</td>
         <td className="rt mono cg bold">Rs.{fmt(totSale)}</td>

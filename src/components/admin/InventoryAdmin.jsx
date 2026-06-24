@@ -1338,9 +1338,10 @@ useEffect(() => {
     })();
   }, [invTab, csOutlet, outletNames]);
 
-   const csData = useMemo(() => {
-   const outlets = csOutlet === "ALL" ? outletNames : [csOutlet];
-   return inv.map(item => {
+ const csData = useMemo(() => {
+  const outlets = csOutlet === "ALL" ? outletNames : [csOutlet];
+
+  return inv.map(item => {
     const sp = (() => {
       if (csOutlet !== "ALL") {
         const ov = ls(outletInvKey(csOutlet), {})[`${item.code}__${item.supplier}`];
@@ -1364,34 +1365,96 @@ useEffect(() => {
     let adjStock      = 0;
     let firstOpening  = null;
     let lastEndStock  = null;
-    let hasSaleEntry  = false;
+    let hasSavedRecord = false;
 
     outlets.forEach(outlet => {
       const salesInRange = (statusDb.sales[outlet] || [])
-        .filter(s => s.date && s.date >= csFrom && s.date <= csTo)
+        .filter(s => s.date && s.date >= csFrom && s.date <= csTo &&
+          (s.items || []).some(r => !r.isEmptyItem))
         .sort((a, b) => a.date.localeCompare(b.date));
 
+      // ── firstOpening: best record from earliest date ──
       if (salesInRange.length > 0) {
-      const firstRow = (salesInRange[0].items || salesInRange[0].mainRows || []).find(
-      r => !r.isEmptyItem && (r.id === item.id || (r.code === item.code && r.supplier === item.supplier))
-      );
-        if (firstRow) firstOpening = Number(firstRow.openingStock) || 0;
+        const firstDate = salesInRange[0].date;
+        const firstDateSales = salesInRange.filter(s => s.date === firstDate);
+        for (const sale of firstDateSales) {
+          const row = (sale.items || []).find(
+            r => !r.isEmptyItem && (
+              (r.id && r.id === item.id) ||
+              (r.code && r.code === item.code && r.supplier === item.supplier)
+            )
+          );
+          if (row && row.openingStock !== null && row.openingStock !== undefined) {
+            const op = Number(row.openingStock);
+            if (firstOpening === null || op > firstOpening) firstOpening = op;
+          }
+        }
       }
 
-      for (let i = salesInRange.length - 1; i >= 0; i--) {
-        const row = (salesInRange[i].items || salesInRange[i].mainRows || []).find(
-        r => !r.isEmptyItem && (r.id === item.id || (r.code === item.code && r.supplier === item.supplier))
+      // ── lastEndStock: collect all csTo rows, prefer sold > 0 ──
+      const csToSales = salesInRange.filter(s => s.date === csTo);
+      const csToRows = [];
+      for (const sale of csToSales) {
+        const row = (sale.items || []).find(
+          r => !r.isEmptyItem && (
+            (r.id && r.id === item.id) ||
+            (r.code && r.code === item.code && r.supplier === item.supplier)
+          )
         );
-        if (row) {
-          if ((parseFloat(row.sold) || 0) > 0) hasSaleEntry = true;
-          if (row.stkSE !== undefined) adjStock = Number(row.stkSE) || 0;
-          if (row.endStock !== "" && row.endStock !== undefined) {
+        if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined) {
+          csToRows.push(row);
+        }
+      }
+      if (csToRows.length > 0) {
+        const soldRow = csToRows.find(r => parseFloat(r.sold) > 0);
+        if (soldRow) {
+          lastEndStock = parseFloat(soldRow.endStock);
+        } else {
+          lastEndStock = Math.max(...csToRows.map(r => parseFloat(r.endStock)));
+        }
+      }
+      // Fallback: last sale in range with positive endStock
+      if (lastEndStock === null) {
+        for (let i = salesInRange.length - 1; i >= 0; i--) {
+          const row = (salesInRange[i].items || []).find(
+            r => !r.isEmptyItem && (
+              (r.id && r.id === item.id) ||
+              (r.code && r.code === item.code && r.supplier === item.supplier)
+            )
+          );
+          if (row && row.endStock !== null && row.endStock !== "" &&
+              row.endStock !== undefined && parseFloat(row.endStock) > 0) {
             lastEndStock = parseFloat(row.endStock);
             break;
           }
         }
       }
 
+      // ── hasSavedRecord ──
+      if (!hasSavedRecord) {
+        hasSavedRecord = salesInRange.some(s =>
+          (s.items || []).some(r =>
+            !r.isEmptyItem && (
+              (r.id && r.id === item.id) ||
+              (r.code && r.code === item.code && r.supplier === item.supplier)
+            )
+          )
+        );
+      }
+
+      // ── adjStock from last sale ──
+      if (salesInRange.length > 0) {
+        const lastSale = salesInRange[salesInRange.length - 1];
+        const lastRow = (lastSale.items || []).find(
+          r => !r.isEmptyItem && (
+            (r.id && r.id === item.id) ||
+            (r.code && r.code === item.code && r.supplier === item.supplier)
+          )
+        );
+        if (lastRow?.stkSE !== undefined) adjStock = Number(lastRow.stkSE) || 0;
+      }
+
+      // ── purchases ──
       (statusDb.purchases[outlet] || [])
         .filter(p => p.date && p.date >= csFrom && p.date <= csTo)
         .forEach(p => (p.items || p.lines || []).forEach(l => {
@@ -1399,49 +1462,43 @@ useEffect(() => {
             totalPurchase += parseFloat(l.qty) || 0;
         }));
 
-     (statusDb.transfers[outlet] || [])
-  .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
-  .filter(t => {
-    const notes = t.notes || "";
-    if (notes.includes("type:in")) return true;
-    if (notes.includes("type:out")) return false;
-    return (t.to_outlet_id ?? t.to) === outlet;
-  })
-  .forEach(t => (t.items || t.lines || []).forEach(l => {
-    if (l.itemCode === item.code)
-      transferIn += parseFloat(l.qty) || 0;
-  }));
+      // ── transfers in ──
+      (statusDb.transfers[outlet] || [])
+        .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
+        .filter(t => {
+          const notes = t.notes || "";
+          if (notes.includes("type:in")) return true;
+          if (notes.includes("type:out")) return false;
+          return (t.to_outlet_id ?? t.to) === outlet;
+        })
+        .forEach(t => (t.items || t.lines || []).forEach(l => {
+          if (l.itemCode === item.code) transferIn += parseFloat(l.qty) || 0;
+        }));
 
-(statusDb.transfers[outlet] || [])
-  .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
-  .filter(t => {
-    const notes = t.notes || "";
-    if (notes.includes("type:out")) return true;
-    if (notes.includes("type:in")) return false;
-    return (t.from_outlet_id ?? t.from) === outlet;
-  })
-  .forEach(t => (t.items || t.lines || []).forEach(l => {
-    if (l.itemCode === item.code)
-      transferOut += parseFloat(l.qty) || 0;
-  }));
+      // ── transfers out ──
+      (statusDb.transfers[outlet] || [])
+        .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
+        .filter(t => {
+          const notes = t.notes || "";
+          if (notes.includes("type:out")) return true;
+          if (notes.includes("type:in")) return false;
+          return (t.from_outlet_id ?? t.from) === outlet;
+        })
+        .forEach(t => (t.items || t.lines || []).forEach(l => {
+          if (l.itemCode === item.code) transferOut += parseFloat(l.qty) || 0;
+        }));
 
+      // ── returns ──
       (statusDb.returns[outlet] || [])
         .filter(r => r.date && r.date >= csFrom && r.date <= csTo)
         .forEach(r => (r.items || r.lines || []).forEach(l => {
-          if (l.itemCode === item.code)
-            totalReturn += parseFloat(l.qty) || 0;
+          if (l.itemCode === item.code) totalReturn += parseFloat(l.qty) || 0;
         }));
     });
 
-    const openingFromOv = (() => {
-      if (csOutlet !== "ALL") {
-        const ov = ls(outletInvKey(csOutlet), {})[`${item.code}__${item.supplier}`];
-        if (ov?.qty !== undefined) return Number(ov.qty) || 0;
-      }
-      return Number(item.qty) || 0;
-    })();
-    const opening         = firstOpening !== null ? firstOpening : openingFromOv;
-    const inHandStock     = lastEndStock !== null ? lastEndStock : 0;
+    const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+    const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
+
     const totalBottleSale = opening + totalPurchase - inHandStock;
     const physicalStock   = inHandStock * uc;
     const totalSaleAmt    = totalBottleSale * sp;
@@ -1450,11 +1507,11 @@ useEffect(() => {
 
     return {
       ...item,
-      _hasSaleEntry: hasSaleEntry,
       opening,
       inHandStock,
       physicalStock,
       physicalStockOverride: physStock[physKey] ?? "",
+      hasSavedRecord,
       totalBottleSale,
       totalSaleAmt,
       profit,
@@ -1465,16 +1522,15 @@ useEffect(() => {
       adjStock,
       margin: mg,
       physKey,
-      csFrom,
-      csTo,
     };
 
-    }).filter(r =>
-    r._hasSaleEntry === true ||
-    r.totalPurchase > 0 ||
-    r.transferIn > 0 ||
-    r.transferOut > 0 ||
-    r.totalReturn > 0
+  }).filter(r =>
+    (r.opening > 0 || r.inHandStock > 0) &&
+    (
+      r.totalBottleSale > 0 || r.totalPurchase > 0 ||
+      r.transferIn > 0 || r.transferOut > 0 || r.totalReturn > 0 ||
+      r.hasSavedRecord === true
+    )
   );
 }, [inv, csFrom, csTo, csOutlet, physStock, statusDb, outletNames]);
 
@@ -1956,16 +2012,23 @@ async function saveSupplier() {
             </tbody>
             {csData.length>0&&(
               <tfoot>
-                <tr style={{background:"var(--s3)",fontWeight:700}}>
-                  <td colSpan={8} className="rt" style={{paddingRight:11,fontSize:11.5}}>Totals:</td>
-                  <td className="rt mono bold">
-                    Rs.{fmt(csData.reduce((a,r)=>a+Number(r.physicalStockOverride!==""?r.physicalStockOverride:r.physicalStock),0))}
-                  </td>
-                  <td className="rt mono cg bold">Rs.{fmt(csData.reduce((a,r)=>a+r.totalSaleAmt,0))}</td>
-                  <td className="rt mono cg bold">Rs.{fmt(csData.reduce((a,r)=>a+r.profit,0))}</td>
-                  <td colSpan={5}/>
-                </tr>
-              </tfoot>
+            <tr style={{background:"var(--s3)",fontWeight:700}}>
+            <td colSpan={3} className="rt" style={{paddingRight:11,fontSize:11.5}}>Totals:</td>
+            <td/>
+            <td className="rt mono bold">{csData.reduce((a,r)=>a+(Number(r.opening)||0),0)}</td>
+            <td className="rt mono bold">{csData.reduce((a,r)=>a+(Number(r.totalPurchase)||0),0)||"—"}</td>
+            <td className="rt mono bold" style={{color:"var(--grn)"}}>
+            {csData.reduce((a,r)=>a+(Number(r.inHandStock)||0),0)}
+            </td>
+            <td className="rt mono bold">{csData.reduce((a,r)=>a+r.totalBottleSale,0)}</td>
+            <td className="rt mono bold">
+            Rs.{fmt(csData.reduce((a,r)=>a+Number(r.physicalStockOverride!==""?r.physicalStockOverride:r.physicalStock),0))}
+            </td>
+            <td className="rt mono cg bold">Rs.{fmt(csData.reduce((a,r)=>a+r.totalSaleAmt,0))}</td>
+            <td className="rt mono cg bold">Rs.{fmt(csData.reduce((a,r)=>a+r.profit,0))}</td>
+            <td colSpan={5}/>
+            </tr>
+           </tfoot>
             )}
           </table>
         </div>
