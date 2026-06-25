@@ -385,7 +385,7 @@ const [inv, coa] = await Promise.all([
    cosByItem[r.code].purchase += parseFloat(r.purchase)    || 0;
    cosByItem[r.code].transIn  += parseFloat(r.transferIn)  || 0;
    cosByItem[r.code].transOut += parseFloat(r.transferOut) || 0;
-   cosByItem[r.code].returns  += parseFloat(r.returns)     || 0;
+   cosByItem[r.code].returns  += parseFloat(r.returns)     || 0; 
    cosByItem[r.code].adj      += parseFloat(r.stkSE)       || 0; // same field as Current Status "ADJ. TO STK"
 
   // track real sold qty separately — purely to decide inclusion, not displayed
@@ -662,52 +662,391 @@ function CashFlowStatement({ d, outlet, month }) {
   );
 }
 
-// ══════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════
 // SALES SUMMARY
-// ══════════════════════════════════════════════════════
+//
+// DATA SOURCE (confirmed from S_Inventory.jsx source):
+//   Each saved sale item has:
+//     r.supplier  → e.g. "DCSL" or "2001-DCSL" (numeric prefix stripped on display)
+//     r.code      → e.g. "D0056"
+//     r.type      → e.g. "Q", "P", "N"  (item size/type badge — NOT the brand)
+//     r.sold      → cumulative sold qty (incremental diff used for daily calc)
+//     r.rate      → selling price per unit
+//     r.isEmptyItem → true for empty bottle items (excluded here)
+//
+// BRAND GROUPING: group by supplier name (strip "XXXX-" prefix if present)
+//   IDL          → supplier contains "IDL"
+//   RL           → supplier contains "RL" or "ROCKLAND"
+//   DCSL         → supplier contains "DCSL" (but NOT "DCSL BEER")
+//   UG           → supplier contains "UG"
+//   LION BREWERY → supplier contains "LION BREWERY" or "LION"
+//   DCSL BEER    → supplier contains "DCSL BEER"
+//   TODDY        → supplier contains "TODDY"
+//
+// COLUMN LAYOUT (matches Excel sheet exactly):
+//   DATE | DAILY SALE | DAILY DEPOSIT
+//   | IDL(Amt+Qty) | RL(Amt+Qty) | DCSL(Amt+Qty) | UG(Amt+Qty)
+//   | LION BREWERY(Amt+Qty) | DCSL BEER(Amt+Qty)
+//   | TODDY(Amt only)
+//   | PURCHASE | SOLD | OTHER
+// ══════════════════════════════════════════════════════════════════════════
+
+// ── Brand config ──────────────────────────────────────────────────────────
+// Each entry: { key, label, match fn, hasQty }
+const BRAND_CONFIG = [
+  {
+    key: "IDL",
+    label: "IDL",
+    match: s => s.includes("IDL") && !s.includes("ROYAL") && !s.includes("USW"),
+    hasQty: true,
+  },
+  {
+    key: "RL",
+    label: "RL",
+    match: s => s.includes("ROCKLAND") || (s === "RL") || s.startsWith("RL ") || s.endsWith(" RL"),
+    hasQty: true,
+  },
+  {
+    key: "DCSL",
+    label: "DCSL",
+    match: s => s.includes("DCSL") && !s.includes("DCSL BEER") && !s.includes("BEER"),
+    hasQty: true,
+  },
+  {
+    key: "UG",
+    label: "UG",
+    match: s => s === "UG" || s.includes("2003-UG") || s.endsWith("-UG") || s.startsWith("UG-"),
+    hasQty: true,
+  },
+  {
+    key: "LION BREWERY",
+    label: "LION BREWERY",
+    match: s => s.includes("LION"),
+    hasQty: true,
+  },
+  {
+    key: "DCSL BEER",
+    label: "DCSL BEER",
+    match: s => s.includes("DCSL BEER") || (s.includes("BEER") && s.includes("DCSL")),
+    hasQty: true,
+  },
+  {
+    key: "TODDY",
+    label: "TODDY",
+    match: s => s.includes("TODDY"),
+    hasQty: false, // Amount only — no Qty column
+  },
+];
+
+// Normalise supplier string: strip "XXXX-" numeric prefix, uppercase, trim
+function normSup(raw) {
+  return (raw || "").replace(/^\d{4}-/, "").toUpperCase().trim();
+}
+
+// Return the brand key for a given raw supplier string, or null
+function brandOf(rawSupplier) {
+  const s = normSup(rawSupplier);
+  for (const b of BRAND_CONFIG) {
+    if (b.match(s)) return b.key;
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 function SalesSummary({ d, outlet, month }) {
-  const { salesByDay, totalSalesAmt, sales } = d;
+  const { sales, totalSalesAmt, bankLedger, purchases } = d;
+
+  // ── 1. Per-brand, per-day aggregates ─────────────────────────────────
+  // brandDay[brandKey][dayNum] = { amt, qty }
+  const brandDay = {};
+  BRAND_CONFIG.forEach(b => { brandDay[b.key] = {}; });
+
+  const dailySale = {};   // dayNum → total Rs amount
+  const dailySold = {};   // dayNum → total units
+
+  // r.sold is the direct daily qty entered by staff (not cumulative)
+  // — confirmed from console log: D0001=31, D0002=96, D0003=40 etc.
+  // No incremental diff needed — just sum r.sold directly per day.
+  const salesFiltered = [...sales]
+    .filter(s => (s.items || []).some(r => !r.isEmptyItem));
+
+  salesFiltered.forEach(s => {
+    const day = dayOf(s.date);
+
+    (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
+      const bk   = brandOf(r.supplier);
+      if (!bk) return; // skip unmapped suppliers
+
+      const qty = parseFloat(r.sold) || 0;  // direct daily qty ✅
+      const amt = qty * (parseFloat(r.rate) || 0);
+
+      if (!brandDay[bk][day]) brandDay[bk][day] = { amt: 0, qty: 0 };
+      brandDay[bk][day].amt += amt;
+      brandDay[bk][day].qty += qty;
+
+      dailySale[day] = (dailySale[day] || 0) + amt;
+      dailySold[day] = (dailySold[day] || 0) + qty;
+    });
+  });
+
+  // ── 2. Daily Deposit — from bankLedger debit entries ─────────────────
+  const dailyDeposit = {};
+  (bankLedger || []).forEach(r => {
+    const day = dayOf(r.date);
+    const deb = Number(r.debit) || 0;
+    if (deb > 0) dailyDeposit[day] = (dailyDeposit[day] || 0) + deb;
+  });
+
+  // ── 3. Daily Purchase — from purchases records ────────────────────────
+  const dailyPurchase = {};
+  (purchases || []).forEach(p => {
+    const day = dayOf(p.date);
+    const lineTotal = (p.items || [])
+      .filter(l => !l.isEmptyItem)
+      .reduce((a, l) => a + (Number(l.amount) || (Number(l.qty) * Number(l.unitCost)) || 0), 0);
+    const amt = Number(p.total) || Number(p.grand_total) || lineTotal || 0;
+    if (amt > 0) dailyPurchase[day] = (dailyPurchase[day] || 0) + amt;
+  });
+
+  // ── 4. Grid helpers ───────────────────────────────────────────────────
   const days  = Array.from({ length: 31 }, (_, i) => i + 1);
   const weeks = [[1, 7], [8, 14], [15, 21], [22, 28], [29, 31]];
-  const weekAvg = (s, e) => {
-    const vals = days.filter(dd => dd >= s && dd <= e && salesByDay[dd]);
-    return vals.length ? vals.reduce((a, dd) => a + salesByDay[dd], 0) / vals.length : 0;
+
+  const wkBrandAmt = (bk, s, e) =>
+    days.filter(d => d >= s && d <= e).reduce((a, d) => a + (brandDay[bk][d]?.amt || 0), 0);
+  const wkBrandQty = (bk, s, e) =>
+    days.filter(d => d >= s && d <= e).reduce((a, d) => a + (brandDay[bk][d]?.qty || 0), 0);
+  const wkSimple = (map, s, e) =>
+    days.filter(d => d >= s && d <= e).reduce((a, d) => a + (map[d] || 0), 0);
+
+   const grandDailySale = Object.values(dailySale   ).reduce((a, v) => a + v, 0);
+   const grandDeposit   = Object.values(dailyDeposit ).reduce((a, v) => a + v, 0);
+   const grandPurchase  = Object.values(dailyPurchase).reduce((a, v) => a + v, 0);
+   const grandSold      = Object.values(dailySold    ).reduce((a, v) => a + v, 0);
+
+  const grandBrandAmt = bk => days.reduce((a, d) => a + (brandDay[bk][d]?.amt || 0), 0);
+  const grandBrandQty = bk => days.reduce((a, d) => a + (brandDay[bk][d]?.qty || 0), 0);
+
+  const mo = month
+    ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
+    : "All Periods";
+
+  // ── 5. Cell style helpers ─────────────────────────────────────────────
+  const thBase = {
+    padding: "5px 7px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em",
+    textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)",
+    borderBottom: "1px solid var(--bdr)", borderRight: "1px solid var(--bdr)",
+    whiteSpace: "nowrap",
+  };
+  const tdBase = (color) => ({
+    padding: "4px 7px", fontSize: 11, fontFamily: "'JetBrains Mono',monospace",
+    fontWeight: 400,
+    color: color || "var(--txt)",
+    borderRight: "1px solid rgba(63,63,70,.2)",
+    borderBottom: "1px solid rgba(63,63,70,.15)",
+    whiteSpace: "nowrap", textAlign: "right",
+  });
+  const dayTd = {
+    padding: "4px 7px", fontSize: 11, fontWeight: 600, color: "var(--mut2)",
+    borderRight: "1px solid var(--bdr)", borderBottom: "1px solid rgba(63,63,70,.15)",
+    textAlign: "center", background: "var(--s2)",
+  };
+  const wkTd = (color) => ({
+    padding: "5px 7px", fontFamily: "'JetBrains Mono',monospace", fontSize: 10,
+    fontWeight: 700, color: color || "var(--gld2)",
+    borderRight: "1px solid var(--bdr)", textAlign: "right",
+  });
+  const totTd = (color) => ({
+    padding: "7px 10px", fontFamily: "'JetBrains Mono',monospace",
+    fontWeight: 700, fontSize: 12,
+    color: color || "var(--txt)",
+    textAlign: "right", borderRight: "1px solid var(--bdr)",
+  });
+
+  // ── 6. Weekly subtotal row ────────────────────────────────────────────
+  const WeekRow = ({ s, e }) => {
+    const wSale    = wkSimple(dailySale,     s, e);
+    const wDeposit = wkSimple(dailyDeposit,  s, e);
+    const wPur     = wkSimple(dailyPurchase, s, e);
+    const wSold    = wkSimple(dailySold,     s, e);
+    return (
+      <tr style={{ background: "var(--gd2)", borderBottom: "2px solid var(--bdr2)" }}>
+        <td style={{ ...wkTd(), textAlign: "center", whiteSpace: "nowrap" }}>Wk {s}–{e}</td>
+        <td style={wkTd()}>{wSale    > 0 ? fmt(wSale)    : ""}</td>
+        <td style={wkTd()}>{wDeposit > 0 ? fmt(wDeposit) : ""}</td>
+
+        {BRAND_CONFIG.map(b => (
+          <React.Fragment key={b.key}>
+            <td style={wkTd()}>{wkBrandAmt(b.key, s, e) > 0 ? fmt(wkBrandAmt(b.key, s, e)) : ""}</td>
+            {b.hasQty && (
+              <td style={{ ...wkTd(), color: "var(--mut2)" }}>
+                {wkBrandQty(b.key, s, e) > 0 ? fmtN(wkBrandQty(b.key, s, e)) : ""}
+              </td>
+            )}
+          </React.Fragment>
+        ))}
+
+        <td style={wkTd()}>{wPur  > 0 ? fmt(wPur)   : ""}</td>
+        <td style={wkTd()}>{wSold > 0 ? fmtN(wSold) : ""}</td>
+        <td style={{ borderRight: "1px solid var(--bdr)" }} />
+      </tr>
+    );
   };
 
+  // ── 7. Render ─────────────────────────────────────────────────────────
   return (
-    <ReportWrap title="Sales Summary" outlet={outlet} month={month}>
-      <tr style={{ background: "var(--s3)" }}>
-        {["Day", "Daily Sale", "Sold Items"].map((h, i) => (
-          <td key={i} style={{ padding: "6px 10px", fontSize: 9, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut2)", borderBottom: "1px solid var(--bdr)" }}>{h}</td>
-        ))}
-      </tr>
-      {days.map(day => {
-        const dayTotal  = salesByDay[day] || 0;
-        const soldItems = sales.filter(s => dayOf(s.date) === day)
-          .reduce((a, s) => a + (s.items || []).filter(r => !r.isEmptyItem && (parseFloat(r.sold) || 0) > 0).length, 0);
-        return (
-          <tr key={day} style={{ borderBottom: "1px solid rgba(63,63,70,.3)" }}>
-            <td style={{ padding: "5px 10px", fontSize: 11.5, fontWeight: 600, color: "var(--mut2)", width: 40 }}>{day}</td>
-            <td style={{ padding: "5px 10px", fontFamily: "'JetBrains Mono',monospace", fontSize: 11.5, color: dayTotal > 0 ? "var(--grn)" : "var(--mut2)" }}>
-              {dayTotal > 0 ? `Rs.${fmt(dayTotal)}` : ""}
-            </td>
-            <td style={{ padding: "5px 10px", fontSize: 11.5, color: "var(--mut)" }}>{soldItems > 0 ? soldItems : ""}</td>
-          </tr>
-        );
-      })}
-      {weeks.map(([s, e], wi) => (
-        <tr key={`avg${s}-${wi}`} style={{ background: "var(--gd2)", borderBottom: "1px solid var(--bdr)" }}>
-          <td style={{ padding: "5px 10px", fontSize: 11, fontWeight: 700, color: "var(--gld2)" }}>Avg {s}–{e}</td>
-          <td style={{ padding: "5px 10px", fontFamily: "'JetBrains Mono',monospace", fontSize: 11, color: "var(--gld2)" }}>Rs.{fmt(weekAvg(s, e))}</td>
-          <td />
-        </tr>
-      ))}
-      <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
-        <td style={{ padding: "7px 10px", fontWeight: 700, fontSize: 12 }}>Total</td>
-        <td style={{ padding: "7px 10px", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, fontSize: 13, color: "var(--grn)" }}>Rs.{fmt(totalSalesAmt)}</td>
-        <td />
-      </tr>
-    </ReportWrap>
+    <div>
+      {/* Print button */}
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+
+      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+
+        {/* Card header */}
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Sales Summary</div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>
+            {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
+          </div>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 900 }}>
+            <thead>
+
+              {/* ── Row 1: group headers ── */}
+              <tr>
+                <th rowSpan={2} style={{ ...thBase, textAlign: "center", minWidth: 42 }}>Date</th>
+                <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Daily Sale</th>
+                <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Daily Deposit</th>
+
+                {BRAND_CONFIG.map(b => b.hasQty ? (
+                  // Brands with Qty: span 2 sub-cols
+                  <th key={b.key} colSpan={2}
+                    style={{ ...thBase, textAlign: "center", background: "var(--gd2)", color: "var(--gld2)", borderBottom: "1px solid var(--bdr2)" }}>
+                    {b.label}
+                  </th>
+                ) : (
+                  // Amount-only brands: rowSpan=2, no sub-header needed
+                  <th key={b.key} rowSpan={2} style={{ ...thBase, textAlign: "right" }}>
+                    {b.label}
+                  </th>
+                ))}
+
+                <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Purchase</th>
+                <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Sold</th>
+                <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Other</th>
+              </tr>
+
+              {/* ── Row 2: sub-col labels (only for hasQty brands) ── */}
+              <tr>
+                {BRAND_CONFIG.filter(b => b.hasQty).map(b => (
+                  <React.Fragment key={b.key}>
+                    <th style={{ ...thBase, textAlign: "right", fontSize: 8 }}>Amount</th>
+                    <th style={{ ...thBase, textAlign: "right", fontSize: 8 }}>Qty</th>
+                  </React.Fragment>
+                ))}
+              </tr>
+
+            </thead>
+
+            <tbody>
+              {days.map(day => {
+                const weekBreakBefore = weeks.find(([, e]) => e === day - 1);
+                const sale    = dailySale[day]     || 0;
+                const deposit = dailyDeposit[day]  || 0;
+                const pur     = dailyPurchase[day] || 0;
+                const sold    = dailySold[day]     || 0;
+
+                return (
+                  <React.Fragment key={day}>
+                    {weekBreakBefore && <WeekRow s={weekBreakBefore[0]} e={weekBreakBefore[1]} />}
+
+                    <tr style={{ borderBottom: "1px solid rgba(63,63,70,.25)" }}>
+                      {/* Date */}
+                      <td style={dayTd}>{day}</td>
+
+                      {/* Daily Sale */}
+                      <td style={tdBase(sale > 0 ? "var(--grn)" : "var(--mut2)")}>
+                        {sale > 0 ? fmt(sale) : "-"}
+                      </td>
+
+                      {/* Daily Deposit */}
+                      <td style={tdBase(deposit > 0 ? "var(--blu)" : "var(--mut2)")}>
+                        {deposit > 0 ? fmt(deposit) : "-"}
+                      </td>
+
+                      {/* Brand columns */}
+                      {BRAND_CONFIG.map(b => {
+                        const cell = brandDay[b.key][day];
+                        return (
+                          <React.Fragment key={b.key}>
+                            {/* Amount */}
+                            <td style={tdBase(cell?.amt > 0 ? "var(--txt)" : "var(--mut2)")}>
+                              {cell?.amt > 0 ? fmt(cell.amt) : "-"}
+                            </td>
+                            {/* Qty (only for hasQty brands) */}
+                            {b.hasQty && (
+                              <td style={tdBase("var(--mut2)")}>
+                                {cell?.qty > 0 ? fmtN(cell.qty) : ""}
+                              </td>
+                            )}
+                          </React.Fragment>
+                        );
+                      })}
+
+                      {/* Purchase */}
+                      <td style={tdBase(pur > 0 ? "var(--gld2)" : "var(--mut2)")}>
+                        {pur > 0 ? fmt(pur) : "-"}
+                      </td>
+
+                      {/* Sold (total units all brands) */}
+                      <td style={tdBase(sold > 0 ? "var(--txt)" : "var(--mut2)")}>
+                        {sold > 0 ? fmtN(sold) : ""}
+                      </td>
+
+                      {/* Other (reserved) */}
+                      <td style={tdBase("var(--mut2)")}>{""}</td>
+                    </tr>
+                  </React.Fragment>
+                );
+              })}
+
+              {/* Week 29–31 subtotal */}
+              <WeekRow s={29} e={31} />
+
+              {/* ── Grand Total row ── */}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+                <td style={{ padding: "7px 10px", fontWeight: 700, fontSize: 12, borderRight: "1px solid var(--bdr)", textAlign: "center" }}>
+                  Total
+                </td>
+                <td style={totTd("var(--grn)")}>{grandDailySale > 0 ? fmt(grandDailySale) : ""}</td>
+                <td style={totTd("var(--blu)")}>{fmt(grandDeposit)}</td>
+
+                {BRAND_CONFIG.map(b => (
+                  <React.Fragment key={b.key}>
+                    <td style={totTd()}>
+                      {grandBrandAmt(b.key) > 0 ? fmt(grandBrandAmt(b.key)) : ""}
+                    </td>
+                    {b.hasQty && (
+                      <td style={totTd("var(--mut)")}>
+                        {grandBrandQty(b.key) > 0 ? fmtN(grandBrandQty(b.key)) : ""}
+                      </td>
+                    )}
+                  </React.Fragment>
+                ))}
+
+                <td style={totTd("var(--gld2)")}>{grandPurchase > 0 ? fmt(grandPurchase) : ""}</td>
+                <td style={totTd()}>{grandSold > 0 ? fmtN(grandSold) : ""}</td>
+                <td style={{ borderRight: "1px solid var(--bdr)" }} />
+              </tr>
+
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   );
 }
 
