@@ -5,11 +5,35 @@ import { uid } from "../../utils/helpers";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SUPPLIERS_LIST, COA_DEF } from "../../data/seeds";
 import { loadEmptyFromStorage } from "../admin/InventoryAdmin";
+import { outletInvKey } from "../admin/InventoryAdmin";
 import {
   addPurchase, addAPInvoice, addGLEntry,
   addCashEntry, addTransfer, addAREntry, addReturn,
   getCOA, getInventoryMaster, getSuppliers, getEmptyInventoryMaster,
 } from "../../db";
+// ── Helper: apply outlet-specific price overrides (same logic as Daily Sale) ──
+function applyOutletOverrides(masterItems, outlet) {
+  const overrides = (() => {
+    try {
+      return JSON.parse(localStorage.getItem(outletInvKey(outlet)) || "{}");
+    } catch { return {}; }
+  })();
+
+  return masterItems
+    .filter(item => {
+      const ovKey = `${item.code}__${item.supplier}`;
+      return item.type !== "EMP" && !overrides[ovKey]?.hidden;
+    })
+    .map(item => {
+      const ovKey = `${item.code}__${item.supplier}`;
+      const ov = overrides[ovKey];
+      return {
+        ...item,
+        unitCost:     ov?.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
+        sellingPrice: ov?.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
+      };
+    });
+}
 
 export default function S_Purchase({ outlet, user, toast_ }) {
 
@@ -29,7 +53,6 @@ const SUP_ORDER = [
 ];
 
 useEffect(() => {
- // REPLACE WITH:
   getInventoryMaster().then(data => {
     if (data.length) {
       const sorted = [...data.filter(i => i.type !== "EMP")].sort((a, b) => {
@@ -41,7 +64,9 @@ useEffect(() => {
         const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
         return numA - numB;
       });
-      setInv(sorted);
+      // ✅ Apply outlet-specific price overrides — same logic as Daily Sale
+      const withOutletPrices = applyOutletOverrides(sorted, outlet);
+      setInv(withOutletPrices);
     }
   });
   getEmptyInventoryMaster().then(data => {
