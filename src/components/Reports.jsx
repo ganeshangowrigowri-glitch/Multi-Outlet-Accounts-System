@@ -1338,7 +1338,466 @@ function EmptyBottles({ d, outlet, month }) {
     </div>
   );
 }
+// ══════════════════════════════════════════════════════════════════════════
+// FIXED UG PRODUCT LIST — mirrors the physical Excel "BAR NAME" sheet.
+// These are the EXACT short names used throughout the system/database.
+// Column headers in the UG Book table use these names directly (no
+// relabeling to E1/SP1/etc.), so Excel copy-paste and DB lookups always
+// line up. Prices are NOT stored here — they're loaded live from the
+// inventory master (getInventoryMaster) every time the report runs, so
+// price edits by the admin reflect automatically.
+// ══════════════════════════════════════════════════════════════════════════
+const UG_FIXED_PRODUCTS = [
+  "UES Q", "UES P", "UES N",
+  "USP Q", "USP P", "USP N",
+  "UL Q",  "UL P",  "UL N",
+  "URB Q", "URB P", "URB N",
+  "UOW Q", "UOW P", "UOW N",
+  "UGS Q", "UGS P", "UGS N",
+  "UV6 Q", "UV6 P",
+  "UISW Q", "UISW P",
+  "UPV Q", "UPV P",
+  "UMDG Q",
+  "UAP N",
+  "ULE N",
+  "UGAV Q",
+];
 
+// Normalises a raw name/code string for matching: uppercase, trim, collapse
+// internal whitespace to single spaces (handles "UV6  P" vs "UV6 P").
+function normUGName(raw) {
+  return (raw || "").toString().toUpperCase().trim().replace(/\s+/g, " ");
+}
+
+const UG_NAME_SET = new Set(UG_FIXED_PRODUCTS.map(normUGName));
+
+// Tries itemName first, then itemCode/code, then name — whichever matches
+// one of the fixed UG product short names. Returns the canonical short
+// name (exact casing/spacing as defined in UG_FIXED_PRODUCTS) or null.
+function matchUGProduct(line) {
+  const candidates = [line.itemName, line.itemCode, line.code, line.name];
+  for (const c of candidates) {
+    const n = normUGName(c);
+    if (UG_NAME_SET.has(n)) {
+      // Return the canonical-cased version from the fixed list
+      return UG_FIXED_PRODUCTS.find(p => normUGName(p) === n);
+    }
+  }
+  return null;
+}
+
+// Builds a name -> live price lookup from the inventory master (`inv`,
+// as returned by getInventoryMaster and already available on report data
+// as `d.inv`). Matches inventory items the same way purchase lines are
+// matched: by code or name against the fixed UG short-name list.
+function buildUGPriceLookup(inv) {
+  const lookup = {};
+  (inv || []).forEach(item => {
+    const candidates = [item.name, item.code, item.itemCode, item.itemName];
+    for (const c of candidates) {
+      const n = normUGName(c);
+      if (UG_NAME_SET.has(n)) {
+        const canonical = UG_FIXED_PRODUCTS.find(p => normUGName(p) === n);
+        // Prefer unitCost (purchase price) since this is a purchase ledger;
+        // fall back to sellingPrice if unitCost isn't set on the item.
+        const price = Number(item.unitCost) || Number(item.sellingPrice) || 0;
+        lookup[canonical] = price;
+        break;
+      }
+    }
+  });
+  return lookup;
+}
+
+function UGBook({ d, outlet, month }) {
+  const { purchases, apPayments, apInvoices, openingStockByCode } = d;
+
+  const mStart = monthStart(month);
+  const mEnd   = monthEnd(month);
+
+  // ── 1. UG supplier matcher ────────────────────────────────────────────
+  const isUG = raw => {
+    const s = (raw || "").trim();
+    const stripped = s.replace(/^\d{4}-/, "").toUpperCase().trim();
+    return s === "2003-UG" || stripped === "UG";
+  };
+
+  // ── 2. Filter UG transactions ─────────────────────────────────────────
+  const ugPur = purchases.filter(p => isUG(p.supplier_id || p.supplier || ""));
+
+  const ugPay = (apPayments || []).filter(p =>
+    isUG(p.supplier_id || p.supplier || "") &&
+    (!mStart || (p.date >= mStart && p.date <= mEnd))
+  );
+
+  // ── 3. B/F: UG balance from all months before this one ───────────────
+  const ugInvBefore = (apInvoices || []).filter(p =>
+    isUG(p.supplier_id || p.supplier || "") && mStart && p.date < mStart
+  );
+  const ugPayBefore = (apPayments || []).filter(p =>
+    isUG(p.supplier_id || p.supplier || "") && mStart && p.date < mStart
+  );
+  const bfBalance =
+    ugInvBefore.reduce((a, i) => a + (Number(i.amount)   || 0), 0) -
+    ugPayBefore.reduce((a, p) => a + (Number(p.amount)   || 0)
+                                   + (Number(p.discount) || 0), 0);
+
+  // ── 4. Fixed product columns (always all 28, in sheet order, using the
+  //      exact DB short names as headers). Prices loaded live from the
+  //      inventory master so admin price edits reflect automatically.
+  const priceLookup = buildUGPriceLookup(d.inv);
+  const products = UG_FIXED_PRODUCTS.map(name => ({
+    code: name,
+    name,
+    unitCost: priceLookup[name] || 0,
+  }));
+
+  // ── 5. Per-day aggregates, keyed by fixed column code ─────────────────
+  const dayData = {};
+  const initDay = n => {
+    dayData[n] = { qtyByCode: {}, purchaseTotal: 0, paymentTotal: 0 };
+  };
+  // Track lines that didn't match any fixed product, for debugging
+  const unmatched = new Set();
+
+  // Names that should be silently excluded entirely from the UG Book
+  // (not counted in PURCHASE/AMOUNT, not flagged as unmatched) — these are
+  // tracked separately in the Empty Bottles report instead.
+  const UG_EXCLUDED_NAMES = new Set(["UG EMP", "UG EMPTY"].map(normUGName));
+
+  ugPur.forEach(p => {
+    const day = dayOf(p.date);
+    if (!dayData[day]) initDay(day);
+    (p.items || []).filter(l => !l.isEmptyItem).forEach(l => {
+      const rawName = l.itemName || l.itemCode || l.code || l.name || "?";
+      if (UG_EXCLUDED_NAMES.has(normUGName(rawName))) return; // skip empties entirely
+
+      const match = matchUGProduct(l);
+      const qty = Number(l.qty) || 0;
+      const amt = Number(l.amount) || qty * (Number(l.unitCost) || 0);
+
+      if (match) {
+        dayData[day].qtyByCode[match] =
+          (dayData[day].qtyByCode[match] || 0) + qty;
+      } else {
+        unmatched.add(rawName);
+      }
+      // Purchase total counts every matched bottled-product UG line
+      dayData[day].purchaseTotal += amt;
+    });
+  });
+
+  if (unmatched.size > 0) {
+    // eslint-disable-next-line no-console
+    console.warn("UG Book: unmatched product names (not shown in any column):", [...unmatched]);
+  }
+
+  ugPay.forEach(p => {
+    const day = dayOf(p.date);
+    if (!dayData[day]) initDay(day);
+    dayData[day].paymentTotal += Number(p.amount) || 0;
+  });
+
+  // ── 6. Month totals ───────────────────────────────────────────────────
+  const days = Array.from({ length: 31 }, (_, i) => i + 1);
+
+  const totalPurchase = days.reduce((a, d) => a + (dayData[d]?.purchaseTotal || 0), 0);
+  const totalPayment  = days.reduce((a, d) => a + (dayData[d]?.paymentTotal  || 0), 0);
+
+  const totalQtyByCode = {};
+  products.forEach(p => {
+    totalQtyByCode[p.code] = days.reduce(
+      (a, d) => a + (dayData[d]?.qtyByCode[p.code] || 0), 0
+    );
+  });
+
+  // ── 7. Footer calculations ────────────────────────────────────────────
+  const grossBalance = bfBalance + totalPurchase - totalPayment;
+  const ugDiscount   = totalPurchase * 0.06;    // UG 6% trade discount
+  const vatDiscount  = ugDiscount    * 0.18;    // VAT on the discount
+  const netBalance   = grossBalance - ugDiscount - vatDiscount;
+
+  // P/Stock: opening stock value for UG item codes only.
+  // NOTE: openingStockByCode is keyed by your inventory item codes (e.g.
+  // "U0001"), not by the fixed sheet columns (E1, SP1...). If P/Stock still
+  // doesn't match, you'll need to map your inventory codes to these 28
+  // columns the same way we mapped purchase line names above.
+  const ugCodes = UG_NAME_SET;
+  const pStock  = Object.entries(openingStockByCode || {})
+    .filter(([code]) => ugCodes.has(normUGName(code)))
+    .reduce((a, [, v]) => a + (v.qty || 0) * (v.unitCost || 0), 0);
+
+  const mo = month
+    ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
+    : "All Periods";
+
+  // ── 8. Styles ─────────────────────────────────────────────────────────
+  const thBase = {
+    padding: "5px 8px",
+    fontSize: 9,
+    fontWeight: 700,
+    letterSpacing: ".06em",
+    textTransform: "uppercase",
+    color: "var(--mut2)",
+    background: "var(--s3)",
+    borderBottom: "1px solid var(--bdr)",
+    borderRight: "1px solid var(--bdr)",
+    whiteSpace: "nowrap",
+    textAlign: "center",
+  };
+  const tdNum = (color, bold) => ({
+    padding: "3px 7px",
+    fontSize: 11,
+    fontFamily: "'JetBrains Mono',monospace",
+    textAlign: "right",
+    color: color || "var(--txt)",
+    borderRight: "1px solid rgba(63,63,70,.2)",
+    borderBottom: "1px solid rgba(63,63,70,.15)",
+    fontWeight: bold ? 700 : 400,
+    whiteSpace: "nowrap",
+  });
+  const dayTd = {
+    padding: "3px 8px",
+    fontSize: 11,
+    fontWeight: 600,
+    color: "var(--mut2)",
+    borderRight: "1px solid var(--bdr)",
+    borderBottom: "1px solid rgba(63,63,70,.15)",
+    textAlign: "center",
+    background: "var(--s2)",
+    minWidth: 34,
+  };
+  const totTd = color => ({
+    padding: "6px 9px",
+    fontFamily: "'JetBrains Mono',monospace",
+    fontWeight: 700,
+    fontSize: 12,
+    color: color || "var(--txt)",
+    textAlign: "right",
+    borderRight: "1px solid var(--bdr)",
+    whiteSpace: "nowrap",
+  });
+  const footRow = (label, val, color, bold) => (
+    <div style={{
+      display: "flex", justifyContent: "space-between", alignItems: "center",
+      padding: "6px 0", borderBottom: "1px solid var(--bdr)",
+    }}>
+      <span style={{ fontSize: 12, color: "var(--mut)", fontWeight: bold ? 700 : 400 }}>
+        {label}
+      </span>
+      <span style={{
+        fontFamily: "'JetBrains Mono',monospace",
+        fontSize: bold ? 14 : 12.5,
+        color: color || "var(--txt)",
+        fontWeight: bold ? 700 : 600,
+      }}>
+        {val > 0 ? `Rs.${fmt(val)}` : "—"}
+      </span>
+    </div>
+  );
+
+  // Running balance accumulates as rows render (imperative, not state)
+  let runBal = bfBalance;
+
+  // ── 9. Render ─────────────────────────────────────────────────────────
+  return (
+    <div>
+      {/* Print button */}
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>
+          {I.print} Print
+        </button>
+      </div>
+
+      <div style={{
+        background: "var(--s1)", border: "1px solid var(--bdr)",
+        borderRadius: "var(--rl)", overflow: "hidden",
+      }}>
+
+        {/* Card header */}
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>
+            UG Book
+          </div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>
+            {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
+          </div>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+
+              {/* Row 1 — column labels (always all 28 fixed columns) */}
+              <tr>
+                <th style={{ ...thBase, minWidth: 38 }}>DATE</th>
+                {products.map(p => (
+                  <th key={p.code} style={thBase}>{p.code}</th>
+                ))}
+                <th style={{ ...thBase, textAlign: "right" }}>PURCHASE</th>
+                <th style={{ ...thBase, textAlign: "right" }}>AMOUNT</th>
+                <th style={{ ...thBase, textAlign: "right" }}>BALANCE</th>
+              </tr>
+
+              {/* Row 2 — fixed unit prices */}
+              <tr style={{ background: "var(--gd2)" }}>
+                <td style={{ ...thBase, background: "var(--gd2)", fontSize: 8.5, color: "var(--gld2)" }}>
+                  PRICE
+                </td>
+                {products.map(p => (
+                  <td key={p.code} style={{
+                    ...thBase, background: "var(--gd2)",
+                    fontSize: 8.5, color: "var(--gld2)", textAlign: "right",
+                  }}>
+                    {fmtN(p.unitCost)}
+                  </td>
+                ))}
+                <td style={{ ...thBase, background: "var(--gd2)" }} />
+                <td style={{ ...thBase, background: "var(--gd2)" }} />
+                <td style={{ ...thBase, background: "var(--gd2)" }} />
+              </tr>
+
+            </thead>
+            <tbody>
+
+              {/* B/F row */}
+              <tr style={{ background: "var(--s2)", borderBottom: "1px solid var(--bdr)" }}>
+                <td style={{ ...dayTd, fontWeight: 700, fontSize: 9.5, color: "var(--gld2)" }}>B/F</td>
+                {products.map(p => (
+                  <td key={p.code} style={tdNum("var(--mut2)")} />
+                ))}
+                <td style={tdNum()} />
+                <td style={tdNum()} />
+                <td style={tdNum("var(--gld2)", true)}>
+                  {bfBalance !== 0 ? fmt(bfBalance) : "—"}
+                </td>
+              </tr>
+
+              {/* Daily rows 1–31 — BALANCE intentionally blank, matches sheet */}
+              {days.map(day => {
+                const dd = dayData[day] || { qtyByCode: {}, purchaseTotal: 0, paymentTotal: 0 };
+                runBal = runBal + dd.purchaseTotal - dd.paymentTotal;
+                const hasAny = dd.purchaseTotal > 0 || dd.paymentTotal > 0;
+
+                return (
+                  <tr
+                    key={day}
+                    style={{
+                      borderBottom: "1px solid rgba(63,63,70,.2)",
+                      background: hasAny ? "transparent" : "var(--s1)",
+                    }}
+                  >
+                    <td style={dayTd}>{day}</td>
+
+                    {/* Fixed product quantity columns */}
+                    {products.map(p => {
+                      const qty = dd.qtyByCode[p.code] || 0;
+                      return (
+                        <td key={p.code} style={tdNum(qty > 0 ? "var(--txt)" : "var(--mut2)")}>
+                          {qty > 0 ? fmtN(qty) : "-"}
+                        </td>
+                      );
+                    })}
+
+                    {/* PURCHASE */}
+                    <td style={tdNum(dd.purchaseTotal > 0 ? "var(--grn)" : "var(--mut2)")}>
+                      {dd.purchaseTotal > 0 ? fmt(dd.purchaseTotal) : "-"}
+                    </td>
+
+                    {/* AMOUNT (payment) */}
+                    <td style={tdNum(dd.paymentTotal > 0 ? "var(--blu)" : "var(--mut2)")}>
+                      {dd.paymentTotal > 0 ? fmt(dd.paymentTotal) : "-"}
+                    </td>
+
+                    {/* BALANCE — left blank on daily rows, matches the Excel sheet
+                        (sheet only shows balance on B/F and TOTAL rows) */}
+                    <td style={tdNum("var(--mut2)")}>-</td>
+                  </tr>
+                );
+              })}
+
+              {/* TOTAL row */}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+                <td style={{ ...dayTd, fontWeight: 700, fontSize: 10, color: "var(--txt)" }}>
+                  TOTAL
+                </td>
+                {products.map(p => (
+                  <td key={p.code} style={totTd()}>
+                    {totalQtyByCode[p.code] > 0 ? fmtN(totalQtyByCode[p.code]) : ""}
+                  </td>
+                ))}
+                <td style={totTd("var(--grn)")}>
+                  {totalPurchase > 0 ? fmt(totalPurchase) : ""}
+                </td>
+                <td style={totTd("var(--blu)")}>
+                  {totalPayment > 0 ? fmt(totalPayment) : ""}
+                </td>
+                <td style={totTd("var(--gld2)")}>
+                  {fmt(grossBalance)}
+                </td>
+              </tr>
+
+            </tbody>
+          </table>
+        </div>
+
+        {/* ── Footer summary ── */}
+        <div style={{
+          padding: "20px 28px",
+          borderTop: "2px solid var(--bdr2)",
+          background: "var(--s2)",
+        }}>
+          <div style={{ maxWidth: 460, marginLeft: "auto" }}>
+
+            {footRow("UG 6% Discount", ugDiscount, "var(--grn)")}
+            {footRow("VAT Discount",   vatDiscount, "var(--grn)")}
+
+            {/* Damage — manual field, read-only placeholder */}
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "6px 0", borderBottom: "1px solid var(--bdr)",
+            }}>
+              <span style={{ fontSize: 12, color: "var(--mut)" }}>Damage</span>
+              <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12.5, color: "var(--mut2)" }}>
+                —
+              </span>
+            </div>
+
+            {/* Net Balance */}
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "9px 0", borderBottom: "2px solid var(--bdr2)",
+            }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--txt)" }}>Balance</span>
+              <span style={{
+                fontFamily: "'JetBrains Mono',monospace",
+                fontSize: 15, color: "var(--gld2)", fontWeight: 700,
+              }}>
+                Rs.{fmt(netBalance)}
+              </span>
+            </div>
+
+            {/* P/Stock */}
+            <div style={{
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              padding: "8px 0",
+            }}>
+              <span style={{ fontSize: 12, color: "var(--mut)" }}>P/Stock</span>
+              <span style={{
+                fontFamily: "'JetBrains Mono',monospace",
+                fontSize: 12.5, color: "var(--txt)", fontWeight: 600,
+              }}>
+                {pStock > 0 ? `Rs.${fmt(pStock)}` : "—"}
+              </span>
+            </div>
+
+          </div>
+        </div>
+
+      </div>
+    </div>
+  );
+}
 // ══════════════════════════════════════════════════════
 // MAIN REPORTS COMPONENT
 // ══════════════════════════════════════════════════════
@@ -1370,91 +1829,64 @@ export default function Reports({ user }) {
     { id: "purchase",  label: "Purchase Summary",      icon: "🛒" },
     { id: "cos",       label: "Cost of Sales Summary", icon: "📦" },
     { id: "emptybott", label: "Empty Bottles",         icon: "🍾" },
+    { id: "ugbook",    label: "UG Book",               icon: "📒" }
   ];
 
   const iS  = { width: "100%", padding: "5px 8px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11.5, fontFamily: "'Inter',sans-serif", color: "var(--txt)", outline: "none" };
   const lbl = { fontSize: 9, fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 };
 
-  return (
-    <div className="shell">
-      {/* ── Sidebar ── */}
-      <aside style={{ width: 210, background: "var(--s1)", borderRight: "1px solid var(--bdr)", display: "flex", flexDirection: "column", flexShrink: 0 }}>
-        <div style={{ padding: "14px 12px 10px", borderBottom: "1px solid var(--bdr)" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 13, color: "var(--txt)" }}>Reports</div>
-          <div style={{ fontSize: 9.5, color: "var(--mut2)", marginTop: 1 }}>View &amp; Print</div>
-        </div>
+        return (
+    <div style={{ display:"flex", flexDirection:"column", width:"100%", height:"100%", overflow:"hidden" }}>
 
-        {/* Filters */}
-        <div style={{ padding: "10px 10px 6px", borderBottom: "1px solid var(--bdr)" }}>
-          <div style={{ marginBottom: 7 }}>
-            <div style={lbl}>Month</div>
-            <input type="month" value={month} onChange={e => setMonth(e.target.value)} style={iS} />
-          </div>
+      {/* ── Top Bar ── */}
+      <div className="no-print" style={{ display:"flex", alignItems:"center", gap:10, padding:"10px 20px", background:"var(--s1)", borderBottom:"1px solid var(--bdr)", flexShrink:0, flexWrap:"wrap" }}>
 
-          {isAdmin ? (
-            <div>
-              <div style={lbl}>Outlet</div>
-              <select value={outlet} onChange={e => setOutlet(e.target.value)} style={{ ...iS, appearance: "none" }}>
-                <option value="ALL">All Outlets</option>
-                {outletList.map(o => <option key={o}>{o}</option>)}
-              </select>
-            </div>
-          ) : (
-            <div>
-              <div style={lbl}>Outlet</div>
-              <div style={{ padding: "5px 8px", background: "var(--s3)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11, color: "var(--gld2)", fontWeight: 600 }}>
-                {userOutlet}
-              </div>
-            </div>
-          )}
-        </div>
+        {/* Report selector */}
+        <select value={report} onChange={e=>setReport(e.target.value)} style={{ padding:"6px 10px", background:"var(--s2)", border:"1px solid var(--bdr)", borderRadius:7, fontSize:12.5, fontFamily:"'Inter',sans-serif", color:"var(--txt)", outline:"none" }}>
+          {reportList.map(r=><option key={r.id} value={r.id}>{r.icon} {r.label}</option>)}
+        </select>
 
-        {/* Report List */}
-        <nav style={{ flex: 1, overflowY: "auto", padding: "6px 6px" }}>
-          {reportList.map(r => (
-            <button key={r.id} className={`ni ${report === r.id ? "act" : ""}`}
-              onClick={() => setReport(r.id)} style={{ width: "100%", marginBottom: 2 }}>
-              <span style={{ fontSize: 13 }}>{r.icon}</span>
-              <span style={{ fontSize: 11.5 }}>{r.label}</span>
-            </button>
-          ))}
-        </nav>
-      </aside>
+        {/* Month */}
+        <input type="month" value={month} onChange={e=>setMonth(e.target.value)} style={{ padding:"6px 10px", background:"var(--s2)", border:"1px solid var(--bdr)", borderRadius:7, fontSize:12.5, fontFamily:"'Inter',sans-serif", color:"var(--txt)", outline:"none" }} />
 
-      {/* ── Content ── */}
-      <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        <div style={{ background: "var(--s1)", borderBottom: "1px solid var(--bdr)", padding: "0 20px", height: 52, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
-          <div>
-            <h1 style={{ fontFamily: "'Playfair Display',serif", fontSize: 17 }}>
-              {reportList.find(r => r.id === report)?.label}
-            </h1>
-            <p style={{ fontSize: 10.5, color: "var(--mut)", marginTop: 1 }}>
-              {effectiveOutlet === "ALL" ? "All Outlets" : effectiveOutlet} &nbsp;·&nbsp;
-              {month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods"}
-            </p>
-          </div>
-          <button className="btn btnd btnsm no-print" onClick={() => window.print()}>{I.print} Print</button>
-        </div>
+        {/* Outlet */}
+        {isAdmin ? (
+          <select value={outlet} onChange={e=>setOutlet(e.target.value)} style={{ padding:"6px 10px", background:"var(--s2)", border:"1px solid var(--bdr)", borderRadius:7, fontSize:12.5, fontFamily:"'Inter',sans-serif", color:"var(--txt)", outline:"none", appearance:"none" }}>
+            <option value="ALL">All Outlets</option>
+            {outletList.map(o=><option key={o}>{o}</option>)}
+          </select>
+        ) : (
+          <span style={{ padding:"5px 10px", background:"var(--s3)", border:"1px solid var(--bdr)", borderRadius:6, fontSize:11.5, color:"var(--gld2)", fontWeight:600 }}>{userOutlet}</span>
+        )}
 
-        <div className="page">
-          {loading ? <Spinner /> : !d ? (
-            <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>No data loaded.</div>
-          ) : (
-            <>
-              {report === "income"    && <IncomeStatement    d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "balance"   && <BalanceSheet       d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "capital"   && <CapitalSheet       d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "cashflow"  && <CashFlowStatement  d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "sales"     && <SalesSummary       d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "expenses"  && <ExpenseSummary     d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "purchase"  && <PurchaseSummary    d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "cos"       && <CostOfSalesSummary d={d} outlet={effectiveOutlet} month={month} />}
-              {report === "emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month} />}
-            </>
-          )}
-        </div>
+        {/* Outlet + period label */}
+        <span style={{ fontSize:11.5, color:"var(--mut)", marginLeft:4 }}>
+          {effectiveOutlet==="ALL"?"All Outlets":effectiveOutlet} · {month ? new Date(month+"-01").toLocaleString("en-LK",{month:"long",year:"numeric"}) : "All Periods"}
+        </span>
+
+        {/* Print */}
+        <button className="btn btng btnsm" style={{ marginLeft:"auto" }} onClick={()=>window.print()}>{I.print} Print</button>
+      </div>
+
+      {/* ── Report Content ── */}
+      <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", padding:"24px 32px 40px" }}>
+        {loading ? <Spinner /> : !d ? (
+          <div style={{ padding:40, textAlign:"center", color:"var(--mut)" }}>No data loaded.</div>
+        ) : (
+          <>
+            {report==="income"    && <IncomeStatement    d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="balance"   && <BalanceSheet       d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="capital"   && <CapitalSheet       d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="cashflow"  && <CashFlowStatement  d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="sales"     && <SalesSummary       d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="expenses"  && <ExpenseSummary     d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="purchase"  && <PurchaseSummary    d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="cos"       && <CostOfSalesSummary d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
+          </>
+        )}
       </div>
     </div>
   );
 }
-// updated

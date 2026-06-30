@@ -382,7 +382,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
     height: auto !important;
     overflow: visible !important;
   }
-}
+} 
 /* ── SCROLL FIX ── */
 html, body, #root { height: 100% !important; overflow: hidden !important; }
 .shell { height: 100% !important; overflow: hidden !important; }
@@ -398,4 +398,12 @@ html, body, #root { height: 100% !important; overflow: hidden !important; }
   min-height: 0 !important;
   overflow-y: auto !important;
   height: 0 !important;
+}
+@media print {
+  .no-print, aside { display: none !important; }
+  html, body, #root { height: auto !important; overflow: visible !important; background: #fff !important; }
+  @page { size: A4 landscape; margin: 12mm 14mm; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+  td, th { color: #111 !important; background: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
