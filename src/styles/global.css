@@ -348,62 +348,89 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
 
 /* ── PRINT ── */
 @media print {
-  /* Hide the app chrome */
+  @page {
+    size: A4 landscape;
+    margin: 10mm 8mm;
+  }
+
+  /* Hide app chrome entirely */
   .sidebar,
   .sb-backdrop,
   .topbar,
   .no-print,
-  .page > .shell > aside {
+  select,
+  .btn,
+  button {
     display: none !important;
   }
 
-  /* Reset layout so report fills the page */
+  /* Reset shell so nothing clips or scrolls */
   html, body, #root {
     height: auto !important;
     overflow: visible !important;
     background: #fff !important;
   }
-
-  .main {
-    overflow: visible !important;
+  .shell, .main, .page {
     height: auto !important;
-  }
-
-  .page {
     overflow: visible !important;
-    height: auto !important;
-    padding: 0 !important;
-    position: static !important;
-  }
-
-  /* Make the report shell a simple block, not flex with sidebar */
-  .page .shell {
     display: block !important;
-    height: auto !important;
-    overflow: visible !important;
+    padding: 0 !important;
   }
-} 
-/* ── SCROLL FIX ── */
-html, body, #root { height: 100% !important; overflow: hidden !important; }
-.shell { height: 100% !important; overflow: hidden !important; }
-.main {
-  flex: 1 !important;
-  min-height: 0 !important;
-  overflow: hidden !important;
-  display: flex !important;
-  flex-direction: column !important;
-}
-.page {
-  flex: 1 !important;
-  min-height: 0 !important;
-  overflow-y: auto !important;
-  height: 0 !important;
-}
-@media print {
-  .no-print, aside { display: none !important; }
-  html, body, #root { height: auto !important; overflow: visible !important; background: #fff !important; }
-  @page { size: A4 landscape; margin: 12mm 14mm; }
-  thead { display: table-header-group; }
-  tr { page-break-inside: avoid; }
-  td, th { color: #111 !important; background: #fff !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Kill scroll-clipping on any horizontally-scrollable wrapper —
+     this is what was cutting columns off on the right */
+  .card .tbl-wrap,
+  .report-table-wrap,
+  .cs-wrap {
+    overflow: visible !important;
+    width: 100% !important;
+  }
+
+  .report-card {
+    border: none !important;
+    box-shadow: none !important;
+    width: 100% !important;
+  }
+
+  .report-header {
+    border-bottom: 1px solid #000 !important;
+    background: #fff !important;
+    padding: 0 0 6px 0 !important;
+    margin-bottom: 8px !important;
+  }
+  .report-header * { color: #000 !important; }
+
+  /* Generic table print rules — applies to .tbl, .cs-tbl, .report-table */
+  table {
+    width: 100% !important;
+    min-width: 0 !important;
+    table-layout: auto !important;
+    border-collapse: collapse !important;
+  }
+  .report-table { font-size: 8.5px !important; }
+  .cs-tbl, .tbl { font-size: 9px !important; }
+
+  td, th {
+    color: #111 !important;
+    background: #fff !important;
+    padding: 2px 4px !important;
+    border-color: #999 !important;
+    white-space: nowrap !important;
+  }
+
+  /* Repeat the header row on every page, not the report title block */
+  thead { display: table-header-group !important; }
+  tfoot { display: table-footer-group !important; }
+
+  /* Never split a row across a page break */
+  tr {
+    page-break-inside: avoid !important;
+    break-inside: avoid !important;
+  }
+  tfoot tr { page-break-before: avoid !important; }
 }
