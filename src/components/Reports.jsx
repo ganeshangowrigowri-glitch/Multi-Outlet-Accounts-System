@@ -1360,7 +1360,7 @@ const UG_FIXED_PRODUCTS = [
   "UMDG Q",
   "UAP N",
   "ULE N",
-  "UGAV Q",
+  "UPVGA Q",
 ];
 
 // Normalises a raw name/code string for matching: uppercase, trim, collapse
