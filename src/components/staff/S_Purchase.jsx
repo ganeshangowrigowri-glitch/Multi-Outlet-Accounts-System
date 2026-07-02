@@ -42,6 +42,7 @@ export default function S_Purchase({ outlet, user, toast_ }) {
   const [emptyInvState,  setEmptyInv] = useState([]);
   const [allCOA,         setCOA]     = useState(COA_DEF);
   const [suppliersReady, setReady]   = useState(false);
+  const [saving, setSaving] = useState(false);
 
   // AFTER
 const SUP_ORDER = [
@@ -160,21 +161,26 @@ useEffect(() => {
   const totalDisc  = lines.reduce((a, l) => a + (parseFloat(l.discount) || 0), 0);
   const grandTotal = subtotal - (parseFloat(lateCharge) || 0);
 
-  // ── Save purchase — same logic, Supabase storage ──
   async function savePurchase() {
+    if (saving) return;
     if (!invNo || !lines[0].itemCode) { toast_("Fill invoice no and at least one item", "err"); return; }
+    setSaving(true);
 
-    const rec = { id: uid(), date, supId, invoiceNo: invNo, lines, subtotal, totalDisc, lateCharge: parseFloat(lateCharge) || 0, grandTotal, outlet, by: user.username };
+  try {
+      const rec = { id: uid(), date, supId, invoiceNo: invNo, lines, subtotal, totalDisc, lateCharge: parseFloat(lateCharge) || 0, grandTotal, outlet, by: user.username };
 
-    await addPurchase(outlet, { date, supplier: supId, items: lines, total: grandTotal, status: "received", notes: `Inv:${invNo}` });
-    await addAPInvoice(outlet, { supplier: supId, date, amount: grandTotal, paid: 0, status: "unpaid", ref: invNo });
-    await addGLEntry(outlet, { date, account_id: "1300", description: `Purchase ${supId} Inv:${invNo}`, debit: grandTotal, credit: 0, source: "purchase" });
-    await addGLEntry(outlet, { date, account_id: "2000", description: `AP ${supId} Inv:${invNo}`,       debit: 0, credit: grandTotal, source: "purchase" });
+      await addPurchase(outlet, { date, supplier: supId, items: lines, total: grandTotal, status: "received", notes: `Inv:${invNo}` });
+      await addAPInvoice(outlet, { supplier: supId, date, amount: grandTotal, paid: 0, status: "unpaid", ref: invNo });
+      await addGLEntry(outlet, { date, account_id: "1300", description: `Purchase ${supId} Inv:${invNo}`, debit: grandTotal, credit: 0, source: "purchase" });
+      await addGLEntry(outlet, { date, account_id: "2000", description: `AP ${supId} Inv:${invNo}`,       debit: 0, credit: grandTotal, source: "purchase" });
 
-    toast_("Purchase saved ✓");
-    setLines([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", unitCost: "", discount: "", amount: 0 }]);
-    setInvNo("");
-    setLateCharge("");
+      toast_("Purchase saved ✓");
+      setLines([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", unitCost: "", discount: "", amount: 0 }]);
+      setInvNo("");
+      setLateCharge("");
+    } finally {
+      setSaving(false);
+    }
   }
 
   // ── Save transfer — UI uses AR/AP accounts; DB outlet FK uses staff outlet + type in notes ──
@@ -337,7 +343,7 @@ useEffect(() => {
               <div className="totr grand"><span>Balance</span><span className="totv cr">Rs.{fmt(grandTotal)}</span></div>
             </div>
 
-            <button className="btn btng" style={{ marginTop: 12 }} onClick={savePurchase}>{I.check} Save Purchase</button>
+            <button className="btn btng" style={{ marginTop: 12 }} onClick={savePurchase} disabled={saving}>{I.check} {saving ? "Saving..." : "Save Purchase"}</button>
           </div>
         </div>
       )}
