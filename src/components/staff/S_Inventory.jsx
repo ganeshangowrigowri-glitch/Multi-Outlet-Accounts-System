@@ -412,7 +412,8 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
     .filter(r => txnDate(r) === mainDate)
     .forEach(rec => txnItems(rec).forEach(l => {
       if (!l.itemCode || l.isEmptyItem) return;
-      pV[l.itemCode] = (pV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
+      const pKey = `${l.itemCode}__${rec.supplier || rec.supplier_id || ""}`;
+      pV[pKey] = (pV[pKey] || 0) + (parseFloat(l.qty) || 0);
     }));
 
   dbTransfers
@@ -445,13 +446,13 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
     const todaySale = dbSalesRef.current.find(
     s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem)
     );
-    const savedMap = todaySale
+  const savedMap = todaySale
   ? Object.fromEntries(
       (todaySale.items || [])
         .filter(r => !r.isEmptyItem)
         .flatMap(r => {
           const entries = [[r.id, r]];
-          if (r.code) entries.push([r.code, r]);
+          if (r.code) entries.push([`${r.code}__${r.supplier}`, r]);
           return entries;
         })
     )
@@ -463,8 +464,8 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       const op = resolvedOpening.main?.[`${i.code}__${i.supplier}`]
       ?? resolvedOpening.main?.[i.code]
       ?? 0;
-      const saved = savedMap[i.id] || savedMap[i.code];
-      const purchase    = pV[i.code]  || 0;
+      const saved = savedMap[i.id] || savedMap[`${i.code}__${i.supplier}`];
+      const purchase    = pV[`${i.code}__${i.supplier}`]  || 0;
       const transferIn  = tiV[i.code] || 0;
       const transferOut = toV[i.code] || 0;
       const returns     = rV[i.code]  || 0;
@@ -918,10 +919,11 @@ if (salesInRange.length > 0) {
     }
   }
 }
-  // ── Purchases ──
+   // ── Purchases ──
   let totalPurchase = 0;
   dbPurchases
     .filter(p => p.date >= csFrom && p.date <= csTo)
+    .filter(p => (p.supplier || p.supplier_id) === item.supplier)
     .forEach(p => (p.items || []).forEach(l => {
       if (l.itemCode === item.code && !l.isEmptyItem)
         totalPurchase += parseFloat(l.qty) || 0;
