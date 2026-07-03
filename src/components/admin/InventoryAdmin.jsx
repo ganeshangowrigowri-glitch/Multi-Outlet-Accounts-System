@@ -132,7 +132,7 @@ async function openEdit(item) {
   const ov = overrides[ovKey] || {};
   
   const existing = await getOpeningStock(selOutlet, openingDate);
-  const savedQty = existing?.main?.[ovKey] || existing?.main?.[item.code] || existing?.main?.[item.id] || "";
+  const savedQty = existing?.main?.[ovKey] || "";
   
   setEf({
     sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,

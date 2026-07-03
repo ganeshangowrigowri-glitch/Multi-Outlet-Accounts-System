@@ -462,7 +462,6 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       const adminSP     = Number(i.sellingPrice) || 0;
       const key         = i.id || `${i.code}__${i.supplier}`;
       const op = resolvedOpening.main?.[`${i.code}__${i.supplier}`]
-      ?? resolvedOpening.main?.[i.code]
       ?? 0;
       const saved = savedMap[i.id] || savedMap[`${i.code}__${i.supplier}`];
       const purchase    = pV[`${i.code}__${i.supplier}`]  || 0;
@@ -730,7 +729,7 @@ return { ...r, [field]: val };
   const nextDay = nd.toISOString().slice(0, 10);
   const om = {};
   mainRowsWithDerived.forEach(r => {
-    const key = r.id || `${r.code}__${r.supplier}`;
+    const key = `${r.code}__${r.supplier}`;
     om[key] = deriveMain(r).endStock;
   });
 
