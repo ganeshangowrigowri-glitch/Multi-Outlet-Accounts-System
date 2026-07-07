@@ -413,7 +413,15 @@ export const addCashEntry = async (outlet, entry) => {
   });
   if (error) console.error("addCashEntry:", error);
 };
- 
+ export const deleteCashEntryForDate = async (outlet, date, description) => {
+  const { error } = await supabase
+    .from("cash_ledger")
+    .delete()
+    .eq("outlet_id", outlet)
+    .eq("date", date)
+    .eq("description", description);
+  if (error) console.error("deleteCashEntryForDate:", error);
+};
 export const getCashBF = async (outlet) => {
   const { data } = await supabase
     .from("cash_ledger").select("debit,credit")

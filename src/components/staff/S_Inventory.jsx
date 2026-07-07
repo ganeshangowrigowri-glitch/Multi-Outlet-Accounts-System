@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
-import { addSale, deleteSaleForDate, addCashEntry, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
+import { addSale, deleteSaleForDate, addCashEntry,deleteCashEntryForDate, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
 import { outletInvKey, outletEmptyInvKey } from "../admin/InventoryAdmin";
@@ -307,6 +307,7 @@ useEffect(() => {
   const csTableRef = useRef(null);
   const skipNextReloadRef = useRef(false);
   const skipNextEmpReloadRef = useRef(false);
+  const openingWriteLockRef = useRef(Promise.resolve());
   const mainScrollBy = useCallback(d => mainTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
   const empScrollBy  = useCallback(d => empTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
 
@@ -399,6 +400,7 @@ const baseMaster = masterInv || ls("inv_main", SEED_INVENTORY);
 const baseQtyByCode = {};
 baseMaster.forEach(i => { baseQtyByCode[i.code] = Number(i.qty) || 0; });
 
+
 const baseMain = {};
 lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
   const prev = new Date(mainDate);
@@ -439,9 +441,29 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
 
   (async () => {
     const opening = await getOpeningStock(outlet, mainDate);
-    const mergedMain = opening?.main
+    let mergedMain = opening?.main
       ? { ...baseMain, ...opening.main }
       : baseMain;
+
+    // Fallback: recover from yesterday's saved sale if today's opening
+    // document is missing (e.g. a propagation write was lost).
+    if (!opening?.main || Object.keys(opening.main).length === 0) {
+      const yDate = prevDate(mainDate);
+      const ySale = dbSalesRef.current.find(
+        s => s.date === yDate && (s.items || []).some(r => !r.isEmptyItem)
+      );
+      if (ySale) {
+        const recovered = {};
+        (ySale.items || []).forEach(r => {
+          if (r.isEmptyItem) return;
+          const es = r.endStock !== "" && r.endStock !== undefined && r.endStock !== null
+            ? parseFloat(r.endStock) || 0
+            : null;
+          if (es !== null) recovered[`${r.code}__${r.supplier}`] = es;
+        });
+        mergedMain = { ...mergedMain, ...recovered };
+      }
+    }
     const resolvedOpening = { main: mergedMain, emp: opening?.emp || {} };
     const todaySale = dbSalesRef.current.find(
     s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem)
@@ -462,6 +484,7 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       const adminSP     = Number(i.sellingPrice) || 0;
       const key         = i.id || `${i.code}__${i.supplier}`;
       const op = resolvedOpening.main?.[`${i.code}__${i.supplier}`]
+      ?? resolvedOpening.main?.[i.id]
       ?? 0;
       const saved = savedMap[i.id] || savedMap[`${i.code}__${i.supplier}`];
       const purchase    = pV[`${i.code}__${i.supplier}`]  || 0;
@@ -733,7 +756,10 @@ return { ...r, [field]: val };
     om[key] = deriveMain(r).endStock;
   });
 
-  await propagateOpeningForward(outlet, mainDate, om, null);
+  openingWriteLockRef.current = openingWriteLockRef.current.then(
+  () => propagateOpeningForward(outlet, mainDate, om, null)
+);
+await openingWriteLockRef.current;
   await deleteSaleForDate(outlet, mainDate, false);
   await addSale(outlet, {
     date: mainDate,
@@ -741,6 +767,7 @@ return { ...r, [field]: val };
     total: totalSale,
     paymentMethod: "cash",
   });
+  await deleteCashEntryForDate(outlet, mainDate, "Daily Sale"); 
   await addCashEntry(outlet, {
     date: mainDate,
     description: "Daily Sale",
@@ -792,7 +819,10 @@ toast_("Main stock daily sale saved ✓");
   const nextDay = nd.toISOString().slice(0, 10);
   const oe = {};
   empRows.forEach(r => { oe[r.id] = deriveEmp(r).endStock; });
-  await propagateOpeningForward(outlet, empDate, null, oe);
+  openingWriteLockRef.current = openingWriteLockRef.current.then(
+  () => propagateOpeningForward(outlet, empDate, null, oe)
+);
+await openingWriteLockRef.current;
   const empRowsWithDerived = empRows.map(r => {
     const d = deriveEmp(r);
     return { ...r, ...d, isEmptyItem: true };
