@@ -271,6 +271,8 @@ useEffect(() => {
 
 
   const [mainDate,      setMainDate]      = useState(today());
+  const mainDateRef = useRef(mainDate);
+  mainDateRef.current = mainDate;
   const [mainSupFilter, setMainSupFilter] = useState("ALL");
   const [empDate,       setEmpDate]       = useState(today());
   const [empSupFilter,  setEmpSupFilter]  = useState("ALL");
@@ -788,17 +790,20 @@ await openingWriteLockRef.current;
   const localSavedMap = Object.fromEntries(
     mainRowsWithDerived.map(r => [r.id, r])
   );
-  setMR(prev => prev.map(r => {
-    const sv = localSavedMap[r.id];
-    if (!sv) return r;
-    return {
-      ...r,
-      sold:           sv.sold !== undefined && sv.sold !== null ? String(sv.sold) : r.sold,
-      rate:           Number(sv.rate) || r.rate,
-      endStock:       sv.endStockEdited ? sv.endStock : null,
-      endStockEdited: sv.endStockEdited || false,
-    };
-  }));
+  setMR(prev => {
+    if (mainDateRef.current !== mainDate) return prev;
+    return prev.map(r => {
+      const sv = localSavedMap[r.id];
+      if (!sv) return r;
+      return {
+        ...r,
+        sold:           sv.sold !== undefined && sv.sold !== null ? String(sv.sold) : r.sold,
+        rate:           Number(sv.rate) || r.rate,
+        endStock:       sv.endStockEdited ? sv.endStock : null,
+        endStockEdited: sv.endStockEdited || false,
+      };
+    });
+  });
 
   // ── Update sales ref AFTER setMR ──
   const freshSales = await getSales(outlet);
