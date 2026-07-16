@@ -33,7 +33,8 @@ const monthStart = m => m ? `${m}-01` : null;
 const monthEnd = m => {
   if (!m) return null;
   const [y, mo] = m.split("-").map(Number);
-  return new Date(y, mo, 0).toISOString().slice(0, 10);
+  const lastDay = new Date(y, mo, 0).getDate();
+  return `${m}-${String(lastDay).padStart(2, "0")}`;
 };
 
 // ─── Shared UI Atoms ─────────────────────────────────────────────────────────
