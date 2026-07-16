@@ -447,14 +447,20 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       ? { ...baseMain, ...opening.main }
       : baseMain;
 
-    // Fallback: recover from yesterday's saved sale if today's opening
-    // document is missing (e.g. a propagation write was lost).
+       // Walk backward day-by-day (capped at 365 days) until a date with an
+    // actual saved sale is found, instead of only checking yesterday.
     if (!opening?.main || Object.keys(opening.main).length === 0) {
-      const yDate = prevDate(mainDate);
-      const ySale = dbSalesRef.current.find(
-        s => s.date === yDate && (s.items || []).some(r => !r.isEmptyItem)
-      );
+      let yDate = prevDate(mainDate);
+      let ySale = null;
+      for (let i = 0; i < 365; i++) {
+        ySale = dbSalesRef.current.find(
+          s => s.date === yDate && (s.items || []).some(r => !r.isEmptyItem)
+        );
+        if (ySale) break;
+        yDate = prevDate(yDate);
+      }
       if (ySale) {
+
         const recovered = {};
         (ySale.items || []).forEach(r => {
           if (r.isEmptyItem) return;
