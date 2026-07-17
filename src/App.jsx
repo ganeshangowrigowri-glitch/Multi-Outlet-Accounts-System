@@ -236,8 +236,17 @@ function S_Cash({ outlet, toast_ }) {
     setMDesc(""); setMA("");
   }
 
-  const balance = bfBal + ledger.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
+ const dedupedLedger = (() => {
+    const lastAutoIndexForDate = {};
+    ledger.forEach((e, idx) => {
+      if (e.description === "Daily Sale") lastAutoIndexForDate[e.date] = idx;
+    });
+    return ledger.filter((e, idx) =>
+      e.description !== "Daily Sale" || lastAutoIndexForDate[e.date] === idx
+    );
+  })();
 
+  const balance = bfBal + dedupedLedger.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
   return (<>
     <div className="sg3">
       <div className="sc"><div className="sl">Account</div><div className="sv">1001</div></div>
@@ -273,7 +282,7 @@ function S_Cash({ outlet, toast_ }) {
         <div><h3>In Hand Cash Ledger (1001)</h3><p>Auto-linked from Sales, Expenses, Returns</p></div>
         <button className="btn btnd btnsm no-print" onClick={()=>window.print()}>{I.print} Print</button>
       </div>
-      <div style={{padding:12}}><Ledger rows={ledger} bfBal={bfBal}/></div>
+      <div style={{padding:12}}><Ledger rows={dedupedLedger} bfBal={bfBal}/></div>
     </div>
   </>);
 }

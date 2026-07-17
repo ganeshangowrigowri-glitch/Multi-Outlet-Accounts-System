@@ -310,6 +310,7 @@ useEffect(() => {
   const skipNextReloadRef = useRef(false);
   const skipNextEmpReloadRef = useRef(false);
   const openingWriteLockRef = useRef(Promise.resolve());
+  const savingMainRef = useRef(false);
   const mainScrollBy = useCallback(d => mainTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
   const empScrollBy  = useCallback(d => empTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
 
@@ -739,9 +740,11 @@ return { ...r, [field]: val };
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
   // ─────────────────────────────────────────────────────────
-
-  async function saveMainSale() {
-  skipNextReloadRef.current = true;   
+ async function saveMainSale() {
+  if (savingMainRef.current) return;
+  savingMainRef.current = true;
+  try {
+  skipNextReloadRef.current = true;
   const totalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
 
   const mainRowsWithDerived = mainRows.map(r => {
@@ -816,8 +819,11 @@ await openingWriteLockRef.current;
 skipNextReloadRef.current = true;
 dbSalesRef.current = freshSales;
 setDbSales(freshSales);
-setJustSaved(true);
+ setJustSaved(true);
 toast_("Main stock daily sale saved ✓");
+  } finally {
+    savingMainRef.current = false;
+  }
 }
     // ─────────────────────────────────────────────────────────
   //  SAVE EMPTY DAILY SALE
