@@ -7,6 +7,7 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
+import { getBankLedger, getBankBF } from "../../db";
 
 
 
@@ -48,15 +49,16 @@ useEffect(() => {
     <div>
       {/* ── Tab Bar ── */}
       <div className="stabs no-print" style={{ marginBottom: 16 }}>
-        {[ "Payment History"].map((t, i) => (
+        {[ "Payment History", "Bank Ledger" ].map((t, i) => (
           <button key={i} className={`stab ${tab === i ? "act" : ""}`} onClick={() => setTab(i)}>
-            {[ I.ap][i]} {t}
+            {[ I.ap, I.bank ][i]} {t}
           </button>
         ))}
       </div>
 
       
       {tab === 0 && <PaymentHistory outlet={outlet} />}
+      {tab === 1 && <BankLedgerView outlet={outlet} outletBanks={outletBanks} />}
     </div>
   );
 }
@@ -439,5 +441,143 @@ function MyEntries({ outlet, outletBanks, toast_ }) {
         </div>
       </div>
     </>
+  );
+}
+
+// ════════════════════════════════════════════════════════════
+// TAB — Bank Ledger (real Supabase data: deposits, withdrawals,
+// AP invoice payments, expense payments, card settlements — anything
+// that actually reached bank_ledger). Running balance shown per row.
+// ════════════════════════════════════════════════════════════
+function BankLedgerView({ outlet, outletBanks }) {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [bankId, setBankId] = useState(outletBanks[0]?.id || "");
+
+  useEffect(() => {
+    if (outletBanks.length && !bankId) setBankId(outletBanks[0].id);
+  }, [outletBanks]);
+
+  useEffect(() => {
+    setLoading(true);
+    getBankLedger(outlet).then(data => { setEntries(data || []); setLoading(false); });
+  }, [outlet]);
+
+  // All entries for the selected bank account only (each account has its own passbook)
+  const bankEntries = entries.filter(e => e.bank_id === bankId && e.balance_type !== "bf");
+
+  // Balance B/F = opening balance set for this account + everything dated before the "From" filter
+  const [openingBF, setOpeningBF] = useState(0);
+  useEffect(() => {
+    if (bankId) getBankBF(outlet, bankId).then(setOpeningBF);
+  }, [outlet, bankId]);
+
+  const before = from ? bankEntries.filter(e => e.date < from) : [];
+  const bf = openingBF + before.reduce((a, e) => a + Number(e.debit || 0) - Number(e.credit || 0), 0);
+
+  const period = bankEntries
+    .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
+    .sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.created_at || "").localeCompare(b.created_at || ""));
+
+  // Stored fields keep their existing meaning (debit=money in, credit=money out).
+  // The passbook DISPLAY convention is the opposite: Debit column = money out,
+  // Credit column = money in. Running balance math is unchanged either way:
+  // Closing = Opening + (money in) - (money out) = Opening + stored.debit - stored.credit.
+  const storedIn  = period.reduce((a, e) => a + Number(e.debit || 0), 0);  // shown under Credit
+  const storedOut = period.reduce((a, e) => a + Number(e.credit || 0), 0); // shown under Debit
+  const cd = bf + storedIn - storedOut;
+
+  let running = bf;
+  const selectedBank = outletBanks.find(b => b.id === bankId);
+
+  const th = { padding: "6px 10px", fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
+  const td = { padding: "6px 10px", fontSize: 12 };
+
+  return (
+    <div className="card">
+      <div className="chd">
+        <h3>Bank Ledger</h3>
+        <p>{selectedBank ? `${selectedBank.bank} — ${selectedBank.account_no || selectedBank.accountNo}` : outlet}</p>
+      </div>
+
+      <div style={{ padding: "12px 14px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div className="ff" style={{ minWidth: 160 }}>
+          <label>Bank *</label>
+          <select value={bankId} onChange={e => setBankId(e.target.value)}>
+            {outletBanks.length === 0 && <option value="">No bank accounts for this outlet</option>}
+            {outletBanks.map(b => (
+              <option key={b.id} value={b.id}>{b.bank} — {b.account_no || b.accountNo}</option>
+            ))}
+          </select>
+        </div>
+        <div className="ff">
+          <label>Period From</label>
+          <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
+        </div>
+        <div className="ff">
+          <label>To</label>
+          <input type="date" value={to} onChange={e => setTo(e.target.value)} />
+        </div>
+      </div>
+
+      {outletBanks.length === 0 ? (
+        <div style={{ padding: 30, textAlign: "center", color: "var(--mut)" }}>
+          No bank accounts assigned to this outlet yet — ask your admin to add one in Bank Master.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Date</th>
+                <th style={{ ...th, textAlign: "left" }}>Check No</th>
+                <th style={{ ...th, textAlign: "left" }}>Description</th>
+                <th style={{ ...th, textAlign: "right" }}>Debit</th>
+                <th style={{ ...th, textAlign: "right" }}>Credit</th>
+                <th style={{ ...th, textAlign: "right" }}>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style={{ background: "var(--s2)" }}>
+                <td style={td} colSpan={5}><strong>Balance B/F</strong></td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(bf)}</td>
+              </tr>
+
+              {loading && <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
+              {!loading && period.length === 0 && (
+                <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>
+              )}
+
+              {period.map(e => {
+                running += Number(e.debit || 0) - Number(e.credit || 0);
+                return (
+                  <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.15)" }}>
+                    <td style={td}>{e.date}</td>
+                    <td style={td} className="mono">{e.check_no || "—"}</td>
+                    <td style={td}>{e.description}</td>
+                    <td style={{ ...td, textAlign: "right" }}>{e.credit > 0 ? fmt(e.credit) : ""}</td>
+                    <td style={{ ...td, textAlign: "right" }}>{e.debit > 0 ? fmt(e.debit) : ""}</td>
+                    <td style={{ ...td, textAlign: "right", fontWeight: 600 }}>{fmt(running)}</td>
+                  </tr>
+                );
+              })}
+
+              <tr style={{ background: "var(--s2)" }}>
+                <td style={td} colSpan={5}><strong>Balance C/D</strong></td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(cd)}</td>
+              </tr>
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                <td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(storedOut)}</td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(storedIn)}</td>
+                <td style={td}></td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
