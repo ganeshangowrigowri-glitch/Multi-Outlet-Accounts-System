@@ -492,8 +492,10 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
     setMR(() => lsMain.map(i => {
       const adminSP     = Number(i.sellingPrice) || 0;
       const key         = i.id || `${i.code}__${i.supplier}`;
+      const isKWS = (i.supplier || "").toUpperCase().includes("KASTHURI");
+      const legacyKey = isKWS ? `${i.code}_KWS` : i.code;
       const op = resolvedOpening.main?.[`${i.code}__${i.supplier}`]
-      ?? resolvedOpening.main?.[i.id]
+      ?? resolvedOpening.main?.[legacyKey]
       ?? 0;
       const saved = savedMap[i.id] || savedMap[`${i.code}__${i.supplier}`];
       const purchase    = pV[`${i.code}__${i.supplier}`]  || 0;
@@ -1359,69 +1361,117 @@ if (salesInRange.length > 0) {
       )}
 {/* ════════════════ CURRENT STATUS ════════════════ */}
 {subTab === "status" && (
-  <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
+  <div className="cs-page" style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden" }}>
 
    <style>{`
   @media print {
-    @page { size: legal landscape; margin: 8mm; }
-    .no-print, button, select, input[type=date] { display:none !important; }
-    body, html { background:#fff !important; color:#000 !important; font-size:6.5px !important; }
-    .cs-tbl {
-      width:100% !important;
-      font-size:6.5px !important;
-      border-collapse:collapse !important;
-      table-layout:auto !important;
-      page-break-inside:auto !important;
-    }
-    .cs-tbl thead {
-      display:table-header-group !important;
-      background:#f0f0f0 !important;
-    }
-    .cs-tbl tbody { display:table-row-group !important; }
-    .cs-tbl tfoot { display:table-footer-group !important; }
-    .cs-tbl tr {
-      page-break-inside:avoid !important;
-      page-break-after:auto !important;
-    }
-    .cs-tbl th {
-      background:#f0f0f0 !important;
-      color:#000 !important;
-      font-weight:700 !important;
-      font-size:6px !important;
-      border:1px solid #999 !important;
-      padding:2px 3px !important;
-      white-space:nowrap !important;
-    }
-    .cs-tbl td {
-      border:1px solid #bbb !important;
-      padding:2px 3px !important;
-      white-space:nowrap !important;
-      font-size:6.5px !important;
-    }
-    .cs-tbl .rt { text-align:right !important; }
-    .cs-tbl .mono { font-family:monospace !important; }
-    .cs-tbl .bold { font-weight:700 !important; }
-    .ctag {
-      background:#e8e8e8 !important; color:#111 !important;
-      border-radius:2px; padding:1px 2px;
-      font-family:monospace; font-size:6px;
-    }
-    .tpill {
-      background:#ddd !important; color:#333 !important;
-      border-radius:2px; padding:1px 2px; font-size:6px;
-    }
-    [data-cs-tbl] {
-      overflow:visible !important;
-      height:auto !important;
-      max-height:none !important;
-      display:block !important;
-    }
-    .cs-print-header {
-      display:block !important;
-      font-size:10px; font-weight:700; margin-bottom:4px;
-    }
+  @page { size: legal landscape; margin: 5mm; }  /* ← Reduced from 8mm */
+  .no-print, button, select, input[type=date] { display:none !important; }
+  body, html { background:#fff !important; color:#000 !important; font-size:5.5px !important; }  /* ← Reduced from 6.5px */
+  .shell, .main, .page-content, .cs-page {
+    height:auto !important;
+    max-height:none !important;
+    overflow:visible !important;
+    display:block !important;
   }
-  .cs-print-header { display:none; }
+  .sidebar, .topbar { display:none !important; }
+  
+  .cs-tbl {
+    width:100% !important;
+    font-size:5.5px !important;  /* ← Reduced from 6.5px */
+    border-collapse:collapse !important;
+    table-layout:fixed !important;  /* ← Changed from 'auto' */
+    page-break-inside:avoid !important;
+  }
+  .cs-tbl thead {
+    display:table-header-group !important;
+    background:#f0f0f0 !important;
+  }
+  .cs-tbl tbody { display:table-row-group !important; }
+  .cs-tbl tfoot { display:table-footer-group !important; }
+  .cs-tbl tr {
+    page-break-inside:avoid !important;
+    page-break-after:auto !important;
+  }
+  
+  .cs-tbl th, .cs-tbl td { 
+    width:auto !important; 
+    min-width:0 !important;
+    padding:1px 1px !important;  /* ← Reduced from 3px */
+  }
+  .cs-tbl th {
+    background:#f0f0f0 !important;
+    color:#000 !important;
+    font-weight:700 !important;
+    font-size:5px !important;  /* ← Reduced from 6px */
+    border:0.5px solid #999 !important;  /* ← Reduced from 1px */
+    white-space:normal !important;  /* ← Changed from 'nowrap' */
+    word-break:break-word !important;
+    line-height:1.2 !important;
+  }
+  .cs-tbl td {
+    border:0.5px solid #bbb !important;  /* ← Reduced from 1px */
+    padding:0.5px 1px !important;  /* ← Reduced from 1px 2px */
+    white-space:normal !important;  /* ← Changed from 'nowrap' to allow wrapping */
+    font-size:5px !important;  /* ← Reduced from 6px */
+    word-break:break-word !important;
+    line-height:1.15 !important;
+  }
+  .cs-tbl td.bold {
+    word-break:break-word !important;
+    max-width:80px !important;  /* ← Reduced from 110px */
+  }
+  
+  .cs-tbl .rt { text-align:right !important; }
+  .cs-tbl .mono { font-family:monospace !important; }
+  .cs-tbl .bold { font-weight:700 !important; }
+  
+  .ctag {
+    background:#e8e8e8 !important; 
+    color:#111 !important;
+    border-radius:1px; 
+    padding:0px 1px;
+    font-family:monospace; 
+    font-size:4.5px !important;  /* ← Reduced from 6px */
+    display:inline-block;
+  }
+  .tpill {
+    background:#ddd !important; 
+    color:#333 !important;
+    border-radius:1px; 
+    padding:0px 1px; 
+    font-size:4.5px !important;  /* ← Reduced from 6px */
+    display:inline-block;
+  }
+  
+  [data-cs-tbl] {
+    overflow:visible !important;
+    height:auto !important;
+    max-height:none !important;
+    display:block !important;
+  }
+  
+  .cs-print-header {
+    display:block !important;
+    font-size:9px;  /* ← Reduced from 10px */
+    font-weight:700; 
+    margin-bottom:2px;  /* ← Reduced from 4px */
+  }
+  
+  /* REMOVED: These rules were hiding columns 9+ */
+  /* .cs-tbl-p1 thead tr th:nth-child(n+9) { display:none !important; } */
+  /* .cs-tbl-p1 tbody tr td:nth-child(n+9) { display:none !important; } */
+  /* .cs-tbl-p1 tfoot tr td:nth-child(n+7) { display:none !important; } */
+  
+  /* Hide page 2 table during print (all columns on page 1 now) */
+  .cs-tbl-p2 { display:none !important; }
+  
+  .cs-tbl-p1 { width:100% !important; }
+}
+
+/* Screen styles (not printing) */
+.cs-print-header { display:none; }
+.cs-tbl-p2 { display:none; }
   [data-cs-tbl]::-webkit-scrollbar { width: 8px; height: 0px; }
   [data-cs-tbl]::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 4px; }
   [data-cs-tbl]::-webkit-scrollbar-thumb:hover { background: #fbbf24; }
@@ -1483,7 +1533,7 @@ if (salesInRange.length > 0) {
 
     {/* ── Table ── */}
     <div data-cs-tbl ref={csTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
-      <table className="cs-tbl" style={{ width:"100%", minWidth:1100 }}>
+      <table className="cs-tbl cs-tbl-p1" style={{ width:"100%", minWidth:1100 }}>
       <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
       <tr>
             <th style={{ width:30 }}>#</th>
@@ -1540,6 +1590,64 @@ if (salesInRange.length > 0) {
         )}
       </table>
     </div>
+
+    {/* ── Print-only page 2: financial columns (hidden on screen, shown
+         after a page break when printing) ── */}
+    <table className="cs-tbl cs-tbl-p2">
+      <thead>
+        <tr>
+          <th style={{ width:30 }}>#</th>
+          <th style={{ width:72 }}>Item Code</th>
+          <th>Description</th>
+          <th className="rt">Phy Stk (Rs.)</th>
+          <th className="rt">Total Sale (Rs.)</th>
+          <th className="rt">Profit (Rs.)</th>
+          <th className="rt">Margin</th>
+          <th className="rt">Trans.In</th>
+          <th className="rt">Trans.Out</th>
+          <th className="rt">Return</th>
+          <th className="rt">Adj. to Stk</th>
+        </tr>
+      </thead>
+      <tbody>
+        {csData.map((row, idx) => (
+          <tr key={row.id}>
+            <td style={{ fontFamily:"monospace" }}>{idx + 1}</td>
+            <td><span className="ctag">{row.code}</span></td>
+            <td className="bold">{row.name}</td>
+            <td className="rt mono">
+              Rs.{fmt(row.physicalStockOverride !== "" ? row.physicalStockOverride : row.physicalStock)}
+            </td>
+            <td className="rt mono cg">Rs.{fmt(row.totalSaleAmt)}</td>
+            <td className="rt mono cg bold">Rs.{fmt(row.profit)}</td>
+            <td className="rt mono">{row.margin !== undefined ? `Rs.${fmt(row.margin)}` : "—"}</td>
+            <td className="rt mono cb">{row.transferIn || "—"}</td>
+            <td className="rt mono ca">{row.transferOut || "—"}</td>
+            <td className="rt mono cr">{row.totalReturn || "—"}</td>
+            <td className={`rt mono bold ${row.adjStock < 0 ? "cr" : row.adjStock > 0 ? "cg" : ""}`}>
+              {row.adjStock !== 0 ? `${row.adjStock > 0 ? "+" : ""}${row.adjStock}` : "—"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+      {csData.length > 0 && (
+        <tfoot>
+          <tr style={{ fontWeight:700 }}>
+            <td colSpan={3} className="rt">Totals:</td>
+            <td className="rt mono bold">
+              Rs.{fmt(csData.reduce((a, r) => a + Number(r.physicalStockOverride !== "" ? r.physicalStockOverride : r.physicalStock), 0))}
+            </td>
+            <td className="rt mono cg bold">
+              Rs.{fmt(csData.reduce((a, r) => a + r.totalSaleAmt, 0))}
+            </td>
+            <td className="rt mono cg bold">
+              Rs.{fmt(csData.reduce((a, r) => a + r.profit, 0))}
+            </td>
+            <td colSpan={5} />
+          </tr>
+        </tfoot>
+      )}
+    </table>
   </div>
 )}
  </div>

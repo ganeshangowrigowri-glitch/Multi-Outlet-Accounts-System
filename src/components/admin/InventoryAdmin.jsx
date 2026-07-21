@@ -1563,7 +1563,7 @@ async function repairOpeningFromDate(outlet, fromDate) {
     if (r.isEmptyItem) {
       if (r.id) oe[r.id] = parseFloat(r.endStock) || 0;
     } else {
-      const key = r.id || `${r.code}__${r.supplier}`;
+      const key = `${r.code}__${r.supplier}`;
       om[key] = parseFloat(r.endStock) || 0;
     }
   });
