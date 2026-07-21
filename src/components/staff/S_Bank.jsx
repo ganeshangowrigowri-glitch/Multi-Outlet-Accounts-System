@@ -31,7 +31,7 @@ useEffect(() => {
     .eq("outlet_id", outlet)
     .eq("active", true)
     .eq("hidden", false)
-    .then(({ data }) => { if (data) setOutletBanks(data); });
+    .then(({ data }) => { if (data) setOutletBanks(data.filter(a => a.account_type !== "card")); });
 }, [outlet]);  
 
   if (!hasAccess) {

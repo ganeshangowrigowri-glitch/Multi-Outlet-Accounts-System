@@ -26,6 +26,8 @@ const normAccount = (a) => ({
   branch:       a.branch || "",
   active:       a.active !== false,
   hidden:       a.hidden || false,
+  account_type: a.account_type || "bank",
+  fee_pct:      Number(a.fee_pct) || 0,
 });
 
 // ── seed bank accounts so something shows on first load ──
@@ -86,7 +88,7 @@ export default function A_Bank({ outlets: outletsProp = [], toast_ }) {
    async function save(list) { const n = list.map(normAccount); setAccounts(n); lss(BANK_KEY, n); }
 
   function openAdd() {
-    setForm({ outlet:"", bank:"", accountNo:"", accountName:"", branch:"", active:true, hidden:false });
+    setForm({ outlet:"", bank:"", accountNo:"", accountName:"", branch:"", active:true, hidden:false, accountType:"bank", feePct:"" });
     setModal("add");
   }
   function openEdit(a) {
@@ -99,6 +101,8 @@ export default function A_Bank({ outlets: outletsProp = [], toast_ }) {
       branch: a.branch || "",
       active: a.active !== false,
       hidden: a.hidden || false,
+      accountType: a.account_type || "bank",
+      feePct: a.fee_pct ?? "",
     });
     setModal("edit");
   }
@@ -117,6 +121,8 @@ async function submitForm() {
     branch:       form.branch || "",
     active:       form.active,
     hidden:       form.hidden || false,
+    account_type: form.accountType || "bank",
+    fee_pct:      Number(form.feePct) || 0,
   };
 
   if (modal === "add") {
@@ -213,6 +219,7 @@ async function del(id) {
               <tr>
                 <th>#</th>
                 <th>Outlet / Bar Name</th>
+                <th>Type</th>
                 <th>Bank</th>
                 <th>Account Number</th>
                 <th>Account Name</th>
@@ -224,13 +231,18 @@ async function del(id) {
             </thead>
             <tbody>
               {visible.length === 0 && (
-                <tr><td colSpan={9}><div className="empty">No bank accounts found.</div></td></tr>
+                <tr><td colSpan={10}><div className="empty">No bank accounts found.</div></td></tr>
               )}
               {visible.map((a, i) => (
                 <tr key={a.id} style={{ opacity: a.hidden ? 0.5 : 1 }}>
                   <td className="mono" style={{ color:"var(--mut)", fontSize:11 }}>{i+1}</td>
                   <td>
                     <div style={{ fontWeight:600, fontSize:13 }}>{a.outlet_id}</div>
+                  </td>
+                  <td>
+                    <span className={`badge ${a.account_type === "card" ? "bg" : "bb"}`}>
+                      {a.account_type === "card" ? `Card (${a.fee_pct}% fee)` : "Bank"}
+                    </span>
                   </td>
                   <td>
                     <span className="badge bb">{a.bank}</span>
@@ -292,6 +304,15 @@ async function del(id) {
               }
             </div>
 
+            {/* Account Type */}
+            <div className="ff">
+              <label>Account Type *</label>
+              <select value={form.accountType || "bank"} onChange={e => setForm({...form, accountType: e.target.value})}>
+                <option value="bank">Bank Account</option>
+                <option value="card">Card / POS Settlement Account</option>
+              </select>
+            </div>
+
             {/* Bank */}
             <div className="ff">
               <label>Bank *</label>
@@ -300,6 +321,14 @@ async function del(id) {
                 {BANKS.map(b => <option key={b}>{b}</option>)}
               </select>
             </div>
+
+            {/* Merchant fee — only relevant for card accounts */}
+            {(form.accountType === "card") && (
+              <div className="ff">
+                <label>Merchant Discount Fee (%)</label>
+                <input type="number" step="0.01" placeholder="e.g. 2.5" value={form.feePct ?? ""} onChange={e => setForm({...form, feePct: e.target.value})} />
+              </div>
+            )}
 
             {/* Account Number */}
             <div className="ff">

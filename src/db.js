@@ -478,6 +478,83 @@ export const setBankBF = async (outlet, amount) => {
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
   });
 };
+
+// ─── CARD SETTLEMENT LEDGER ────────────────────────────────────
+// Tracks card/POS sales as a receivable (debit) until the acquiring
+// bank settles the batch to a real bank account (credit). Mirrors
+// the Bank Ledger shape 1:1 so Reports.jsx can consume it the same
+// way. card_id references bank_accounts.id where account_type='card'.
+export const getCardLedger = async (outlet) => {
+  const { data, error } = await supabase
+    .from("card_ledger").select("*").eq("outlet_id", outlet).order("date");
+  if (error) { console.error("getCardLedger:", error); return []; }
+  return data;
+};
+
+export const addCardEntry = async (outlet, entry) => {
+  const { error } = await supabase.from("card_ledger").insert({
+    outlet_id:    outlet,
+    date:         entry.date,
+    card_id:      entry.cardId || null,
+    description:  entry.description || "",
+    txn_type:     entry.txnType || "sale",   // sale | settlement | fee | adjustment
+    debit:        entry.debit || 0,           // increases pending receivable (card sale)
+    credit:       entry.credit || 0,          // decreases pending receivable (settlement / fee)
+    ref:          entry.ref || "",
+    balance_type: entry.type || "",
+  });
+  if (error) console.error("addCardEntry:", error);
+  return !error;
+};
+
+export const getCardBF = async (outlet) => {
+  const { data } = await supabase
+    .from("card_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "bf");
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const setCardBF = async (outlet, amount) => {
+  await supabase.from("card_ledger")
+    .delete().eq("outlet_id", outlet).eq("balance_type", "bf");
+  await supabase.from("card_ledger").insert({
+    outlet_id: outlet, date: new Date().toISOString().split("T")[0],
+    description: "Opening Balance", debit: amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
+  });
+};
+
+// One settlement = money leaves the card receivable AND lands in a real
+// bank account, net of the merchant discount fee. Writes both ledgers
+// atomically-ish (sequential inserts) so Bank and Card stay reconciled.
+export const settleCardToBank = async (outlet, { date, cardId, bankId, grossAmount, feePct, description }) => {
+  const fee = Math.round(grossAmount * (Number(feePct) || 0) / 100 * 100) / 100;
+  const net = grossAmount - fee;
+
+  await supabase.from("card_ledger").insert({
+    outlet_id: outlet, date, card_id: cardId,
+    description: description || "Settlement to bank",
+    txn_type: "settlement", debit: 0, credit: grossAmount,
+  });
+
+  if (fee > 0) {
+    await supabase.from("card_ledger").insert({
+      outlet_id: outlet, date, card_id: cardId,
+      description: "Merchant discount fee", txn_type: "fee", debit: 0, credit: 0,
+      ref: `fee:${fee}`, // informational; fee already netted out of settlement above
+    });
+  }
+
+  const { error } = await supabase.from("bank_ledger").insert({
+    outlet_id: outlet, date,
+    description: description ? `${description} (card settlement)` : "Card settlement",
+    debit: net, credit: 0, ref: bankId || "", balance_type: "",
+  });
+  if (error) console.error("settleCardToBank bank_ledger insert:", error);
+
+  return { fee, net };
+};
  
 // ─── GENERAL LEDGER ──────────────────────────────────────────
 export const getGL = async (outlet) => {

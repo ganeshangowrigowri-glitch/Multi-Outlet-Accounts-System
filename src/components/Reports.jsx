@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { I } from "../utils/icons";
-import { OUTLETS } from "../data/seeds";
+import { OUTLETS, SUPPLIERS_LIST } from "../data/seeds";
 import {
   getOutlets,
   getSales,
@@ -10,6 +10,7 @@ import {
   getExpenses,
   getCashLedger,
   getBankLedger,
+  getCardLedger,
   getARLedger,
   getAPInvoices,
   getAPPayments,
@@ -1361,7 +1362,7 @@ const UG_FIXED_PRODUCTS = [
   "UMDG Q",
   "UAP N",
   "ULE N",
-  "UPVGA Q",
+  "UGAV Q",
 ];
 
 // Normalises a raw name/code string for matching: uppercase, trim, collapse
@@ -1800,8 +1801,139 @@ function UGBook({ d, outlet, month }) {
   );
 }
 // ══════════════════════════════════════════════════════
-// MAIN REPORTS COMPONENT
+// SUPPLIER CREDIT LEDGER — mirrors the Excel "IDL %" sheet, which is
+// actually an invoice-level outstanding/credit tracker (not a ratio),
+// generalised here to work for any supplier that gets a 6% trade
+// discount + 18% VAT-on-discount (IDL by default, same as UG Book's
+// mechanic — just at invoice level instead of per-product quantity).
 // ══════════════════════════════════════════════════════
+function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId }) {
+  const { apInvoices, apPayments } = d;
+  const mStart = monthStart(month);
+  const mEnd   = monthEnd(month);
+
+  const isSup = raw => (raw || "").trim() === supplierId;
+
+  const invThisMonth = (apInvoices || []).filter(i => isSup(i.supplier_id || i.supplier));
+  const payThisMonth = (apPayments || []).filter(p =>
+    isSup(p.supplier_id || p.supplier) &&
+    (!mStart || (p.date >= mStart && p.date <= mEnd))
+  );
+
+  // B/F: everything before this month
+  const invBefore = (apInvoices || []).filter(i => isSup(i.supplier_id || i.supplier) && mStart && i.date < mStart);
+  const payBefore = (apPayments || []).filter(p => isSup(p.supplier_id || p.supplier) && mStart && p.date < mStart);
+  const bfBalance =
+    invBefore.reduce((a, i) => a + (Number(i.amount) || 0), 0) -
+    payBefore.reduce((a, p) => a + (Number(p.amount) || 0) + (Number(p.discount) || 0), 0);
+
+  // Build one row per invoice, matched against its payment(s) by invoice ref/number.
+  // Falls back to unmatched if a payment's notes/invoiceId doesn't line up with any invoice ref.
+  const rows = invThisMonth
+    .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
+    .map(inv => {
+      const invNo = inv.ref || inv.id;
+      const matchedPayments = payThisMonth.filter(p => (p.notes || p.invoiceId) === invNo);
+      const paid      = matchedPayments.reduce((a, p) => a + (Number(p.amount) || 0), 0);
+      const discount  = matchedPayments.reduce((a, p) => a + (Number(p.discount) || 0), 0);
+      const chq       = matchedPayments.map(p => p.ref).filter(Boolean).join(", ");
+      const payDate   = matchedPayments[0]?.date || "";
+      const amount    = Number(inv.amount) || 0;
+      const sixPctDis = amount * 0.06;
+      const vatDis    = sixPctDis * 0.18;
+      const outstanding = amount - paid - discount - sixPctDis - vatDis;
+      return { invNo, date: inv.date, amount, payDate, paid, chq, sixPctDis, vatDis, outstanding, discount };
+    })
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  const totalAmount      = rows.reduce((a, r) => a + r.amount, 0);
+  const totalPaid        = rows.reduce((a, r) => a + r.paid, 0);
+  const totalSixPctDis   = rows.reduce((a, r) => a + r.sixPctDis, 0);
+  const totalVatDis      = rows.reduce((a, r) => a + r.vatDis, 0);
+  let runBal = bfBalance;
+
+  const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
+  const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
+
+  const supplierName = (SUPPLIERS_LIST.find(s => s.id === supplierId) || {}).name || supplierId;
+  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
+
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+        <select value={supplierId} onChange={e => setSupplierId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
+          {SUPPLIERS_LIST.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+        </select>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+
+      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>{supplierName} Credit Ledger</div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}</div>
+        </div>
+
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Date</th>
+                <th style={{ ...th, textAlign: "left" }}>Invoice No</th>
+                <th style={th}>Amount</th>
+                <th style={{ ...th, textAlign: "left" }}>Pay Date</th>
+                <th style={th}>Payment</th>
+                <th style={{ ...th, textAlign: "left" }}>Chq No</th>
+                <th style={th}>6% Dis</th>
+                <th style={th}>VAT Dis</th>
+                <th style={th}>Outstanding</th>
+                <th style={th}>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr style={{ background: "var(--s2)" }}>
+                <td style={td(true)} colSpan={9}>B/F Balance</td>
+                <td style={td(true)}>{bfBalance !== 0 ? fmt(bfBalance) : "—"}</td>
+              </tr>
+              {rows.length === 0 && (
+                <tr><td colSpan={10} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No invoices this period</td></tr>
+              )}
+              {rows.map((r, i) => {
+                runBal += r.amount - r.paid - r.discount - r.sixPctDis - r.vatDis;
+                return (
+                  <tr key={i}>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.invNo}</td>
+                    <td style={td(false)}>{fmt(r.amount)}</td>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.payDate || "—"}</td>
+                    <td style={td(false)}>{r.paid > 0 ? fmt(r.paid) : "-"}</td>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.chq || "—"}</td>
+                    <td style={td(false)}>{fmt(r.sixPctDis)}</td>
+                    <td style={td(false)}>{fmt(r.vatDis)}</td>
+                    <td style={td(false)}>{fmt(r.outstanding)}</td>
+                    <td style={td(true)}>{fmt(runBal)}</td>
+                  </tr>
+                );
+              })}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+                <td style={td(true)} colSpan={2}>TOTAL</td>
+                <td style={td(true)}>{fmt(totalAmount)}</td>
+                <td style={td(true)}></td>
+                <td style={td(true)}>{fmt(totalPaid)}</td>
+                <td style={td(true)}></td>
+                <td style={td(true)}>{fmt(totalSixPctDis)}</td>
+                <td style={td(true)}>{fmt(totalVatDis)}</td>
+                <td style={td(true)}></td>
+                <td style={td(true)}>{fmt(runBal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 export default function Reports({ user }) {
   const isAdmin    = user?.role === "admin";
   const userOutlet = user?.outlet || OUTLETS[0];
@@ -1810,6 +1942,7 @@ export default function Reports({ user }) {
   const [outlet,      setOutlet]      = useState(isAdmin ? "ALL" : userOutlet);
   const [month,       setMonth]       = useState(today().slice(0, 7));
   const [outletList,  setOutletList]  = useState(OUTLETS);
+  const [supplierId,  setSupplierId]  = useState("2004-IDL");
 
   const effectiveOutlet = isAdmin ? outlet : userOutlet;
 
@@ -1830,7 +1963,8 @@ export default function Reports({ user }) {
     { id: "purchase",  label: "Purchase Summary",      icon: "🛒" },
     { id: "cos",       label: "Cost of Sales Summary", icon: "📦" },
     { id: "emptybott", label: "Empty Bottles",         icon: "🍾" },
-    { id: "ugbook",    label: "UG Book",               icon: "📒" }
+    { id: "ugbook",    label: "UG Book",               icon: "📒" },
+    { id: "supledger", label: "Supplier Credit Ledger", icon: "🧾" }
   ];
 
   const iS  = { width: "100%", padding: "5px 8px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11.5, fontFamily: "'Inter',sans-serif", color: "var(--txt)", outline: "none" };
@@ -1885,6 +2019,7 @@ export default function Reports({ user }) {
             {report==="cos"       && <CostOfSalesSummary d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={setSupplierId}/>}
           </>
         )}
       </div>

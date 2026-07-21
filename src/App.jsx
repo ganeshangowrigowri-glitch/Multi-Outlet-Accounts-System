@@ -14,6 +14,7 @@ import S_Inventory from "./components/staff/S_Inventory";
 import S_Purchase from "./components/staff/S_Purchase";
 import S_Expenses from "./components/staff/S_Expenses";
 import S_Bank from "./components/staff/S_Bank";
+import S_Card from "./components/staff/S_Card";
 import "../src/styles/global.css";
 
 import {
@@ -310,6 +311,7 @@ function StaffPortal({ user, onLogout }) {
     { id:"exp",     label:"Expenses",             icon:I.exp  },
     { id:"cash",    label:"In Hand Cash",         icon:I.cash },
     { id:"bank",    label:"Bank",                 icon:I.bank },
+    { id:"card",    label:"Card Settlement",      icon:I.bank },
     { id:"reports", label:"Reports",              icon:I.print},
     { id:"coa",     label:"Chart of Accounts",    icon:I.coa  },
   ];
@@ -317,7 +319,7 @@ function StaffPortal({ user, onLogout }) {
   const pgTitle = {
     dash:"Dashboard", ar:"Accounts Receivable", ap:"Accounts Payable",
     gl:"General Ledger", inv:"Stock / Inventory", pur:"Purchase",
-    exp:"Expenses", cash:"In Hand Cash", bank:"Bank",
+    exp:"Expenses", cash:"In Hand Cash", bank:"Bank", card:"Card Settlement",
     reports:"Reports", coa:"Chart of Accounts"
   };
 
@@ -403,6 +405,7 @@ function StaffPortal({ user, onLogout }) {
           {page==="exp"  && <S_Expenses outlet={outlet} user={user} toast_={toast_}/>}
           {page==="cash" && <S_Cash outlet={outlet} toast_={toast_}/>}
           {page==="bank" && <S_Bank outlet={outlet} toast_={toast_}/>}
+          {page==="card" && <S_Card outlet={outlet} toast_={toast_}/>}
           {page==="coa"  && <ChartOfAccounts user={user}/>}
           {page==="reports" && <Reports user={user}/>}
         </div>
