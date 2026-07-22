@@ -21,7 +21,9 @@ import {
   getClerks, getCOA,
   getCashLedger, addCashEntry, getCashBF, setCashBF,
   addGLEntry, getGL,
+  getAdminCount, createAdmin, verifyAdminLogin,
 } from "./db";
+import { verifyPassword } from "./utils/authcrypto";
 
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
 
@@ -36,9 +38,30 @@ function LoginScreen({ onLogin }) {
   const [clerks,   setClerks] = useState([]);
   const [loading,  setLoading] = useState(false);
 
+  // First-run setup: if no admin account exists yet, offer to create one
+  // instead of showing the (now removed) hardcoded admin/admin123 login.
+  const [needsBootstrap, setNeedsBootstrap] = useState(null); // null = checking
+  const [bsForm, setBsForm] = useState({ username: "", password: "", confirm: "" });
+  const [bsErr, setBsErr] = useState("");
+  const [bsLoading, setBsLoading] = useState(false);
+
   useEffect(() => {
     getClerks().then(setClerks);
+    getAdminCount().then(n => setNeedsBootstrap(n === 0));
   }, []);
+
+  async function submitBootstrap() {
+    setBsErr("");
+    const u = bsForm.username.trim();
+    if (!u) { setBsErr("Choose a username."); return; }
+    if (bsForm.password.length < 8) { setBsErr("Password must be at least 8 characters."); return; }
+    if (bsForm.password !== bsForm.confirm) { setBsErr("Passwords don't match."); return; }
+    setBsLoading(true);
+    const ok = await createAdmin(u, bsForm.password);
+    setBsLoading(false);
+    if (ok) { setNeedsBootstrap(false); setTab("admin"); }
+    else setBsErr("Could not create admin account — check your connection and try again.");
+  }
 
   const getClerkOutlets = () => {
     const u = (form.username||"").trim().toLowerCase();
@@ -53,15 +76,17 @@ function LoginScreen({ onLogin }) {
     const u = (form.username||"").trim().toLowerCase();
     const p = (form.password||"").trim();
     if (tab === "admin") {
-      if (u==="admin" && p==="admin123") onLogin({ role:"admin", username:"admin" });
-      else setErr("Wrong credentials. Use admin / admin123");
+      const ok = await verifyAdminLogin(u, p);
+      if (ok) onLogin({ role:"admin", username:u });
+      else setErr("Wrong username or password.");
     } else {
       if (!form.outlet) { setErr("Select your outlet first."); setLoading(false); return; }
       const c = clerks.find(x => {
         const outletList = Array.isArray(x.outlets) ? x.outlets : x.outlet ? [x.outlet] : [];
-        return x.username.toLowerCase()===u && x.password_hash===p && outletList.includes(form.outlet);
+        return x.username.toLowerCase()===u && outletList.includes(form.outlet);
       });
-      if (c) onLogin({ role:"staff", ...c, outlet: form.outlet });
+      const passOk = c ? await verifyPassword(p, c.password_hash) : false;
+      if (c && passOk) onLogin({ role:"staff", ...c, outlet: form.outlet });
       else setErr("No match. Check outlet, username and password.");
     }
     setLoading(false);
@@ -72,6 +97,53 @@ function LoginScreen({ onLogin }) {
   }
 
   const clerkOutlets = tab === "staff" ? getClerkOutlets() : [];
+
+  if (needsBootstrap === null) {
+    return <div className="lwrap"><div className="lcard"><p style={{textAlign:"center",padding:20}}>Loading…</p></div></div>;
+  }
+
+  if (needsBootstrap) {
+    return (
+      <div className="lwrap">
+        <div className="lcard">
+          <div className="llogo">
+            <div className="lmark">{I.shield}</div>
+            <h1>Accounts Manager</h1>
+            <p>First-time setup — create your admin account</p>
+          </div>
+          {bsErr && <div className="errbox">{bsErr}</div>}
+          <div className="lf">
+            <label>Admin Username</label>
+            <div className="lfw">
+              <span className="lfic">{I.user}</span>
+              <input value={bsForm.username} onChange={e=>setBsForm({...bsForm,username:e.target.value})} placeholder="e.g. admin" />
+            </div>
+          </div>
+          <div className="lf">
+            <label>Password (min 8 characters)</label>
+            <div className="lfw">
+              <span className="lfic">{I.lock}</span>
+              <input type={showPw?"text":"password"} value={bsForm.password} onChange={e=>setBsForm({...bsForm,password:e.target.value})} placeholder="••••••••" />
+              <button className="eyebtn" onClick={()=>setShowPw(!showPw)}>{showPw?I.eyeOff:I.eye}</button>
+            </div>
+          </div>
+          <div className="lf">
+            <label>Confirm Password</label>
+            <div className="lfw">
+              <span className="lfic">{I.lock}</span>
+              <input type={showPw?"text":"password"} value={bsForm.confirm} onChange={e=>setBsForm({...bsForm,confirm:e.target.value})} placeholder="••••••••" onKeyDown={e=>e.key==="Enter"&&submitBootstrap()} />
+            </div>
+          </div>
+          <button className="btnlogin" onClick={submitBootstrap} disabled={bsLoading}>
+            {bsLoading ? "Creating…" : "Create Admin Account →"}
+          </button>
+          <p style={{fontSize:10.5,color:"var(--mut2)",textAlign:"center",marginTop:9}}>
+            This runs once. Choose a real password — there's no hardcoded fallback anymore.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="lwrap">
@@ -137,7 +209,6 @@ function LoginScreen({ onLogin }) {
         <button className="btnlogin" onClick={submit} disabled={loading}>
           {loading ? "Signing in…" : "Sign In →"}
         </button>
-        {tab==="admin" && <p style={{fontSize:10.5,color:"var(--mut2)",textAlign:"center",marginTop:9}}>admin / admin123</p>}
       </div>
     </div>
   );

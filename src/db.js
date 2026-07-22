@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import { hashPassword, isHashed, verifyPassword } from "./utils/authcrypto";
  
 // ─── OUTLETS ────────────────────────────────────────────────
 const outletLabel = (o) => String(o?.id || o?.name || "").trim();
@@ -87,9 +88,10 @@ export const getClerks = async () => {
  
 export const saveClerks = async (clerks) => {
   for (const c of clerks) {
+    const rawPw = c.password || c.password_hash;
     const row = {
       username:      c.username,
-      password_hash: c.password || c.password_hash,
+      password_hash: isHashed(rawPw) ? rawPw : await hashPassword(rawPw),
       designation:   c.designation,
       access:        c.access,
       outlet_ids:    Array.isArray(c.outlets) ? c.outlets : c.outlet ? [c.outlet] : [],
@@ -105,7 +107,7 @@ export const saveClerks = async (clerks) => {
 export const addClerk = async (clerk) => {
   const { data, error } = await supabase.from("clerks").insert({
     username:      clerk.username,
-    password_hash: clerk.password,
+    password_hash: isHashed(clerk.password) ? clerk.password : await hashPassword(clerk.password),
     designation:   clerk.designation,
     access:        clerk.access,
     outlet_ids:    Array.isArray(clerk.outlets) ? clerk.outlets : clerk.outlet ? [clerk.outlet] : [],
@@ -117,7 +119,7 @@ export const addClerk = async (clerk) => {
 export const updateClerk = async (id, clerk) => {
   const { error } = await supabase.from("clerks").update({
     username:      clerk.username,
-    password_hash: clerk.password,
+    password_hash: isHashed(clerk.password) ? clerk.password : await hashPassword(clerk.password),
     designation:   clerk.designation,
     access:        clerk.access,
     outlet_ids:    Array.isArray(clerk.outlets) ? clerk.outlets : clerk.outlet ? [clerk.outlet] : [],
@@ -128,6 +130,31 @@ export const updateClerk = async (id, clerk) => {
 export const deleteClerk = async (id) => {
   const { error } = await supabase.from("clerks").delete().eq("id", id);
   if (error) console.error("deleteClerk:", error);
+};
+
+// ─── ADMIN ACCOUNTS ─────────────────────────────────────────
+// Replaces the old hardcoded admin/admin123 check. First-run setup:
+// if app_admins has zero rows, the login screen offers to create one.
+export const getAdminCount = async () => {
+  const { count, error } = await supabase
+    .from("app_admins").select("*", { count: "exact", head: true });
+  if (error) { console.error("getAdminCount:", error); return 0; }
+  return count || 0;
+};
+
+export const createAdmin = async (username, password) => {
+  const password_hash = await hashPassword(password);
+  const { error } = await supabase.from("app_admins")
+    .insert({ username: username.trim().toLowerCase(), password_hash });
+  if (error) { console.error("createAdmin:", error); return false; }
+  return true;
+};
+
+export const verifyAdminLogin = async (username, password) => {
+  const { data, error } = await supabase.from("app_admins")
+    .select("*").eq("username", (username || "").trim().toLowerCase()).maybeSingle();
+  if (error || !data) return false;
+  return verifyPassword(password, data.password_hash);
 };
  
 // ─── SUPPLIERS ──────────────────────────────────────────────
@@ -456,26 +483,32 @@ export const addBankEntry = async (outlet, entry) => {
     debit:        entry.debit || 0,
     credit:       entry.credit || 0,
     ref:          entry.ref || "",
+    bank_id:      entry.bankId || null,
+    check_no:     entry.checkNo || "",
     balance_type: entry.type || "",
   });
   if (error) console.error("addBankEntry:", error);
 };
  
-export const getBankBF = async (outlet) => {
-  const { data } = await supabase
-    .from("bank_ledger").select("debit,credit")
+export const getBankBF = async (outlet, bankId) => {
+  let q = supabase.from("bank_ledger").select("debit,credit")
     .eq("outlet_id", outlet).eq("balance_type", "bf");
+  if (bankId) q = q.eq("bank_id", bankId);
+  const { data } = await q;
   if (!data || !data.length) return 0;
   return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
 };
  
-export const setBankBF = async (outlet, amount) => {
-  await supabase.from("bank_ledger")
-    .delete().eq("outlet_id", outlet).eq("balance_type", "bf");
+export const setBankBF = async (outlet, amount, bankId) => {
+  let del = supabase.from("bank_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "bf");
+  if (bankId) del = del.eq("bank_id", bankId);
+  await del;
   await supabase.from("bank_ledger").insert({
     outlet_id: outlet, date: new Date().toISOString().split("T")[0],
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
+    bank_id: bankId || null,
   });
 };
 
@@ -549,7 +582,7 @@ export const settleCardToBank = async (outlet, { date, cardId, bankId, grossAmou
   const { error } = await supabase.from("bank_ledger").insert({
     outlet_id: outlet, date,
     description: description ? `${description} (card settlement)` : "Card settlement",
-    debit: net, credit: 0, ref: bankId || "", balance_type: "",
+    debit: net, credit: 0, bank_id: bankId || null, balance_type: "",
   });
   if (error) console.error("settleCardToBank bank_ledger insert:", error);
 

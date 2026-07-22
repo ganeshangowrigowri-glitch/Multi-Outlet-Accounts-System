@@ -20,7 +20,9 @@ export default function UserManagement({ clerks, setClerks, outlets, toast_ }) {
     const outletArr = Array.isArray(c.outlets)
       ? c.outlets
       : c.outlet ? [c.outlet] : [];
-    setForm({ ...c, outlets: outletArr });
+    // Don't pre-fill the password field with the stored hash — leaving it
+    // blank means "keep the existing password unchanged".
+    setForm({ ...c, password: "", outlets: outletArr });
     setModal(c);
   }
 
@@ -35,7 +37,8 @@ export default function UserManagement({ clerks, setClerks, outlets, toast_ }) {
   }
 
   function saveClerk() {
-    if (!form.username || !form.password) { toast_("Fill username and password", "err"); return; }
+    if (!form.username) { toast_("Fill username", "err"); return; }
+    if (modal === "add" && !form.password) { toast_("Set a password", "err"); return; }
     if (!form.outlets || form.outlets.length === 0) { toast_("Select at least 1 outlet", "err"); return; }
     if (form.outlets.length > 10) { toast_("Maximum 10 outlets allowed", "err"); return; }
 
@@ -44,6 +47,10 @@ export default function UserManagement({ clerks, setClerks, outlets, toast_ }) {
       outlets: form.outlets,
       outlet: form.outlets[0], // keep first outlet as primary for backward compat
     };
+    // Editing with a blank password field = keep the existing hash unchanged.
+    if (modal !== "add" && !form.password) {
+      saveData.password = modal.password_hash;
+    }
 
     if (modal === "add") {
       if (clerks.find(c => c.username.toLowerCase() === form.username.toLowerCase())) {
@@ -141,10 +148,11 @@ export default function UserManagement({ clerks, setClerks, outlets, toast_ }) {
               <input value={form.username} onChange={e=>setForm({...form,username:e.target.value})} placeholder="username"/>
             </div>
             <div className="ff">
-              <label>Password *</label>
+              <label>Password {modal==="add" ? "*" : ""}</label>
               <div className="pww">
                 <input type={showPw?"text":"password"} value={form.password}
-                  onChange={e=>setForm({...form,password:e.target.value})} placeholder="••••••••"/>
+                  onChange={e=>setForm({...form,password:e.target.value})}
+                  placeholder={modal==="add" ? "••••••••" : "Leave blank to keep current password"}/>
                 <button className="pweye" onClick={()=>setShowPw(!showPw)}>
                   {showPw ? I.eyeOff : I.eye}
                 </button>
