@@ -1807,9 +1807,121 @@ function UGBook({ d, outlet, month }) {
 // discount + 18% VAT-on-discount (IDL by default, same as UG Book's
 // mechanic — just at invoice level instead of per-product quantity).
 // ══════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════
+// STOCK SUMMARY — mirrors the Excel "STOCK" sheet: a single month-end
+// snapshot combining item stock value, empty bottle stock, bank
+// balance, cash in hand, and credit outstanding broken down by
+// supplier/category. Reuses the same figures already computed by
+// the report data hook (endStockVal, emptyStockVal, cashBal, bankBal)
+// so this can never drift from the Balance Sheet's numbers.
+// ══════════════════════════════════════════════════════
+function StockSummary({ d, outlet, month }) {
+  const { apInvoices, apPayments } = d;
+
+  // Outstanding credit per supplier (all-time, not just this month —
+  // matches how a real STOCK sheet shows the running creditor balance).
+  const bySupplier = {};
+  (apInvoices || []).forEach(i => {
+    const s = i.supplier_id || i.supplier;
+    if (!s) return;
+    bySupplier[s] = (bySupplier[s] || 0) + (Number(i.amount) || 0);
+  });
+  (apPayments || []).forEach(p => {
+    const s = p.supplier_id || p.supplier;
+    if (!s) return;
+    bySupplier[s] = (bySupplier[s] || 0) - (Number(p.amount) || 0) - (Number(p.discount) || 0);
+  });
+
+  const creditRows = SUPPLIERS_LIST
+    .map(s => ({ name: s.name, id: s.id, balance: bySupplier[s.id] || 0 }))
+    .filter(r => Math.abs(r.balance) > 0.5)
+    .sort((a, b) => b.balance - a.balance);
+
+  const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
+  const totalPosition = d.endStockVal + d.emptyStockVal + d.cashBal + d.bankBal;
+
+  const th = { padding: "8px 12px", fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
+  const td = { padding: "7px 12px", fontSize: 12.5, borderBottom: "1px solid rgba(63,63,70,.15)" };
+  const sectionHead = { padding: "10px 12px", fontSize: 12, fontWeight: 700, background: "var(--s2)", borderBottom: "1px solid var(--bdr)" };
+
+  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
+
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+
+      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>Stock &amp; Position Summary</div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}</div>
+        </div>
+
+        {/* Top summary tiles */}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
+          {[
+            ["Item Stock (at cost)", d.endStockVal],
+            ["Empty Bottle Stock", d.emptyStockVal],
+            ["Cash in Hand", d.cashBal],
+            ["Bank Balance", d.bankBal],
+          ].map(([label, val]) => (
+            <div key={label} style={{ flex: "1 1 160px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10.5, color: "var(--mut)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
+              <div style={{ fontSize: 17, fontWeight: 700, marginTop: 4 }}>Rs.{fmt(val || 0)}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Credit outstanding by supplier */}
+        <div style={sectionHead}>Credit Outstanding by Supplier</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Supplier</th>
+                <th style={{ ...th, textAlign: "right" }}>Outstanding Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {creditRows.length === 0 && (
+                <tr><td colSpan={2} style={{ ...td, textAlign: "center", color: "var(--mut)" }}>No outstanding supplier balances</td></tr>
+              )}
+              {creditRows.map(r => (
+                <tr key={r.id}>
+                  <td style={td}>{r.name}</td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                <td style={{ ...td, fontWeight: 700 }}>Total Credit Outstanding</td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{fmt(totalCredit)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        {/* Overall position */}
+        <div style={sectionHead}>Overall Position</div>
+        <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
+          <span>Total Assets (Stock + Empty + Cash + Bank)</span>
+          <strong style={{ fontFamily: "'JetBrains Mono',monospace" }}>Rs.{fmt(totalPosition)}</strong>
+        </div>
+        <div style={{ padding: "0 16px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
+          <span>Less: Total Credit Outstanding</span>
+          <strong style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(totalCredit)}</strong>
+        </div>
+        <div style={{ padding: "12px 16px", borderTop: "2px solid var(--bdr2,var(--bdr))", display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 700 }}>
+          <span>Net Position</span>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace" }}>Rs.{fmt(totalPosition - totalCredit)}</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId }) {
   const { apInvoices, apPayments } = d;
-  const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
 
   const isSup = raw => (raw || "").trim() === supplierId;
@@ -1964,7 +2076,8 @@ export default function Reports({ user }) {
     { id: "cos",       label: "Cost of Sales Summary", icon: "📦" },
     { id: "emptybott", label: "Empty Bottles",         icon: "🍾" },
     { id: "ugbook",    label: "UG Book",               icon: "📒" },
-    { id: "supledger", label: "Supplier Credit Ledger", icon: "🧾" }
+    { id: "supledger", label: "Supplier Credit Ledger", icon: "🧾" },
+    { id: "stocksum",  label: "Stock Summary",          icon: "📦" }
   ];
 
   const iS  = { width: "100%", padding: "5px 8px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11.5, fontFamily: "'Inter',sans-serif", color: "var(--txt)", outline: "none" };
@@ -2020,6 +2133,7 @@ export default function Reports({ user }) {
             {report==="emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={setSupplierId}/>}
+            {report==="stocksum"  && <StockSummary d={d} outlet={effectiveOutlet} month={month}/>}
           </>
         )}
       </div>
