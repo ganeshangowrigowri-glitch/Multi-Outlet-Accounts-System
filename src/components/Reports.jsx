@@ -178,29 +178,17 @@ const [inv, coa] = await Promise.all([
        // ── Sales Revenue ──
       // Exactly mirrors Current Status totalSaleAmt:
       // For each item: totalBottleSale (opening + purchase + transIn - transOut - endStock) × sellingPrice
-      const lastSaleRecord = [...sales]
-        .filter(s => (s.items||[]).some(r => !r.isEmptyItem))
-        .sort((a,b) => (a.date||"").localeCompare(b.date||""))
-        .pop();
-
-      let totalSalesAmt = 0;
-      if (lastSaleRecord) {
-        (lastSaleRecord.items||[]).filter(r => !r.isEmptyItem).forEach(r => {
-          const item = invMap[r.code] || invMap[r.id];
-          const sp   = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
-          const uc   = Number(item?.unitCost) || Number(r.unitCost) || 0;
-
-          // opening and endStock from the last sale record — same fields Current Status reads
-          const opening     = parseFloat(r.openingStock) || 0;
-          const purchase    = parseFloat(r.purchase)     || 0;
-          const transIn     = parseFloat(r.transferIn)   || 0;
-          const transOut    = parseFloat(r.transferOut)  || 0;
-          const endStockQty = parseFloat(r.endStock)     || 0;
-
-          const totalBottleSale = opening + purchase - endStockQty;
-          totalSalesAmt += totalBottleSale * sp;
-        });
-      }
+      // Sum actual daily "sold" qty × rate across every sale record in the month
+// (mirrors SalesSummary's logic, instead of a single-day stock snapshot)
+let totalSalesAmt = 0;
+sales.forEach(s => {
+  (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
+    const item = invMap[r.code] || invMap[r.id];
+    const sp = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
+    const qty = parseFloat(r.sold) || 0;
+    totalSalesAmt += qty * sp;
+  });
+});
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
       const netSalesAmt  = totalSalesAmt - totalReturns;
 
@@ -1920,8 +1908,9 @@ function StockSummary({ d, outlet, month }) {
   );
 }
 
-function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId }) {
+function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, applyDiscount, setApplyDiscount }) {
   const { apInvoices, apPayments } = d;
+  const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
 
   const isSup = raw => (raw || "").trim() === supplierId;
@@ -1951,8 +1940,8 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId }) {
       const chq       = matchedPayments.map(p => p.ref).filter(Boolean).join(", ");
       const payDate   = matchedPayments[0]?.date || "";
       const amount    = Number(inv.amount) || 0;
-      const sixPctDis = amount * 0.06;
-      const vatDis    = sixPctDis * 0.18;
+      const sixPctDis = applyDiscount ? amount * 0.06 : 0;
+      const vatDis    = applyDiscount ? sixPctDis * 0.18 : 0;
       const outstanding = amount - paid - discount - sixPctDis - vatDis;
       return { invNo, date: inv.date, amount, payDate, paid, chq, sixPctDis, vatDis, outstanding, discount };
     })
@@ -1973,9 +1962,15 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId }) {
   return (
     <div>
       <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
-        <select value={supplierId} onChange={e => setSupplierId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
-          {SUPPLIERS_LIST.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-        </select>
+        <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+          <select value={supplierId} onChange={e => setSupplierId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
+            {SUPPLIERS_LIST.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--mut)", cursor: "pointer" }}>
+            <input type="checkbox" checked={applyDiscount} onChange={e => setApplyDiscount(e.target.checked)} />
+            Apply 6% trade discount + VAT
+          </label>
+        </div>
         <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
       </div>
 
@@ -2055,6 +2050,16 @@ export default function Reports({ user }) {
   const [month,       setMonth]       = useState(today().slice(0, 7));
   const [outletList,  setOutletList]  = useState(OUTLETS);
   const [supplierId,  setSupplierId]  = useState("2004-IDL");
+  // 6% trade discount + VAT-on-discount only genuinely applies to UG and IDL
+  // per the Excel CREDITORS sheet (Beer credit has no such columns at all).
+  // Default it correctly per supplier, but let the user override manually.
+  const DISCOUNT_SUPPLIERS = ["2003-UG", "2004-IDL"];
+  const [applyDiscount, setApplyDiscount] = useState(DISCOUNT_SUPPLIERS.includes("2004-IDL"));
+  const [discountTouched, setDiscountTouched] = useState(false);
+  function handleSupplierChange(id) {
+    setSupplierId(id);
+    if (!discountTouched) setApplyDiscount(DISCOUNT_SUPPLIERS.includes(id));
+  }
 
   const effectiveOutlet = isAdmin ? outlet : userOutlet;
 
@@ -2132,7 +2137,7 @@ export default function Reports({ user }) {
             {report==="cos"       && <CostOfSalesSummary d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
-            {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={setSupplierId}/>}
+            {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={handleSupplierChange} applyDiscount={applyDiscount} setApplyDiscount={val => { setApplyDiscount(val); setDiscountTouched(true); }}/>}
             {report==="stocksum"  && <StockSummary d={d} outlet={effectiveOutlet} month={month}/>}
           </>
         )}
