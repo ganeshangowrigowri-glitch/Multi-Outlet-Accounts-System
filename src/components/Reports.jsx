@@ -178,17 +178,29 @@ const [inv, coa] = await Promise.all([
        // ── Sales Revenue ──
       // Exactly mirrors Current Status totalSaleAmt:
       // For each item: totalBottleSale (opening + purchase + transIn - transOut - endStock) × sellingPrice
-      // Sum actual daily "sold" qty × rate across every sale record in the month
-// (mirrors SalesSummary's logic, instead of a single-day stock snapshot)
-let totalSalesAmt = 0;
-sales.forEach(s => {
-  (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
-    const item = invMap[r.code] || invMap[r.id];
-    const sp = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
-    const qty = parseFloat(r.sold) || 0;
-    totalSalesAmt += qty * sp;
-  });
-});
+      const lastSaleRecord = [...sales]
+        .filter(s => (s.items||[]).some(r => !r.isEmptyItem))
+        .sort((a,b) => (a.date||"").localeCompare(b.date||""))
+        .pop();
+
+      let totalSalesAmt = 0;
+      if (lastSaleRecord) {
+        (lastSaleRecord.items||[]).filter(r => !r.isEmptyItem).forEach(r => {
+          const item = invMap[r.code] || invMap[r.id];
+          const sp   = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
+          const uc   = Number(item?.unitCost) || Number(r.unitCost) || 0;
+
+          // opening and endStock from the last sale record — same fields Current Status reads
+          const opening     = parseFloat(r.openingStock) || 0;
+          const purchase    = parseFloat(r.purchase)     || 0;
+          const transIn     = parseFloat(r.transferIn)   || 0;
+          const transOut    = parseFloat(r.transferOut)  || 0;
+          const endStockQty = parseFloat(r.endStock)     || 0;
+
+          const totalBottleSale = opening + purchase - endStockQty;
+          totalSalesAmt += totalBottleSale * sp;
+        });
+      }
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
       const netSalesAmt  = totalSalesAmt - totalReturns;
 
