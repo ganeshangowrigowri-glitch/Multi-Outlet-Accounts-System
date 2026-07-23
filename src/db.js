@@ -1,6 +1,5 @@
 import { supabase } from "./supabase";
-import { hashPassword, isHashed, verifyPassword } from "./utils/authcrypto";
- 
+import { hashPassword, isHashed } from "./utils/authcrypto"; 
 // ─── OUTLETS ────────────────────────────────────────────────
 const outletLabel = (o) => String(o?.id || o?.name || "").trim();
 
@@ -151,10 +150,34 @@ export const createAdmin = async (username, password) => {
 };
 
 export const verifyAdminLogin = async (username, password) => {
-  const { data, error } = await supabase.from("app_admins")
-    .select("*").eq("username", (username || "").trim().toLowerCase()).maybeSingle();
-  if (error || !data) return false;
-  return verifyPassword(password, data.password_hash);
+  const { data, error } = await supabase.rpc("verify_admin_login", {
+    p_username: username, p_password: password,
+  });
+  if (error) { console.error("verifyAdminLogin:", error); return false; }
+  return !!data;
+};
+
+// Safe outlet lookup for the login dropdown — returns ONLY the
+// outlets for the one username typed, never a password hash and
+// never the whole clerks table.
+export const getUsernameOutlets = async (username) => {
+  if (!username?.trim()) return [];
+  const { data, error } = await supabase.rpc("get_username_outlets", {
+    p_username: username,
+  });
+  if (error) { console.error("getUsernameOutlets:", error); return []; }
+  return data || [];
+};
+
+// Clerk login check runs entirely inside the database — the
+// password hash never crosses the wire, and the comparison never
+// happens in the browser.
+export const verifyClerkLogin = async (username, outlet, password) => {
+  const { data, error } = await supabase.rpc("verify_clerk_login", {
+    p_username: username, p_outlet: outlet, p_password: password,
+  });
+  if (error) { console.error("verifyClerkLogin:", error); return null; }
+  return data || null;
 };
  
 // ─── SUPPLIERS ──────────────────────────────────────────────
@@ -509,6 +532,86 @@ export const setBankBF = async (outlet, amount, bankId) => {
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
     bank_id: bankId || null,
+  });
+};
+
+// ─── CAPITAL LEDGER (partner contributions / drawings) ──────────
+// Mirrors Excel CAPITAL sheet's "BY MR.K.K/K.J/K.M" (contributions)
+// and "TO MR.K.K.Personal/K.J/K.M/Building Owner/Licensee/Manager Loan"
+// (drawings) lines. direction: 'in' = contribution (BY), 'out' = drawing (TO).
+export const getCapitalLedger = async (outlet) => {
+  const { data, error } = await supabase
+    .from("capital_ledger").select("*").eq("outlet_id", outlet).order("date");
+  if (error) { console.error("getCapitalLedger:", error); return []; }
+  return data;
+};
+
+export const addCapitalEntry = async (outlet, entry) => {
+  const { error } = await supabase.from("capital_ledger").insert({
+    outlet_id: outlet,
+    date:      entry.date,
+    party:     entry.party,
+    direction: entry.direction, // 'in' | 'out'
+    amount:    entry.amount || 0,
+    notes:     entry.notes || "",
+  });
+  if (error) console.error("addCapitalEntry:", error);
+};
+
+export const deleteCapitalEntry = async (id) => {
+  const { error } = await supabase.from("capital_ledger").delete().eq("id", id);
+  if (error) console.error("deleteCapitalEntry:", error);
+};
+
+// ─── CRATE LEDGER (plastic & wood crates) ────────────────────────
+// Mirrors Excel's PLASTIC CRATES / WOOD CRATES blocks on the EMPTY PL
+// sheet. One row per (outlet, date, crate_type); balance is computed
+// at read time from B/F + purchase + received − returned − ex − issued − sold − short.
+export const getCrateLedger = async (outlet) => {
+  const { data, error } = await supabase
+    .from("crate_ledger").select("*").eq("outlet_id", outlet).order("date");
+  if (error) { console.error("getCrateLedger:", error); return []; }
+  return data;
+};
+
+// Upsert one day's movement row for a given crate type (date+type is unique).
+export const upsertCrateEntry = async (outlet, entry) => {
+  const { error } = await supabase.from("crate_ledger").upsert({
+    outlet_id:  outlet,
+    date:       entry.date,
+    crate_type: entry.crateType,
+    purchase:   entry.purchase || 0,
+    received:   entry.received || 0,
+    returned:   entry.returned || 0,
+    ex:         entry.ex       || 0,
+    issued:     entry.issued   || 0,
+    sold:       entry.sold     || 0,
+    short:      entry.short    || 0,
+    notes:      entry.notes    || "",
+  }, { onConflict: "outlet_id,date,crate_type" });
+  if (error) console.error("upsertCrateEntry:", error);
+};
+
+export const deleteCrateEntry = async (id) => {
+  const { error } = await supabase.from("crate_ledger").delete().eq("id", id);
+  if (error) console.error("deleteCrateEntry:", error);
+};
+
+export const getCrateBF = async (outlet, crateType) => {
+  const { data } = await supabase
+    .from("crate_ledger").select("bf")
+    .eq("outlet_id", outlet).eq("crate_type", crateType).eq("balance_type", "bf");
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.bf || 0), 0);
+};
+
+export const setCrateBF = async (outlet, crateType, amount) => {
+  await supabase.from("crate_ledger")
+    .delete().eq("outlet_id", outlet).eq("crate_type", crateType).eq("balance_type", "bf");
+  await supabase.from("crate_ledger").insert({
+    outlet_id: outlet, crate_type: crateType,
+    date: "1970-01-01", // fixed sentinel date so BF row never collides with a real day's upsert
+    bf: amount || 0, balance_type: "bf",
   });
 };
 

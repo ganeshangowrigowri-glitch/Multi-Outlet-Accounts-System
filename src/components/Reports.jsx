@@ -10,6 +10,7 @@ import {
   getExpenses,
   getCashLedger,
   getBankLedger,
+  getCapitalLedger,
   getCardLedger,
   getARLedger,
   getAPInvoices,
@@ -135,7 +136,7 @@ for (const o of outlets) {
   const result = await Promise.all([
     getSales(o), getPurchases(o), getReturns(o), getTransfers(o),
     getExpenses(o), getCashLedger(o), getBankLedger(o),
-    getARLedger(o), getAPInvoices(o), getAPPayments(o),
+    getARLedger(o), getAPInvoices(o), getAPPayments(o), getCapitalLedger(o),
   ]);
   arrayResults.push(result);
 }
@@ -156,10 +157,10 @@ const [inv, coa] = await Promise.all([
       };
 
       let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
-      let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[];
+      let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[];
       let cashBF=0, bankBF=0;
 
-      arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay]) => {
+      arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap]) => {
         sales      = [...sales,      ...inMonth(sal)];
         purchases  = [...purchases,  ...inMonth(pur)];
         returns    = [...returns,    ...inMonth(ret)];
@@ -170,6 +171,7 @@ const [inv, coa] = await Promise.all([
         arLedger   = [...arLedger,   ...(ar    || [])];
         apInvoices = [...apInvoices, ...(apInv || [])];
         apPayments = [...apPayments, ...(apPay || [])];
+        capitalLedger = [...capitalLedger, ...inMonth(cap)];
       });
       scalarResults.forEach(([cbf,bbf]) => { cashBF += Number(cbf)||0; bankBF += Number(bbf)||0; });
 
@@ -427,7 +429,18 @@ Object.keys(cosByItem).forEach(code => {
       });
       const empSuppliers=Object.keys(empDailyData);
 
-      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers });
+      // ── Capital Ledger (partner contributions/drawings) ──
+      // Mirrors Excel CAPITAL sheet's BY MR.K.K/K.J/K.M (contributions)
+      // and TO MR.K.K.Personal/K.J/K.M/Building Owner/Licensee/Manager Loan (drawings).
+      const capitalByParty = {};
+      capitalLedger.forEach(e => {
+        const p = e.party || "Other";
+        if (!capitalByParty[p]) capitalByParty[p] = { in: 0, out: 0 };
+        capitalByParty[p][e.direction] += Number(e.amount || 0);
+      });
+      const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
+      const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
+      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -592,11 +605,13 @@ function BalanceSheet({ d, outlet, month }) {
 // CAPITAL SHEET
 // Per PDF: Owner's Capital + Net Profit - Drawings - Commission = Total Capital
 // ══════════════════════════════════════════════════════
-function CapitalSheet({ d, outlet, month }) {
-  const { netProfit, cashBal, bankBal, endStockVal, coaCapital } = d;
+  function CapitalSheet({ d, outlet, month }) {
+  const { netProfit, cashBal, bankBal, endStockVal, coaCapital, capitalByParty = {}, totalCapitalIn = 0, totalCapitalOut = 0 } = d;
   // Capital accounts from COA 3000-3999 (drawings, commission etc.)
   // Net Profit flows in from Income Statement
   const capital = cashBal + bankBal;
+  const parties = Object.keys(capitalByParty);
+  const totalCapital = netProfit + totalCapitalIn - totalCapitalOut;
 
   return (
     <ReportWrap title="Capital Sheet" outlet={outlet} month={month}>
@@ -608,6 +623,21 @@ function CapitalSheet({ d, outlet, month }) {
       ))}
       <TR label="Total Capital" val={netProfit} bold total />
 
+      <SH>Partner Contributions (BY)</SH>
+      {parties.length === 0 && <TR label="No contributions/drawings recorded this period" col2="" indent={1} />}
+      {parties.filter(p => capitalByParty[p].in > 0).map(p => (
+        <TR key={`in-${p}`} label={`BY ${p}`} col2={capitalByParty[p].in} indent={1} />
+      ))}
+      <TR label="Total Contributions" val={totalCapitalIn} bold total />
+
+      <SH>Partner Drawings (TO)</SH>
+      {parties.filter(p => capitalByParty[p].out > 0).map(p => (
+        <TR key={`out-${p}`} label={`TO ${p}`} col2={capitalByParty[p].out} neg indent={1} />
+      ))}
+      <TR label="Total Drawings" val={totalCapitalOut} bold total neg />
+
+      <TR label="Total Capital (Net Profit + Contributions − Drawings)" val={totalCapital} bold total />
+
       <SH>Capital Represented By</SH>
       <TR label="Main Stock Value" col2={endStockVal} indent={1} />
       <TR label="Cash in Hand"    col2={cashBal}      indent={1} />
@@ -617,6 +647,7 @@ function CapitalSheet({ d, outlet, month }) {
       <tr>
         <td colSpan={3} style={{ padding: "10px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
           Note: In the next month, this period's Net Profit is auto-added to Owner's Capital.
+          Enter partner contributions/drawings from the Capital Ledger page (staff nav).
         </td>
       </tr>
     </ReportWrap>

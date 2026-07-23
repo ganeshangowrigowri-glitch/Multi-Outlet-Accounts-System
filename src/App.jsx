@@ -15,16 +15,17 @@ import S_Purchase from "./components/staff/S_Purchase";
 import S_Expenses from "./components/staff/S_Expenses";
 import S_Bank from "./components/staff/S_Bank";
 import S_Card from "./components/staff/S_Card";
+import S_Capital from "./components/staff/S_Capital";
+import S_Crates from "./components/staff/S_Crates";
 import "../src/styles/global.css";
 
 import {
-  getClerks, getCOA,
+  getCOA,
   getCashLedger, addCashEntry, getCashBF, setCashBF,
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin,
+  getUsernameOutlets, verifyClerkLogin,
 } from "./db";
-import { verifyPassword } from "./utils/authcrypto";
-
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
 
 // ═══════════════════════════════════════════
@@ -35,7 +36,7 @@ function LoginScreen({ onLogin }) {
   const [form,     setForm]   = useState({ outlet:"", username:"", password:"" });
   const [showPw,   setShowPw] = useState(false);
   const [err,      setErr]    = useState("");
-  const [clerks,   setClerks] = useState([]);
+  const [clerkOutlets, setClerkOutlets] = useState([]);
   const [loading,  setLoading] = useState(false);
 
   // First-run setup: if no admin account exists yet, offer to create one
@@ -46,7 +47,6 @@ function LoginScreen({ onLogin }) {
   const [bsLoading, setBsLoading] = useState(false);
 
   useEffect(() => {
-    getClerks().then(setClerks);
     getAdminCount().then(n => setNeedsBootstrap(n === 0));
   }, []);
 
@@ -63,14 +63,7 @@ function LoginScreen({ onLogin }) {
     else setBsErr("Could not create admin account — check your connection and try again.");
   }
 
-  const getClerkOutlets = () => {
-    const u = (form.username||"").trim().toLowerCase();
-    const c = clerks.find(x => x.username.toLowerCase() === u);
-    if (!c) return [];
-    return Array.isArray(c.outlets) ? c.outlets : c.outlet ? [c.outlet] : [];
-  };
-
-  async function submit() {
+ async function submit() {
     setErr("");
     setLoading(true);
     const u = (form.username||"").trim().toLowerCase();
@@ -81,12 +74,8 @@ function LoginScreen({ onLogin }) {
       else setErr("Wrong username or password.");
     } else {
       if (!form.outlet) { setErr("Select your outlet first."); setLoading(false); return; }
-      const c = clerks.find(x => {
-        const outletList = Array.isArray(x.outlets) ? x.outlets : x.outlet ? [x.outlet] : [];
-        return x.username.toLowerCase()===u && outletList.includes(form.outlet);
-      });
-      const passOk = c ? await verifyPassword(p, c.password_hash) : false;
-      if (c && passOk) onLogin({ role:"staff", ...c, outlet: form.outlet });
+      const clerk = await verifyClerkLogin(u, form.outlet, p);
+      if (clerk) onLogin({ role:"staff", ...clerk });
       else setErr("No match. Check outlet, username and password.");
     }
     setLoading(false);
@@ -94,9 +83,11 @@ function LoginScreen({ onLogin }) {
 
   function handleUsernameChange(val) {
     setForm({ ...form, username: val, outlet: "" });
+    setClerkOutlets([]);
+    const u = val.trim();
+    if (u) getUsernameOutlets(u).then(setClerkOutlets);
   }
 
-  const clerkOutlets = tab === "staff" ? getClerkOutlets() : [];
 
   if (needsBootstrap === null) {
     return <div className="lwrap"><div className="lcard"><p style={{textAlign:"center",padding:20}}>Loading…</p></div></div>;
@@ -383,6 +374,8 @@ function StaffPortal({ user, onLogout }) {
     { id:"cash",    label:"In Hand Cash",         icon:I.cash },
     { id:"bank",    label:"Bank",                 icon:I.bank },
     { id:"card",    label:"Card Settlement",      icon:I.bank },
+    { id:"capital", label:"Capital Ledger",       icon:I.users },
+    { id:"crates",  label:"Crate Ledger",         icon:I.pkg },
     { id:"reports", label:"Reports",              icon:I.print},
     { id:"coa",     label:"Chart of Accounts",    icon:I.coa  },
   ];
@@ -477,6 +470,8 @@ function StaffPortal({ user, onLogout }) {
           {page==="cash" && <S_Cash outlet={outlet} toast_={toast_}/>}
           {page==="bank" && <S_Bank outlet={outlet} toast_={toast_}/>}
           {page==="card" && <S_Card outlet={outlet} toast_={toast_}/>}
+          {page==="capital" && <S_Capital outlet={outlet} toast_={toast_}/>}
+          {page==="crates" && <S_Crates outlet={outlet} toast_={toast_}/>}
           {page==="coa"  && <ChartOfAccounts user={user}/>}
           {page==="reports" && <Reports user={user}/>}
         </div>
