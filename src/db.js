@@ -148,6 +148,11 @@ export const createAdmin = async (username, password) => {
   if (error) { console.error("createAdmin:", error); return false; }
   return true;
 };
+export const signInAdminAuth = async (email, password) => {
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) return null;
+  return data.session;
+};
 
 export const verifyAdminLogin = async (username, password) => {
   const { data, error } = await supabase.rpc("verify_admin_login", {

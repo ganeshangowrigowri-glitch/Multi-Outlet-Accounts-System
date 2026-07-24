@@ -23,7 +23,7 @@ import {
   getCOA,
   getCashLedger, addCashEntry, getCashBF, setCashBF,
   addGLEntry, getGL,
-  getAdminCount, createAdmin, verifyAdminLogin,
+  getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
   getUsernameOutlets, verifyClerkLogin,
 } from "./db";
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -68,10 +68,20 @@ function LoginScreen({ onLogin }) {
     setLoading(true);
     const u = (form.username||"").trim().toLowerCase();
     const p = (form.password||"").trim();
-    if (tab === "admin") {
-      const ok = await verifyAdminLogin(u, p);
-      if (ok) onLogin({ role:"admin", username:u });
-      else setErr("Wrong username or password.");
+     if (tab === "admin") {
+      // Try real Supabase Auth first — succeeds only for admins already
+      // migrated via scripts/migrate-admin-to-auth.mjs. This is what
+      // finally gives the app a genuine auth.uid() session.
+      const authEmail = `${u}@internal.myaccounts.local`;
+      const session = await signInAdminAuth(authEmail, p);
+      if (session) {
+        onLogin({ role:"admin", username:u, authUserId: session.user.id });
+      } else {
+        // Fallback for admins not yet migrated — same check as before.
+        const ok = await verifyAdminLogin(u, p);
+        if (ok) onLogin({ role:"admin", username:u });
+        else setErr("Wrong username or password.");
+      }
     } else {
       if (!form.outlet) { setErr("Select your outlet first."); setLoading(false); return; }
       const clerk = await verifyClerkLogin(u, form.outlet, p);
