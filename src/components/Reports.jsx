@@ -157,10 +157,10 @@ const [inv, coa] = await Promise.all([
       };
 
       let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
-      let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[];
+      let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[], crateLedgerAll=[];
       let cashBF=0, bankBF=0;
 
-      arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap]) => {
+      arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crt]) => {
         sales      = [...sales,      ...inMonth(sal)];
         purchases  = [...purchases,  ...inMonth(pur)];
         returns    = [...returns,    ...inMonth(ret)];
@@ -172,6 +172,7 @@ const [inv, coa] = await Promise.all([
         apInvoices = [...apInvoices, ...(apInv || [])];
         apPayments = [...apPayments, ...(apPay || [])];
         capitalLedger = [...capitalLedger, ...inMonth(cap)];
+        crateLedgerAll = [...crateLedgerAll, ...(crt || [])];
       });
       scalarResults.forEach(([cbf,bbf]) => { cashBF += Number(cbf)||0; bankBF += Number(bbf)||0; });
 
@@ -263,6 +264,7 @@ const [inv, coa] = await Promise.all([
       // Mirrors Current Status: lastEndStock = r.endStock from last sale record on mEnd date
       let endStockVal=0;
       const endStockByCode={};
+      const stockValBySupplier={};
       const salesSorted = [...sales]
         .filter(s => (s.items||[]).some(r => !r.isEmptyItem))
         .sort((a,b) => (b.date||"").localeCompare(a.date||""));
@@ -303,6 +305,7 @@ const [inv, coa] = await Promise.all([
         if (q > 0 && uc > 0) {
           endStockVal += q * uc;
           endStockByCode[code] = { name: r.name || item?.name || code, qty: q, unitCost: uc };
+          if (r.supplier) stockValBySupplier[r.supplier] = (stockValBySupplier[r.supplier] || 0) + q * uc;
         }
       });
 
@@ -428,7 +431,10 @@ Object.keys(cosByItem).forEach(code => {
         });
       });
       const empSuppliers=Object.keys(empDailyData);
-
+      // crateLedgerAll is already accumulated above (all-time, not month-filtered,
+      // since we need the cumulative balance as of period-end for the crate
+      // section in Stock Summary — no cost/rate data exists for crates, so
+      // it stays quantity-only and doesn't feed into the monetary Net Position).
       // ── Capital Ledger (partner contributions/drawings) ──
       // Mirrors Excel CAPITAL sheet's BY MR.K.K/K.J/K.M (contributions)
       // and TO MR.K.K.Personal/K.J/K.M/Building Owner/Licensee/Manager Loan (drawings).
@@ -440,7 +446,7 @@ Object.keys(cosByItem).forEach(code => {
       });
       const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut });
+      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay,sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, stockValBySupplier });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -1846,8 +1852,39 @@ function UGBook({ d, outlet, month }) {
 // the report data hook (endStockVal, emptyStockVal, cashBal, bankBal)
 // so this can never drift from the Balance Sheet's numbers.
 // ══════════════════════════════════════════════════════
-function StockSummary({ d, outlet, month }) {
-  const { apInvoices, apPayments } = d;
+ const CRATE_TYPE_LABELS = {
+  plastic_wh:    "Plastic — W/H",
+  plastic_ug:    "Plastic — UG",
+  plastic_toddy: "Plastic — Toddy",
+  plastic_beer:  "Plastic — Beer",
+  wood_ugn:      "Wood — UG N",
+  wood_q:        "Wood — Q",
+  wood_p:        "Wood — P",
+  wood_n:        "Wood — N",
+};
+
+ function StockSummary({ d, outlet, month }) {
+  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {} } = d;
+
+  // Crate balances as of period-end — quantity only, no cost basis
+  // exists for crates in the Excel model, so this is informational
+  // and does NOT feed into the monetary Net Position total below.
+  const mEndCrate = monthEnd(month);
+  const crateBalances = {};
+  Object.keys(CRATE_TYPE_LABELS).forEach(t => { crateBalances[t] = 0; });
+  crateLedgerAll
+    .filter(e => !mEndCrate || e.date <= mEndCrate)
+    .forEach(e => {
+      const t = e.crate_type;
+      if (!(t in crateBalances)) return;
+      crateBalances[t] += Number(e.bf || 0)
+        + Number(e.purchase||0) + Number(e.received||0)
+        - Number(e.returned||0) - Number(e.ex||0)
+        - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0);
+    });
+  const crateRows = Object.keys(CRATE_TYPE_LABELS)
+    .map(t => ({ type: t, label: CRATE_TYPE_LABELS[t], balance: crateBalances[t] }))
+    .filter(r => r.balance !== 0);
 
   // Outstanding credit per supplier (all-time, not just this month —
   // matches how a real STOCK sheet shows the running creditor balance).
@@ -1870,6 +1907,18 @@ function StockSummary({ d, outlet, month }) {
 
   const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
   const totalPosition = d.endStockVal + d.emptyStockVal + d.cashBal + d.bankBal;
+
+  // Supplier Stock vs Credit — mirrors the Excel STOCK sheet's "CREDIT"
+  // block: per supplier, compares stock value (at cost) currently held
+  // from that supplier against the outstanding credit owed to them, and
+  // labels which side is higher (P/STOCK HIGH vs CREDIT HIGH).
+  const stockVsCreditRows = SUPPLIERS_LIST
+    .map(s => {
+      const stockVal = stockValBySupplier[s.id] || 0;
+      const creditVal = bySupplier[s.id] || 0;
+      return { name: s.name, id: s.id, stockVal, creditVal, label: stockVal >= creditVal ? "P/STOCK HIGH" : "CREDIT HIGH" };
+    })
+    .filter(r => Math.abs(r.stockVal) > 0.5 || Math.abs(r.creditVal) > 0.5);
 
   const th = { padding: "8px 12px", fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
   const td = { padding: "7px 12px", fontSize: 12.5, borderBottom: "1px solid rgba(63,63,70,.15)" };
@@ -1930,6 +1979,64 @@ function StockSummary({ d, outlet, month }) {
               </tr>
             </tbody>
           </table>
+        </div>
+
+       {/* Supplier stock value vs credit outstanding — mirrors Excel's CREDIT block */}
+        <div style={sectionHead}>Supplier Stock vs Credit</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Supplier</th>
+                <th style={{ ...th, textAlign: "left" }}>Status</th>
+                <th style={{ ...th, textAlign: "right" }}>Stock Value (at cost)</th>
+                <th style={{ ...th, textAlign: "right" }}>Credit Outstanding</th>
+              </tr>
+            </thead>
+            <tbody>
+              {stockVsCreditRows.length === 0 && (
+                <tr><td colSpan={4} style={{ ...td, textAlign: "center", color: "var(--mut)" }}>No supplier stock or credit balances</td></tr>
+              )}
+              {stockVsCreditRows.map(r => (
+                <tr key={r.id}>
+                  <td style={td}>{r.name}</td>
+                  <td style={{ ...td, color: r.label === "P/STOCK HIGH" ? "var(--green,#4ade80)" : "var(--red,#f87171)", fontWeight: 600 }}>{r.label}</td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.stockVal)}</td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.creditVal)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ padding: "6px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
+            P/STOCK HIGH = stock value from this supplier exceeds what's owed to them. CREDIT HIGH = the reverse.
+          </div>
+        </div>
+
+        {/* Crate balances — quantity only, informational */}
+        <div style={sectionHead}>Crate Balances (Empty Containers)</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Crate Type</th>
+                <th style={{ ...th, textAlign: "right" }}>Balance (Qty)</th>
+              </tr>
+            </thead>
+            <tbody>
+              {crateRows.length === 0 && (
+                <tr><td colSpan={2} style={{ ...td, textAlign: "center", color: "var(--mut)" }}>No crate balances recorded</td></tr>
+              )}
+              {crateRows.map(r => (
+                <tr key={r.type}>
+                  <td style={td}>{r.label}</td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ padding: "6px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
+            Quantity only — no cost value is tracked for crates, so this is not included in Net Position below.
+          </div>
         </div>
 
         {/* Overall position */}
