@@ -18,13 +18,14 @@ import S_Card from "./components/staff/S_Card";
 import S_Capital from "./components/staff/S_Capital";
 import S_Crates from "./components/staff/S_Crates";
 import "../src/styles/global.css";
+import { supabase } from "./supabase";
 
 import {
   getCOA,
   getCashLedger, addCashEntry, getCashBF, setCashBF,
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
-  getUsernameOutlets, verifyClerkLogin,
+  getUsernameOutlets, verifyClerkLogin, signInClerkAuth,
 } from "./db";
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
 
@@ -84,9 +85,36 @@ function LoginScreen({ onLogin }) {
       }
     } else {
       if (!form.outlet) { setErr("Select your outlet first."); setLoading(false); return; }
-      const clerk = await verifyClerkLogin(u, form.outlet, p);
-      if (clerk) onLogin({ role:"staff", ...clerk });
-      else setErr("No match. Check outlet, username and password.");
+
+      // Try real Supabase Auth first — succeeds only for clerks already
+      // migrated via scripts/migrate-clerk-to-auth.mjs.
+      const authEmail = `${u}@internal.myaccounts.local`;
+      const session = await signInClerkAuth(authEmail, p);
+      if (session) {
+        const meta = session.user.user_metadata || {};
+        const outlets = meta.outlets || [];
+        if (outlets.includes(form.outlet)) {
+          onLogin({
+            role: "staff",
+            username: meta.username || u,
+            designation: meta.designation,
+            access: meta.access,
+            outlets,
+            outlet: form.outlet,
+            authUserId: session.user.id,
+          });
+        } else {
+          // Real credentials, but this outlet isn't theirs — reject and
+          // sign out so no stray session lingers.
+          await supabase.auth.signOut();
+          setErr("No match. Check outlet, username and password.");
+        }
+      } else {
+        // Fallback for clerks not yet migrated — same check as before.
+        const clerk = await verifyClerkLogin(u, form.outlet, p);
+        if (clerk) onLogin({ role:"staff", ...clerk });
+        else setErr("No match. Check outlet, username and password.");
+      }
     }
     setLoading(false);
   }

@@ -174,9 +174,13 @@ export const getUsernameOutlets = async (username) => {
   return data || [];
 };
 
-// Clerk login check runs entirely inside the database — the
-// password hash never crosses the wire, and the comparison never
-// happens in the browser.
+
+export const signInClerkAuth = async (email, password) => {
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error) return null;
+  return data.session;
+};
+
 export const verifyClerkLogin = async (username, outlet, password) => {
   const { data, error } = await supabase.rpc("verify_clerk_login", {
     p_username: username, p_outlet: outlet, p_password: password,
