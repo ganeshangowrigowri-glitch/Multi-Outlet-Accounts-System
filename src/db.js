@@ -175,12 +175,30 @@ export const getUsernameOutlets = async (username) => {
 };
 
 
+// Real Supabase Auth sign-in for clerks — succeeds only for clerks
+// already migrated via scripts/migrate-clerk-to-auth.mjs. This is
+// what gives the app a genuine auth.uid() session for staff, same
+// as signInAdminAuth does for admins.
 export const signInClerkAuth = async (email, password) => {
   const { data, error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) return null;
   return data.session;
 };
 
+// Profile lookup for an already-authenticated clerk (real Auth session
+// already proved the password) — no password check here, so this stays
+// safe to call even after Phase 5 retires password_hash entirely.
+export const getClerkProfile = async (username, outlet) => {
+  const { data, error } = await supabase.rpc("get_clerk_profile", {
+    p_username: username, p_outlet: outlet,
+  });
+  if (error) { console.error("getClerkProfile:", error); return null; }
+  return data || null;
+};
+
+// Clerk login check runs entirely inside the database — the
+// password hash never crosses the wire, and the comparison never
+// happens in the browser.
 export const verifyClerkLogin = async (username, outlet, password) => {
   const { data, error } = await supabase.rpc("verify_clerk_login", {
     p_username: username, p_outlet: outlet, p_password: password,

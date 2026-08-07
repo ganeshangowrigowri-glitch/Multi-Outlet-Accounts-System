@@ -25,7 +25,7 @@ import {
   getCashLedger, addCashEntry, getCashBF, setCashBF,
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
-  getUsernameOutlets, verifyClerkLogin, signInClerkAuth,
+  getUsernameOutlets, verifyClerkLogin, signInClerkAuth, getClerkProfile,
 } from "./db";
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
 
@@ -70,52 +70,37 @@ function LoginScreen({ onLogin }) {
     const u = (form.username||"").trim().toLowerCase();
     const p = (form.password||"").trim();
      if (tab === "admin") {
-      // Try real Supabase Auth first — succeeds only for admins already
-      // migrated via scripts/migrate-admin-to-auth.mjs. This is what
-      // finally gives the app a genuine auth.uid() session.
+      
       const authEmail = `${u}@internal.myaccounts.local`;
       const session = await signInAdminAuth(authEmail, p);
       if (session) {
         onLogin({ role:"admin", username:u, authUserId: session.user.id });
       } else {
-        // Fallback for admins not yet migrated — same check as before.
+        
         const ok = await verifyAdminLogin(u, p);
         if (ok) onLogin({ role:"admin", username:u });
         else setErr("Wrong username or password.");
       }
-    } else {
+      } else {
       if (!form.outlet) { setErr("Select your outlet first."); setLoading(false); return; }
-
-      // Try real Supabase Auth first — succeeds only for clerks already
-      // migrated via scripts/migrate-clerk-to-auth.mjs.
       const authEmail = `${u}@internal.myaccounts.local`;
       const session = await signInClerkAuth(authEmail, p);
       if (session) {
-        const meta = session.user.user_metadata || {};
-        const outlets = meta.outlets || [];
-        if (outlets.includes(form.outlet)) {
-          onLogin({
-            role: "staff",
-            username: meta.username || u,
-            designation: meta.designation,
-            access: meta.access,
-            outlets,
-            outlet: form.outlet,
-            authUserId: session.user.id,
-          });
+        const profile = await getClerkProfile(u, form.outlet);
+        if (profile) {
+          onLogin({ role:"staff", ...profile, authUserId: session.user.id });
         } else {
-          // Real credentials, but this outlet isn't theirs — reject and
-          // sign out so no stray session lingers.
-          await supabase.auth.signOut();
-          setErr("No match. Check outlet, username and password.");
+          setErr("Signed in, but no profile found for that outlet. Contact admin.");
         }
       } else {
-        // Fallback for clerks not yet migrated — same check as before.
         const clerk = await verifyClerkLogin(u, form.outlet, p);
         if (clerk) onLogin({ role:"staff", ...clerk });
         else setErr("No match. Check outlet, username and password.");
       }
     }
+
+      
+  
     setLoading(false);
   }
 
