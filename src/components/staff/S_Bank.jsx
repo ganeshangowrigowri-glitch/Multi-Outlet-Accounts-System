@@ -7,7 +7,7 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
-import { getBankLedger, getBankBF } from "../../db";
+import { getBankLedger, getBankBF, addBankEntry } from "../../db";
 
 
 
@@ -49,16 +49,17 @@ useEffect(() => {
     <div>
       {/* ── Tab Bar ── */}
       <div className="stabs no-print" style={{ marginBottom: 16 }}>
-        {[ "Payment History", "Bank Ledger" ].map((t, i) => (
+        {[ "Payment History", "Bank Deposit", "Bank Ledger" ].map((t, i) => (
           <button key={i} className={`stab ${tab === i ? "act" : ""}`} onClick={() => setTab(i)}>
-            {[ I.ap, I.bank ][i]} {t}
+            {[ I.ap, I.bank, I.bank ][i]} {t}
           </button>
         ))}
       </div>
 
       
       {tab === 0 && <PaymentHistory outlet={outlet} />}
-      {tab === 1 && <BankLedgerView outlet={outlet} outletBanks={outletBanks} />}
+      {tab === 1 && <BankDepositForm outlet={outlet} outletBanks={outletBanks} toast_={toast_} />}
+      {tab === 2 && <BankLedgerView outlet={outlet} outletBanks={outletBanks} />}
     </div>
   );
 }
@@ -444,6 +445,100 @@ function MyEntries({ outlet, outletBanks, toast_ }) {
   );
 }
 
+// ════════════════════════════════════════════════════════════
+// TAB 1 — Bank Deposit. Writes straight to bank_ledger with
+// debit = amount, so it lands on the Credit (Cash In) side of
+// the Bank Ledger and the running balance updates automatically.
+// No card fields here — deliberately separate from Card Settlement.
+// ════════════════════════════════════════════════════════════
+function BankDepositForm({ outlet, outletBanks, toast_ }) {
+  const [date, setDate] = useState(today());
+  const [bankId, setBankId] = useState(outletBanks[0]?.id || "");
+  const [amount, setAmount] = useState("");
+  const [description, setDescription] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (outletBanks.length && !bankId) setBankId(outletBanks[0].id);
+  }, [outletBanks]);
+
+  async function save() {
+    if (!bankId) { toast_("Select a bank account", "err"); return; }
+    const amt = parseFloat(amount);
+    if (!amt || amt <= 0) { toast_("Enter a valid amount", "err"); return; }
+    setSaving(true);
+    const ok = await addBankEntry(outlet, {
+      date, bankId,
+      description: description || "Bank deposit",
+      debit: amt,   // displays under Credit (Cash In) per BankLedgerView's convention
+      credit: 0,
+    });
+    setSaving(false);
+    if (ok) {
+      toast_("Deposit recorded ✓");
+      setAmount(""); setDescription("");
+    } else {
+      toast_("Failed to save — check connection", "err");
+    }
+  }
+
+  const selectedBank = outletBanks.find(b => b.id === bankId);
+
+  return (
+    <div className="card">
+      <div className="chd"><h3>Bank Deposit</h3><p>{outlet}</p></div>
+      <div style={{ padding: 14 }}>
+        {outletBanks.length === 0 ? (
+          <div style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>
+            No bank accounts assigned to this outlet yet — ask your admin to add one in Bank Master.
+          </div>
+        ) : (
+          <>
+            <div className="fg">
+              <div className="ff">
+                <label>Date *</label>
+                <input type="date" value={date} onChange={e => setDate(e.target.value)} />
+              </div>
+              <div className="ff">
+                <label>Bank Account *</label>
+                <select value={bankId} onChange={e => setBankId(e.target.value)}>
+                  {outletBanks.map(b => (
+                    <option key={b.id} value={b.id}>{b.bank} — {b.account_no || b.accountNo}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="ff">
+                <label>Amount (Rs.) *</label>
+                <input type="number" placeholder="0.00" value={amount} onChange={e => setAmount(e.target.value)} />
+              </div>
+              <div className="ff" style={{ gridColumn: "1 / -1" }}>
+                <label>Description</label>
+                <input placeholder="e.g. Daily cash banking" value={description} onChange={e => setDescription(e.target.value)} />
+              </div>
+            </div>
+
+            {selectedBank && (
+              <div style={{ background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "10px 14px", marginTop: 10, fontSize: 12 }}>
+                <span style={{ color: "var(--mut)" }}>Depositing into:</span>{" "}
+                <strong>{selectedBank.bank} — {selectedBank.account_no || selectedBank.accountNo}</strong>
+              </div>
+            )}
+
+            <div style={{ marginTop: 14 }}>
+              <button className="btn btng" onClick={save} disabled={saving}>
+                {I.check} {saving ? "Saving…" : "Save Deposit"}
+              </button>
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--mut)", marginTop: 10 }}>
+              This only records money going into the bank. It appears on the Credit (Cash In) side of the
+              Bank Ledger and updates the running balance automatically.
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
 // ════════════════════════════════════════════════════════════
 // TAB — Bank Ledger (real Supabase data: deposits, withdrawals,
 // AP invoice payments, expense payments, card settlements — anything

@@ -538,6 +538,7 @@ export const addBankEntry = async (outlet, entry) => {
     balance_type: entry.type || "",
   });
   if (error) console.error("addBankEntry:", error);
+  return !error;
 };
  
 export const getBankBF = async (outlet, bankId) => {
@@ -660,9 +661,12 @@ export const addCardEntry = async (outlet, entry) => {
     date:         entry.date,
     card_id:      entry.cardId || null,
     description:  entry.description || "",
-    txn_type:     entry.txnType || "sale",   // sale | settlement | fee | adjustment
-    debit:        entry.debit || 0,           // increases pending receivable (card sale)
-    credit:       entry.credit || 0,          // decreases pending receivable (settlement / fee)
+    txn_type:     entry.txnType || "sale",
+    debit:        entry.debit || 0,
+    credit:       entry.credit || 0,          // gross amount collected
+    fee_pct:      entry.feePct || 0,          // admin's rate at time of entry
+    interest:     entry.interest || 0,        // interest/commission actually deducted
+    net:          entry.net ?? (Number(entry.credit || 0) - Number(entry.interest || 0)),
     ref:          entry.ref || "",
     balance_type: entry.type || "",
   });
@@ -688,36 +692,10 @@ export const setCardBF = async (outlet, amount) => {
   });
 };
 
-// One settlement = money leaves the card receivable AND lands in a real
-// bank account, net of the merchant discount fee. Writes both ledgers
-// atomically-ish (sequential inserts) so Bank and Card stay reconciled.
-export const settleCardToBank = async (outlet, { date, cardId, bankId, grossAmount, feePct, description }) => {
-  const fee = Math.round(grossAmount * (Number(feePct) || 0) / 100 * 100) / 100;
-  const net = grossAmount - fee;
-
-  await supabase.from("card_ledger").insert({
-    outlet_id: outlet, date, card_id: cardId,
-    description: description || "Settlement to bank",
-    txn_type: "settlement", debit: 0, credit: grossAmount,
-  });
-
-  if (fee > 0) {
-    await supabase.from("card_ledger").insert({
-      outlet_id: outlet, date, card_id: cardId,
-      description: "Merchant discount fee", txn_type: "fee", debit: 0, credit: 0,
-      ref: `fee:${fee}`, // informational; fee already netted out of settlement above
-    });
-  }
-
-  const { error } = await supabase.from("bank_ledger").insert({
-    outlet_id: outlet, date,
-    description: description ? `${description} (card settlement)` : "Card settlement",
-    debit: net, credit: 0, bank_id: bankId || null, balance_type: "",
-  });
-  if (error) console.error("settleCardToBank bank_ledger insert:", error);
-
-  return { fee, net };
-};
+// REMOVED — this is what wrote card settlement/fee rows into bank_ledger,
+// which caused card details to leak onto the Bank page. Card Settlement
+// and Bank Deposit are now fully independent: addCardEntry writes only
+// to card_ledger, addBankEntry writes only to bank_ledger.
  
 // ─── GENERAL LEDGER ──────────────────────────────────────────
 export const getGL = async (outlet) => {
