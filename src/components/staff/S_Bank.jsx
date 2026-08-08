@@ -7,7 +7,7 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
-import { getBankLedger, getBankBF, addBankEntry } from "../../db";
+import { getBankLedger, getBankBF, getBankBFDate, setBankBF, addBankEntry } from "../../db";
 import { printLedger } from "../../utils/printLedger";
 
 
@@ -545,7 +545,7 @@ function BankDepositForm({ outlet, outletBanks, toast_ }) {
 // AP invoice payments, expense payments, card settlements — anything
 // that actually reached bank_ledger). Running balance shown per row.
 // ════════════════════════════════════════════════════════════
-function BankLedgerView({ outlet, outletBanks }) {
+ function BankLedgerView({ outlet, outletBanks }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [from, setFrom] = useState("");
@@ -566,9 +566,18 @@ function BankLedgerView({ outlet, outletBanks }) {
 
   // Balance B/F = opening balance set for this account + everything dated before the "From" filter
   const [openingBF, setOpeningBF] = useState(0);
+  const [bfDate, setBFD] = useState(today());
   useEffect(() => {
-    if (bankId) getBankBF(outlet, bankId).then(setOpeningBF);
+    if (bankId) {
+      getBankBF(outlet, bankId).then(setOpeningBF);
+      getBankBFDate(outlet, bankId).then(d => setBFD(d || today()));
+    }
   }, [outlet, bankId]);
+
+  async function saveBF() {
+    if (!bankId) return;
+    await setBankBF(outlet, parseFloat(openingBF) || 0, bankId, bfDate);
+  }
 
   const before = from ? bankEntries.filter(e => e.date < from) : [];
   const bf = openingBF + before.reduce((a, e) => a + Number(e.debit || 0) - Number(e.credit || 0), 0);
@@ -611,6 +620,20 @@ function BankLedgerView({ outlet, outletBanks }) {
           </button>
         )}
       </div>
+
+            {outletBanks.length > 0 && (
+        <div className="no-print" style={{ padding: "12px 14px 0", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+            <label>Opening Balance Date</label>
+            <input type="date" value={bfDate} onChange={e => setBFD(e.target.value)} />
+          </div>
+          <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+            <label>Balance B/F (Rs.)</label>
+            <input type="number" value={openingBF} onChange={e => setOpeningBF(e.target.value)} />
+          </div>
+          <button className="btn btnd btnsm" onClick={saveBF}>{I.check} Set</button>
+        </div>
+      )}
 
       <div className="no-print" style={{ padding: "12px 14px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
         <div className="ff" style={{ minWidth: 160 }}>
@@ -659,10 +682,9 @@ function BankLedgerView({ outlet, outletBanks }) {
               </thead>
               <tbody>
                 <tr className="ledger-bf-row" style={{ background: "var(--s2)" }}>
-                  <td style={td} colSpan={5}><strong>Balance B/F</strong></td>
+                  <td style={td} colSpan={5}><strong>Balance B/F</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({bfDate})</span></td>
                   <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(bf)}</td>
                 </tr>
-
                 {loading && <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
                 {!loading && period.length === 0 && (
                   <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>

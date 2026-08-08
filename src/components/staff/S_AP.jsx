@@ -113,6 +113,7 @@ await addAPPayment(outlet, {
   if (pf.payType === "Bank") {
     await addBankEntry(outlet, {
       date: pf.date,
+      bankId: pf.bankId,
       description: `AP Payment ${pf.supId} ${pf.invNo}`,
       type: "out", debit: 0, credit: pa,
     });

@@ -14,7 +14,7 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
-import { getCardLedger, addCardEntry } from "../../db";
+import { getCardLedger, addCardEntry, getCardBF, getCardBFDate, setCardBF } from "../../db";
 import { printLedger } from "../../utils/printLedger";
 
 // ════════════════════════════════════════════════════════════
@@ -162,7 +162,13 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
 function LedgerView({ outlet, cardAccounts }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filterCard, setFilterCard] = useState("");
+  const [cardId, setCardId] = useState(cardAccounts[0]?.id || "");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+
+  useEffect(() => {
+    if (cardAccounts.length && !cardId) setCardId(cardAccounts[0].id);
+  }, [cardAccounts]);
 
   useEffect(() => {
     setLoading(true);
@@ -174,21 +180,49 @@ function LedgerView({ outlet, cardAccounts }) {
     return c ? `${c.bank} — ${c.account_no || c.accountNo}` : "—";
   };
 
-  const filtered = filterCard ? entries.filter(e => e.card_id === filterCard) : entries;
-  const sorted = [...filtered].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  // Entries for the selected card account (or all, when "All Card Accounts" is chosen)
+  const cardEntries = entries.filter(e =>
+    (!cardId || e.card_id === cardId) && e.balance_type !== "bf"
+  );
 
-  // Pending/running balance per card = sum(net) - sum(debit), matching
-  // Excel's E = E_prev + (Credit * (1 - fee%)) - Debit
+  // Balance B/F = opening balance set for this account (or combined, if "All") +
+  // everything dated before the "From" filter — same pattern as the Bank Ledger.
+  const [openingBF, setOpeningBF] = useState(0);
+  const [bfDate, setBFD] = useState(today());
+  useEffect(() => {
+    getCardBF(outlet, cardId || undefined).then(setOpeningBF);
+    getCardBFDate(outlet, cardId || undefined).then(d => setBFD(d || today()));
+  }, [outlet, cardId]);
+
+  async function saveBF() {
+    await setCardBF(outlet, parseFloat(openingBF) || 0, cardId || undefined, bfDate);
+  }
+
+  const netOf = e => Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
+
+  const before = from ? cardEntries.filter(e => e.date < from) : [];
+  const bf = openingBF + before.reduce((a, e) => a + netOf(e) - Number(e.debit || 0), 0);
+
+  const period = cardEntries
+    .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  const totalDebit    = period.reduce((a, e) => a + Number(e.debit || 0), 0);
+  const totalCredit   = period.reduce((a, e) => a + Number(e.credit || 0), 0);
+  const totalInterest = period.reduce((a, e) => a + Number(e.interest || 0), 0);
+  const totalNet      = period.reduce((a, e) => a + netOf(e), 0);
+  const cd = bf + totalNet - totalDebit;
+
+  let running = bf;
+
+  // Pending/running balance per card (summary boxes above the table) = sum(net) - sum(debit),
+  // matching Excel's E = E_prev + (Credit * (1 - fee%)) - Debit — unchanged.
   const balances = {};
   cardAccounts.forEach(c => {
     balances[c.id] = entries
-      .filter(e => e.card_id === c.id)
+      .filter(e => e.card_id === c.id && e.balance_type !== "bf")
       .reduce((s, e) => s + Number(e.net ?? e.credit ?? 0) - Number(e.debit || 0), 0);
   });
-
-  let running = 0;
-
-  const filterLabel = filterCard ? cardName(filterCard) : "All Card Accounts";
 
   return (
     <div className="card">
@@ -197,9 +231,7 @@ function LedgerView({ outlet, cardAccounts }) {
           <h3>Card Settlement Ledger</h3>
           <p>Full settlement detail — gross, interest, and net per collection</p>
         </div>
-        <button className="btn btnd btnsm no-print" onClick={printLedger}>
-          {I.print} Print
-        </button>
+        <button className="btn btnd btnsm no-print" onClick={() => window.print()}>{I.print} Print</button>
       </div>
 
       <div className="no-print" style={{ padding: "10px 14px", display: "flex", gap: 12, flexWrap: "wrap" }}>
@@ -214,58 +246,93 @@ function LedgerView({ outlet, cardAccounts }) {
         ))}
       </div>
 
-      <div className="no-print" style={{ padding: "0 14px 10px" }}>
-        <select value={filterCard} onChange={e => setFilterCard(e.target.value)}>
-          <option value="">All Card Accounts</option>
-          {cardAccounts.map(c => <option key={c.id} value={c.id}>{c.bank} — {c.account_no || c.accountNo}</option>)}
-        </select>
+      <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+          <label>Opening Balance Date</label>
+          <input type="date" value={bfDate} onChange={e => setBFD(e.target.value)} />
+        </div>
+        <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+          <label>Balance B/F (Rs.)</label>
+          <input type="number" value={openingBF} onChange={e => setOpeningBF(e.target.value)} />
+        </div>
+        <button className="btn btnd btnsm" onClick={saveBF}>{I.check} Set</button>
       </div>
 
-      <div className="ledger-print-zone">
-        <div className="ledger-print-header">
-          <h1>Card Settlement Ledger</h1>
-          <p>{outlet}</p>
-          <p>{filterLabel}</p>
+      <div className="no-print" style={{ padding: "10px 14px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div className="ff" style={{ minWidth: 160 }}>
+          <label>Card Account</label>
+          <select value={cardId} onChange={e => setCardId(e.target.value)}>
+            <option value="">All Card Accounts</option>
+            {cardAccounts.map(c => <option key={c.id} value={c.id}>{c.bank} — {c.account_no || c.accountNo}</option>)}
+          </select>
         </div>
+        <div className="ff">
+          <label>Period From</label>
+          <input type="date" value={from} onChange={e => setFrom(e.target.value)} />
+        </div>
+        <div className="ff">
+          <label>To</label>
+          <input type="date" value={to} onChange={e => setTo(e.target.value)} />
+        </div>
+      </div>
 
-        <div className="ledger-print-table-wrap" style={{ overflowX: "auto" }}>
-          <table className="ledger-print-tbl ledger-print-tbl--wide" style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
-            <thead>
-              <tr style={{ background: "var(--s3)" }}>
-                <th style={{ padding: "6px 10px", textAlign: "left" }}>Date</th>
-                <th style={{ padding: "6px 10px", textAlign: "left" }}>Card Account</th>
-                <th style={{ padding: "6px 10px", textAlign: "left" }}>Description</th>
-                <th style={{ padding: "6px 10px", textAlign: "right" }}>Debit</th>
-                <th style={{ padding: "6px 10px", textAlign: "right" }}>Credit (Gross)</th>
-                <th style={{ padding: "6px 10px", textAlign: "right" }}>Interest</th>
-                <th style={{ padding: "6px 10px", textAlign: "right" }}>Net (Bank Deposit)</th>
-                <th style={{ padding: "6px 10px", textAlign: "right" }}>Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading && <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
-              {!loading && sorted.length === 0 && (
-                <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries yet</td></tr>
-              )}
-              {sorted.map(e => {
-                const net = Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
-                running += net - Number(e.debit || 0);
-                return (
-                  <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.2)" }}>
-                    <td className="ldate" style={{ padding: "6px 10px" }}>{e.date}</td>
-                    <td style={{ padding: "6px 10px" }}>{cardName(e.card_id)}</td>
-                    <td className="ldesc" style={{ padding: "6px 10px" }}>{e.description}</td>
-                    <td className="rt" style={{ padding: "6px 10px" }}>{e.debit > 0 ? fmt(e.debit) : "-"}</td>
-                    <td className="rt" style={{ padding: "6px 10px" }}>{e.credit > 0 ? fmt(e.credit) : "-"}</td>
-                    <td className="rt" style={{ padding: "6px 10px", color: "var(--red,#f87171)" }}>{e.interest > 0 ? fmt(e.interest) : "-"}</td>
-                    <td className="rt" style={{ padding: "6px 10px", color: "var(--grn,#4ade80)" }}>{net > 0 ? fmt(net) : "-"}</td>
-                    <td className="rt" style={{ padding: "6px 10px", fontWeight: 600 }}>{fmt(running)}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+          <thead>
+            <tr style={{ background: "var(--s3)" }}>
+              <th style={{ padding: "6px 10px", textAlign: "left" }}>Date</th>
+              <th style={{ padding: "6px 10px", textAlign: "left" }}>Card Account</th>
+              <th style={{ padding: "6px 10px", textAlign: "left" }}>Description</th>
+              <th style={{ padding: "6px 10px", textAlign: "right" }}>Debit</th>
+              <th style={{ padding: "6px 10px", textAlign: "right" }}>Credit (Gross)</th>
+              <th style={{ padding: "6px 10px", textAlign: "right" }}>Interest</th>
+              <th style={{ padding: "6px 10px", textAlign: "right" }}>Net (Bank Deposit)</th>
+              <th style={{ padding: "6px 10px", textAlign: "right" }}>Balance</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style={{ background: "var(--s2)" }}>
+              <td style={{ padding: "6px 10px" }} colSpan={7}>
+                <strong>Balance B/F</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({bfDate})</span>
+              </td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(bf)}</td>
+            </tr>
+
+            {loading && <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
+            {!loading && period.length === 0 && (
+              <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>
+            )}
+            {period.map(e => {
+              const net = netOf(e);
+              running += net - Number(e.debit || 0);
+              return (
+                <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.2)" }}>
+                  <td style={{ padding: "6px 10px" }}>{e.date}</td>
+                  <td style={{ padding: "6px 10px" }}>{cardName(e.card_id)}</td>
+                  <td style={{ padding: "6px 10px" }}>{e.description}</td>
+                  <td style={{ padding: "6px 10px", textAlign: "right" }}>{e.debit > 0 ? fmt(e.debit) : "-"}</td>
+                  <td style={{ padding: "6px 10px", textAlign: "right" }}>{e.credit > 0 ? fmt(e.credit) : "-"}</td>
+                  <td style={{ padding: "6px 10px", textAlign: "right", color: "var(--red,#f87171)" }}>{e.interest > 0 ? fmt(e.interest) : "-"}</td>
+                  <td style={{ padding: "6px 10px", textAlign: "right", color: "var(--grn,#4ade80)" }}>{net > 0 ? fmt(net) : "-"}</td>
+                  <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 600 }}>{fmt(running)}</td>
+                </tr>
+              );
+            })}
+
+            <tr style={{ background: "var(--s2)" }}>
+              <td style={{ padding: "6px 10px" }} colSpan={7}><strong>Balance C/D</strong></td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(cd)}</td>
+            </tr>
+            <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+              <td style={{ padding: "6px 10px", fontWeight: 700 }} colSpan={3}>Total</td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(totalDebit)}</td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(totalCredit)}</td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(totalInterest)}</td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(totalNet)}</td>
+              <td style={{ padding: "6px 10px" }}></td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   );

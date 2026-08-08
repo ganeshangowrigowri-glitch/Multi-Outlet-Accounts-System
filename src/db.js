@@ -558,14 +558,24 @@ export const getBankBF = async (outlet, bankId) => {
   if (!data || !data.length) return 0;
   return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
 };
- 
-export const setBankBF = async (outlet, amount, bankId) => {
+
+// Returns the date stored against a bank account's Opening Balance (B/F) row.
+export const getBankBFDate = async (outlet, bankId) => {
+  let q = supabase.from("bank_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "bf");
+  if (bankId) q = q.eq("bank_id", bankId);
+  const { data } = await q.limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setBankBF = async (outlet, amount, bankId, date) => {
   let del = supabase.from("bank_ledger").delete()
     .eq("outlet_id", outlet).eq("balance_type", "bf");
   if (bankId) del = del.eq("bank_id", bankId);
   await del;
   await supabase.from("bank_ledger").insert({
-    outlet_id: outlet, date: new Date().toISOString().split("T")[0],
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
     bank_id: bankId || null,
@@ -683,24 +693,37 @@ export const addCardEntry = async (outlet, entry) => {
   return !error;
 };
 
-export const getCardBF = async (outlet) => {
-  const { data } = await supabase
-    .from("card_ledger").select("debit,credit")
+export const getCardBF = async (outlet, cardId) => {
+  let q = supabase.from("card_ledger").select("debit,credit")
     .eq("outlet_id", outlet).eq("balance_type", "bf");
+  if (cardId) q = q.eq("card_id", cardId);
+  const { data } = await q;
   if (!data || !data.length) return 0;
   return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
 };
 
-export const setCardBF = async (outlet, amount) => {
-  await supabase.from("card_ledger")
-    .delete().eq("outlet_id", outlet).eq("balance_type", "bf");
+// Returns the date stored against a card account's Opening Balance (B/F) row.
+export const getCardBFDate = async (outlet, cardId) => {
+  let q = supabase.from("card_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "bf");
+  if (cardId) q = q.eq("card_id", cardId);
+  const { data } = await q.limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setCardBF = async (outlet, amount, cardId, date) => {
+  let del = supabase.from("card_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "bf");
+  if (cardId) del = del.eq("card_id", cardId);
+  await del;
   await supabase.from("card_ledger").insert({
-    outlet_id: outlet, date: new Date().toISOString().split("T")[0],
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
+    card_id: cardId || null,
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
   });
 };
-
 // REMOVED — this is what wrote card settlement/fee rows into bank_ledger,
 // which caused card details to leak onto the Bank page. Card Settlement
 // and Bank Deposit are now fully independent: addCardEntry writes only

@@ -3,9 +3,15 @@ import { fmt } from "../../utils/helpers";
 
         export default function Ledger({ rows, bfBal = 0, bfDate }) {
   let bal = Number(bfBal) || 0;
-  return (
+        return (
     <div>
-      ...
+      <div className="lhd">
+        <div className="lhc">Date</div>
+        <div className="lhc">Description</div>
+        <div className="lhc rt">Cash Out</div>
+        <div className="lhc rt">Cash In</div>
+        <div className="lhc rt">Balance</div>
+      </div>
       <div className="lrow lbf">
         <div className="lc mono">{bfDate || today()}</div>
         <div className="lc">Balance B/F</div>
