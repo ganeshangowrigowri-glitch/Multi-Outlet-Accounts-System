@@ -15,6 +15,7 @@ import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
 import { getCardLedger, addCardEntry } from "../../db";
+import { printLedger } from "../../utils/printLedger";
 
 // ════════════════════════════════════════════════════════════
 export default function S_Card({ outlet, toast_ }) {
@@ -187,14 +188,21 @@ function LedgerView({ outlet, cardAccounts }) {
 
   let running = 0;
 
+  const filterLabel = filterCard ? cardName(filterCard) : "All Card Accounts";
+
   return (
     <div className="card">
       <div className="chd">
-        <h3>Card Settlement Ledger</h3>
-        <p>Full settlement detail — gross, interest, and net per collection</p>
+        <div>
+          <h3>Card Settlement Ledger</h3>
+          <p>Full settlement detail — gross, interest, and net per collection</p>
+        </div>
+        <button className="btn btnd btnsm no-print" onClick={printLedger}>
+          {I.print} Print
+        </button>
       </div>
 
-      <div style={{ padding: "10px 14px", display: "flex", gap: 12, flexWrap: "wrap" }}>
+      <div className="no-print" style={{ padding: "10px 14px", display: "flex", gap: 12, flexWrap: "wrap" }}>
         {cardAccounts.map(c => (
           <div key={c.id} className="card" style={{ padding: "10px 14px", flex: "1 1 200px" }}>
             <div style={{ fontSize: 11, color: "var(--mut)" }}>{c.bank} — {c.account_no || c.accountNo}</div>
@@ -206,50 +214,58 @@ function LedgerView({ outlet, cardAccounts }) {
         ))}
       </div>
 
-      <div style={{ padding: "0 14px 10px" }}>
+      <div className="no-print" style={{ padding: "0 14px 10px" }}>
         <select value={filterCard} onChange={e => setFilterCard(e.target.value)}>
           <option value="">All Card Accounts</option>
           {cardAccounts.map(c => <option key={c.id} value={c.id}>{c.bank} — {c.account_no || c.accountNo}</option>)}
         </select>
       </div>
 
-      <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
-          <thead>
-            <tr style={{ background: "var(--s3)" }}>
-              <th style={{ padding: "6px 10px", textAlign: "left" }}>Date</th>
-              <th style={{ padding: "6px 10px", textAlign: "left" }}>Card Account</th>
-              <th style={{ padding: "6px 10px", textAlign: "left" }}>Description</th>
-              <th style={{ padding: "6px 10px", textAlign: "right" }}>Debit</th>
-              <th style={{ padding: "6px 10px", textAlign: "right" }}>Credit (Gross)</th>
-              <th style={{ padding: "6px 10px", textAlign: "right" }}>Interest</th>
-              <th style={{ padding: "6px 10px", textAlign: "right" }}>Net (Bank Deposit)</th>
-              <th style={{ padding: "6px 10px", textAlign: "right" }}>Balance</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
-            {!loading && sorted.length === 0 && (
-              <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries yet</td></tr>
-            )}
-            {sorted.map(e => {
-              const net = Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
-              running += net - Number(e.debit || 0);
-              return (
-                <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.2)" }}>
-                  <td style={{ padding: "6px 10px" }}>{e.date}</td>
-                  <td style={{ padding: "6px 10px" }}>{cardName(e.card_id)}</td>
-                  <td style={{ padding: "6px 10px" }}>{e.description}</td>
-                  <td style={{ padding: "6px 10px", textAlign: "right" }}>{e.debit > 0 ? fmt(e.debit) : "-"}</td>
-                  <td style={{ padding: "6px 10px", textAlign: "right" }}>{e.credit > 0 ? fmt(e.credit) : "-"}</td>
-                  <td style={{ padding: "6px 10px", textAlign: "right", color: "var(--red,#f87171)" }}>{e.interest > 0 ? fmt(e.interest) : "-"}</td>
-                  <td style={{ padding: "6px 10px", textAlign: "right", color: "var(--grn,#4ade80)" }}>{net > 0 ? fmt(net) : "-"}</td>
-                  <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 600 }}>{fmt(running)}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      <div className="ledger-print-zone">
+        <div className="ledger-print-header">
+          <h1>Card Settlement Ledger</h1>
+          <p>{outlet}</p>
+          <p>{filterLabel}</p>
+        </div>
+
+        <div className="ledger-print-table-wrap" style={{ overflowX: "auto" }}>
+          <table className="ledger-print-tbl ledger-print-tbl--wide" style={{ width: "100%", borderCollapse: "collapse", fontSize: 11.5 }}>
+            <thead>
+              <tr style={{ background: "var(--s3)" }}>
+                <th style={{ padding: "6px 10px", textAlign: "left" }}>Date</th>
+                <th style={{ padding: "6px 10px", textAlign: "left" }}>Card Account</th>
+                <th style={{ padding: "6px 10px", textAlign: "left" }}>Description</th>
+                <th style={{ padding: "6px 10px", textAlign: "right" }}>Debit</th>
+                <th style={{ padding: "6px 10px", textAlign: "right" }}>Credit (Gross)</th>
+                <th style={{ padding: "6px 10px", textAlign: "right" }}>Interest</th>
+                <th style={{ padding: "6px 10px", textAlign: "right" }}>Net (Bank Deposit)</th>
+                <th style={{ padding: "6px 10px", textAlign: "right" }}>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading && <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
+              {!loading && sorted.length === 0 && (
+                <tr><td colSpan={8} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries yet</td></tr>
+              )}
+              {sorted.map(e => {
+                const net = Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
+                running += net - Number(e.debit || 0);
+                return (
+                  <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.2)" }}>
+                    <td className="ldate" style={{ padding: "6px 10px" }}>{e.date}</td>
+                    <td style={{ padding: "6px 10px" }}>{cardName(e.card_id)}</td>
+                    <td className="ldesc" style={{ padding: "6px 10px" }}>{e.description}</td>
+                    <td className="rt" style={{ padding: "6px 10px" }}>{e.debit > 0 ? fmt(e.debit) : "-"}</td>
+                    <td className="rt" style={{ padding: "6px 10px" }}>{e.credit > 0 ? fmt(e.credit) : "-"}</td>
+                    <td className="rt" style={{ padding: "6px 10px", color: "var(--red,#f87171)" }}>{e.interest > 0 ? fmt(e.interest) : "-"}</td>
+                    <td className="rt" style={{ padding: "6px 10px", color: "var(--grn,#4ade80)" }}>{net > 0 ? fmt(net) : "-"}</td>
+                    <td className="rt" style={{ padding: "6px 10px", fontWeight: 600 }}>{fmt(running)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

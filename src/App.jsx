@@ -22,7 +22,7 @@ import { supabase } from "./supabase";
 
 import {
   getCOA,
-  getCashLedger, addCashEntry, getCashBF, setCashBF,
+  getCashLedger, addCashEntry, getCashBF, getCashBFDate, setCashBF,
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
   getUsernameOutlets, verifyClerkLogin, signInClerkAuth, getClerkProfile,
@@ -281,24 +281,27 @@ function S_GL({ outlet }) {
 // ═══════════════════════════════════════════
 // CASH LEDGER (staff)
 // ═══════════════════════════════════════════
-function S_Cash({ outlet, toast_ }) {
+ function S_Cash({ outlet, toast_ }) {
   const [ledger,  setL]    = useState([]);
   const [bfBal,   setBF]   = useState(0);
+  const [bfDate,  setBFD]  = useState(today());
   const [manDate, setMD]   = useState(today());
   const [manDesc, setMDesc]= useState("");
   const [manType, setMT]   = useState("in");
   const [manAmt,  setMA]   = useState("");
+  const [filterFrom, setFilterFrom] = useState("");
+  const [filterTo,   setFilterTo]   = useState("");
 
   useEffect(() => {
     getCashLedger(outlet).then(setL);
     getCashBF(outlet).then(setBF);
+    getCashBFDate(outlet).then(d => setBFD(d || today()));
   }, [outlet]);
 
   async function saveBF() {
-    await setCashBF(outlet, parseFloat(bfBal)||0);
+    await setCashBF(outlet, parseFloat(bfBal)||0, bfDate);
     toast_("B/F updated ✓");
   }
-
   async function saveManual() {
     if (!manAmt || parseFloat(manAmt)<=0) { toast_("Enter valid amount","err"); return; }
     const amt = parseFloat(manAmt);
@@ -332,7 +335,20 @@ function S_Cash({ outlet, toast_ }) {
     );
   })();
 
-  const balance = bfBal + dedupedLedger.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
+    const balance = bfBal + dedupedLedger.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
+
+  // Date-range filter for the ledger view only — does not affect Cash Balance above.
+  const rangedLedger = dedupedLedger.filter(e =>
+    (!filterFrom || e.date >= filterFrom) && (!filterTo || e.date <= filterTo)
+  );
+  // Fold any entries dated before "From" into the opening balance shown,
+  // so the running balance in the filtered view stays correct.
+  const displayBF = filterFrom
+    ? bfBal + dedupedLedger
+        .filter(e => e.date < filterFrom)
+        .reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0)
+    : bfBal;
+
   return (<>
     <div className="sg3">
       <div className="sc"><div className="sl">Account</div><div className="sv">1001</div></div>
@@ -341,8 +357,12 @@ function S_Cash({ outlet, toast_ }) {
     </div>
     <div className="sg2">
       <div className="card">
-        <div className="chd"><h3>Opening Balance (B/F)</h3></div>
+       <div className="chd"><h3>Opening Balance (B/F)</h3></div>
         <div style={{padding:14,display:"flex",gap:8,alignItems:"flex-end"}}>
+          <div className="ff" style={{marginBottom:0,flex:1}}>
+            <label>Date</label>
+            <input type="date" value={bfDate} onChange={e=>setBFD(e.target.value)}/>
+          </div>
           <div className="ff" style={{marginBottom:0,flex:1}}>
             <label>Balance B/F (Rs.)</label>
             <input type="number" value={bfBal} onChange={e=>setBF(e.target.value)}/>
@@ -368,11 +388,22 @@ function S_Cash({ outlet, toast_ }) {
         <div><h3>In Hand Cash Ledger (1001)</h3><p>Auto-linked from Sales, Expenses, Returns</p></div>
         <button className="btn btnd btnsm no-print" onClick={()=>window.print()}>{I.print} Print</button>
       </div>
-      <div style={{padding:12}}><Ledger rows={dedupedLedger} bfBal={bfBal}/></div>
+      <div className="no-print" style={{padding:"10px 14px 0",display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <div className="ff" style={{marginBottom:0}}>
+          <label>From Date</label>
+          <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}/>
+        </div>
+        <div className="ff" style={{marginBottom:0}}>
+          <label>To Date</label>
+          <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}/>
+        </div>
+        {(filterFrom || filterTo) &&
+          <button className="btn btnd btnsm" onClick={()=>{setFilterFrom("");setFilterTo("");}}>Clear</button>}
+      </div>
+      <div style={{padding:12}}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate}/></div>
     </div>
   </>);
 }
-
 // ═══════════════════════════════════════════
 // STAFF PORTAL
 // ═══════════════════════════════════════════

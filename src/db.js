@@ -507,11 +507,20 @@ export const getCashBF = async (outlet) => {
   return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
 };
  
-export const setCashBF = async (outlet, amount) => {
+// Returns the date stored against the Opening Balance (B/F) row, if any.
+export const getCashBFDate = async (outlet) => {
+  const { data } = await supabase
+    .from("cash_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "bf").limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setCashBF = async (outlet, amount, date) => {
   await supabase.from("cash_ledger")
     .delete().eq("outlet_id", outlet).eq("balance_type", "bf");
   await supabase.from("cash_ledger").insert({
-    outlet_id: outlet, date: new Date().toISOString().split("T")[0],
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
   });

@@ -8,6 +8,7 @@ import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
 import { getBankLedger, getBankBF, addBankEntry } from "../../db";
+import { printLedger } from "../../utils/printLedger";
 
 
 
@@ -590,14 +591,28 @@ function BankLedgerView({ outlet, outletBanks }) {
   const th = { padding: "6px 10px", fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
   const td = { padding: "6px 10px", fontSize: 12 };
 
+  const periodLabel = from || to
+    ? `${from || "Start"} → ${to || "Today"}`
+    : "All dates";
+  const bankLabel = selectedBank
+    ? `${selectedBank.bank} — ${selectedBank.account_no || selectedBank.accountNo}`
+    : outlet;
+
   return (
     <div className="card">
       <div className="chd">
-        <h3>Bank Ledger</h3>
-        <p>{selectedBank ? `${selectedBank.bank} — ${selectedBank.account_no || selectedBank.accountNo}` : outlet}</p>
+        <div>
+          <h3>Bank Ledger</h3>
+          <p>{bankLabel}</p>
+        </div>
+        {outletBanks.length > 0 && (
+          <button className="btn btnd btnsm no-print" onClick={printLedger}>
+            {I.print} Print
+          </button>
+        )}
       </div>
 
-      <div style={{ padding: "12px 14px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+      <div className="no-print" style={{ padding: "12px 14px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
         <div className="ff" style={{ minWidth: 160 }}>
           <label>Bank *</label>
           <select value={bankId} onChange={e => setBankId(e.target.value)}>
@@ -622,55 +637,64 @@ function BankLedgerView({ outlet, outletBanks }) {
           No bank accounts assigned to this outlet yet — ask your admin to add one in Bank Master.
         </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ ...th, textAlign: "left" }}>Date</th>
-                <th style={{ ...th, textAlign: "left" }}>Check No</th>
-                <th style={{ ...th, textAlign: "left" }}>Description</th>
-                <th style={{ ...th, textAlign: "right" }}>Debit</th>
-                <th style={{ ...th, textAlign: "right" }}>Credit</th>
-                <th style={{ ...th, textAlign: "right" }}>Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr style={{ background: "var(--s2)" }}>
-                <td style={td} colSpan={5}><strong>Balance B/F</strong></td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(bf)}</td>
-              </tr>
+        <div className="ledger-print-zone">
+          <div className="ledger-print-header">
+            <h1>Bank Ledger</h1>
+            <p>{outlet}</p>
+            <p>{bankLabel}</p>
+            <p>Period: {periodLabel}</p>
+          </div>
 
-              {loading && <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
-              {!loading && period.length === 0 && (
-                <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>
-              )}
+          <div className="ledger-print-table-wrap" style={{ overflowX: "auto" }}>
+            <table className="ledger-print-tbl" style={{ width: "100%", borderCollapse: "collapse" }}>
+              <thead>
+                <tr>
+                  <th style={{ ...th, textAlign: "left" }}>Date</th>
+                  <th style={{ ...th, textAlign: "left" }}>Check No</th>
+                  <th style={{ ...th, textAlign: "left" }}>Description</th>
+                  <th style={{ ...th, textAlign: "right" }}>Debit</th>
+                  <th style={{ ...th, textAlign: "right" }}>Credit</th>
+                  <th style={{ ...th, textAlign: "right" }}>Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr className="ledger-bf-row" style={{ background: "var(--s2)" }}>
+                  <td style={td} colSpan={5}><strong>Balance B/F</strong></td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(bf)}</td>
+                </tr>
 
-              {period.map(e => {
-                running += Number(e.debit || 0) - Number(e.credit || 0);
-                return (
-                  <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.15)" }}>
-                    <td style={td}>{e.date}</td>
-                    <td style={td} className="mono">{e.check_no || "—"}</td>
-                    <td style={td}>{e.description}</td>
-                    <td style={{ ...td, textAlign: "right" }}>{e.credit > 0 ? fmt(e.credit) : ""}</td>
-                    <td style={{ ...td, textAlign: "right" }}>{e.debit > 0 ? fmt(e.debit) : ""}</td>
-                    <td style={{ ...td, textAlign: "right", fontWeight: 600 }}>{fmt(running)}</td>
-                  </tr>
-                );
-              })}
+                {loading && <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
+                {!loading && period.length === 0 && (
+                  <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>
+                )}
 
-              <tr style={{ background: "var(--s2)" }}>
-                <td style={td} colSpan={5}><strong>Balance C/D</strong></td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(cd)}</td>
-              </tr>
-              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
-                <td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(storedOut)}</td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700 }}>{fmt(storedIn)}</td>
-                <td style={td}></td>
-              </tr>
-            </tbody>
-          </table>
+                {period.map(e => {
+                  running += Number(e.debit || 0) - Number(e.credit || 0);
+                  return (
+                    <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.15)" }}>
+                      <td className="ldate" style={td}>{e.date}</td>
+                      <td style={td} className="mono">{e.check_no || "—"}</td>
+                      <td className="ldesc" style={td}>{e.description}</td>
+                      <td className="rt" style={td}>{e.credit > 0 ? fmt(e.credit) : ""}</td>
+                      <td className="rt" style={td}>{e.debit > 0 ? fmt(e.debit) : ""}</td>
+                      <td className="rt" style={{ ...td, fontWeight: 600 }}>{fmt(running)}</td>
+                    </tr>
+                  );
+                })}
+
+                <tr className="ledger-cd-row" style={{ background: "var(--s2)" }}>
+                  <td style={td} colSpan={5}><strong>Balance C/D</strong></td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(cd)}</td>
+                </tr>
+                <tr className="ledger-total-row" style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                  <td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(storedOut)}</td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(storedIn)}</td>
+                  <td style={td}></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </div>
