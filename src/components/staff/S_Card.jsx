@@ -27,11 +27,12 @@ export default function S_Card({ outlet, toast_ }) {
     // see or list plain bank accounts. Admin sets up the three card
     // accounts (Visa Card 1, Visa Card 2, NTB/AMEX) in Bank Master,
     // each with its own fee_pct.
-    supabase.from("bank_accounts").select("*")
+      supabase.from("bank_accounts").select("*")
       .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
       .eq("account_type", "card")
+      .order("bank")
       .then(({ data }) => setCardAccounts(data || []));
-  }, [outlet]);
+      }, [outlet]);
 
   if (cardAccounts.length === 0) {
     return (
@@ -58,7 +59,7 @@ export default function S_Card({ outlet, toast_ }) {
       </div>
 
       {tab === 0 && <RecordCollection outlet={outlet} cardAccounts={cardAccounts} toast_={toast_} />}
-      {tab === 1 && <LedgerView outlet={outlet} cardAccounts={cardAccounts} />}
+      {tab === 1 && <LedgerView outlet={outlet} cardAccounts={cardAccounts} toast_={toast_} />}
     </div>
   );
 }
@@ -159,7 +160,7 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
 // TAB 1 — Ledger, laid out exactly like the Excel VIZA CARD sheet:
 // Date | Debit | Credit (gross) | Balance | Interest | Bank Deposit (net)
 // ════════════════════════════════════════════════════════════
-function LedgerView({ outlet, cardAccounts }) {
+  function LedgerView({ outlet, cardAccounts, toast_ }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [cardId, setCardId] = useState(cardAccounts[0]?.id || "");
@@ -195,14 +196,16 @@ function LedgerView({ outlet, cardAccounts }) {
   }, [outlet, cardId]);
 
   async function saveBF() {
-    await setCardBF(outlet, parseFloat(openingBF) || 0, cardId || undefined, bfDate);
+    if (!cardId) { toast_ && toast_("Select a specific card account first", "err"); return; }
+    const ok = await setCardBF(outlet, parseFloat(openingBF) || 0, cardId, bfDate);
+    const saved = await getCardBF(outlet, cardId);
+    setOpeningBF(saved);
+    toast_ && toast_(ok ? "Opening balance saved ✓" : "Save failed — check console", "err");
   }
-
   const netOf = e => Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
 
   const before = from ? cardEntries.filter(e => e.date < from) : [];
-  const bf = openingBF + before.reduce((a, e) => a + netOf(e) - Number(e.debit || 0), 0);
-
+  const bf = (Number(openingBF) || 0) + before.reduce((a, e) => a + netOf(e) - Number(e.debit || 0), 0);
   const period = cardEntries
     .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
     .sort((a, b) => (a.date || "").localeCompare(b.date || ""));

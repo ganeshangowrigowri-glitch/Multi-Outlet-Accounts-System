@@ -60,7 +60,7 @@ useEffect(() => {
       
       {tab === 0 && <PaymentHistory outlet={outlet} />}
       {tab === 1 && <BankDepositForm outlet={outlet} outletBanks={outletBanks} toast_={toast_} />}
-      {tab === 2 && <BankLedgerView outlet={outlet} outletBanks={outletBanks} />}
+      {tab === 2 && <BankLedgerView outlet={outlet} outletBanks={outletBanks} toast_={toast_} />}
     </div>
   );
 }
@@ -545,8 +545,8 @@ function BankDepositForm({ outlet, outletBanks, toast_ }) {
 // AP invoice payments, expense payments, card settlements — anything
 // that actually reached bank_ledger). Running balance shown per row.
 // ════════════════════════════════════════════════════════════
- function BankLedgerView({ outlet, outletBanks }) {
-  const [entries, setEntries] = useState([]);
+function BankLedgerView({ outlet, outletBanks, toast_ }) {
+const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
@@ -577,10 +577,13 @@ function BankDepositForm({ outlet, outletBanks, toast_ }) {
   async function saveBF() {
     if (!bankId) return;
     await setBankBF(outlet, parseFloat(openingBF) || 0, bankId, bfDate);
+    const saved = await getBankBF(outlet, bankId);
+    setOpeningBF(saved);
+    toast_ && toast_("Opening balance saved ✓");
   }
 
   const before = from ? bankEntries.filter(e => e.date < from) : [];
-  const bf = openingBF + before.reduce((a, e) => a + Number(e.debit || 0) - Number(e.credit || 0), 0);
+  const bf = (Number(openingBF) || 0) + before.reduce((a, e) => a + Number(e.debit || 0) - Number(e.credit || 0), 0);
 
   const period = bankEntries
     .filter(e => (!from || e.date >= from) && (!to || e.date <= to))

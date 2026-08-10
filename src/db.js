@@ -717,12 +717,15 @@ export const setCardBF = async (outlet, amount, cardId, date) => {
     .eq("outlet_id", outlet).eq("balance_type", "bf");
   if (cardId) del = del.eq("card_id", cardId);
   await del;
-  await supabase.from("card_ledger").insert({
+  const { error } = await supabase.from("card_ledger").insert({
     outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
     card_id: cardId || null,
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
+    txn_type: "bf", fee_pct: 0, interest: 0, net: 0,
   });
+  if (error) { console.error("setCardBF:", error); return false; }
+  return true;
 };
 // REMOVED — this is what wrote card settlement/fee rows into bank_ledger,
 // which caused card details to leak onto the Bank page. Card Settlement
