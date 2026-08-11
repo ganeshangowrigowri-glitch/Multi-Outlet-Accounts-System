@@ -720,44 +720,42 @@ function CashFlowStatement({ d, outlet, month }) {
 //   | PURCHASE | SOLD | OTHER
 // ══════════════════════════════════════════════════════════════════════════
 
-// ── Brand config ──────────────────────────────────────────────────────────
-// Each entry: { key, label, match fn, hasQty }
 const BRAND_CONFIG = [
   {
     key: "IDL",
     label: "IDL",
     match: s => s.includes("IDL") && !s.includes("ROYAL") && !s.includes("USW"),
-    hasQty: true,
+    hasQty: false,
   },
   {
     key: "RL",
     label: "RL",
     match: s => s.includes("ROCKLAND") || (s === "RL") || s.startsWith("RL ") || s.endsWith(" RL"),
-    hasQty: true,
+    hasQty: false,
   },
   {
     key: "DCSL",
     label: "DCSL",
     match: s => s.includes("DCSL") && !s.includes("DCSL BEER") && !s.includes("BEER"),
-    hasQty: true,
+    hasQty: false,
   },
   {
     key: "UG",
     label: "UG",
     match: s => s === "UG" || s.includes("2003-UG") || s.endsWith("-UG") || s.startsWith("UG-"),
-    hasQty: true,
+    hasQty: false,
   },
   {
     key: "LION BREWERY",
     label: "LION BREWERY",
     match: s => s.includes("LION"),
-    hasQty: true,
+    hasQty: false,
   },
   {
     key: "DCSL BEER",
     label: "DCSL BEER",
     match: s => s.includes("DCSL BEER") || (s.includes("BEER") && s.includes("DCSL")),
-    hasQty: true,
+    hasQty: false,
   },
   {
     key: "TODDY",
