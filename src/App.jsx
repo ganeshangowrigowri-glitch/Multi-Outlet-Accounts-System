@@ -325,16 +325,16 @@ function S_GL({ outlet }) {
     setMDesc(""); setMA("");
   }
 
- const dedupedLedger = (() => {
+  const dedupedLedger = (() => {
     const lastAutoIndexForDate = {};
     ledger.forEach((e, idx) => {
       if (e.description === "Daily Sale") lastAutoIndexForDate[e.date] = idx;
     });
     return ledger.filter((e, idx) =>
-      e.description !== "Daily Sale" || lastAutoIndexForDate[e.date] === idx
+      e.balance_type !== "bf" &&
+      (e.description !== "Daily Sale" || lastAutoIndexForDate[e.date] === idx)
     );
   })();
-
     const balance = bfBal + dedupedLedger.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
 
   // Date-range filter for the ledger view only — does not affect Cash Balance above.

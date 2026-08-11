@@ -178,32 +178,19 @@ const [inv, coa] = await Promise.all([
 
       const invMap = {};
       (inv||[]).forEach(i => { invMap[i.code]=i; if(i.id) invMap[i.id]=i; });
-       // ── Sales Revenue ──
-      // Exactly mirrors Current Status totalSaleAmt:
-      // For each item: totalBottleSale (opening + purchase + transIn - transOut - endStock) × sellingPrice
-      const lastSaleRecord = [...sales]
-        .filter(s => (s.items||[]).some(r => !r.isEmptyItem))
-        .sort((a,b) => (a.date||"").localeCompare(b.date||""))
-        .pop();
-
+      // ── Sales Revenue ──
+      // Sums actual daily entered qty × rate across every sale record and every
+      // item in the month (same logic as Sales Summary's dailySale calc), so
+      // items missing from the last day's entry are no longer silently dropped.
       let totalSalesAmt = 0;
-      if (lastSaleRecord) {
-        (lastSaleRecord.items||[]).filter(r => !r.isEmptyItem).forEach(r => {
+      sales.forEach(s => {
+        (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
           const item = invMap[r.code] || invMap[r.id];
-          const sp   = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
-          const uc   = Number(item?.unitCost) || Number(r.unitCost) || 0;
-
-          // opening and endStock from the last sale record — same fields Current Status reads
-          const opening     = parseFloat(r.openingStock) || 0;
-          const purchase    = parseFloat(r.purchase)     || 0;
-          const transIn     = parseFloat(r.transferIn)   || 0;
-          const transOut    = parseFloat(r.transferOut)  || 0;
-          const endStockQty = parseFloat(r.endStock)     || 0;
-
-          const totalBottleSale = opening + purchase - endStockQty;
-          totalSalesAmt += totalBottleSale * sp;
+          const sp  = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
+          const qty = parseFloat(r.sold) || 0;
+          totalSalesAmt += qty * sp;
         });
-      }
+      });
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
       const netSalesAmt  = totalSalesAmt - totalReturns;
 
@@ -470,7 +457,7 @@ function IncomeStatement({ d, outlet, month }) {
     openingStockVal, openingStockByCode,
     totalPurchase, purBySup,
     transInAmt, transOutAmt,
-    endStockVal,
+    endStockVal, endStockByCode,
     costOfSales, grossProfit,
     discBySup, emptyDiscBySup,
     totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome,
@@ -500,6 +487,9 @@ function IncomeStatement({ d, outlet, month }) {
       {transOutAmt > 0 && <TR label="(-) Transfer Out" col2={transOutAmt} neg indent={1} />}
 
       <TR label="(-) End Stock" col2={endStockVal} neg indent={1} />
+      {Object.entries(endStockByCode).filter(([, v]) => v.qty > 0).map(([code, v]) => (
+        <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
+      ))}
 
       <TR label="Cost of Sales" val={costOfSales} neg total />
       <TR label="Gross Profit / (Loss)" val={grossProfit} bold total />
@@ -1137,17 +1127,34 @@ function PurchaseSummary({ d, outlet, month }) {
               <td key={i} style={{ padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut2)", borderBottom: "1px solid var(--bdr)" }}>{h}</td>
             ))}
           </tr>
-          {sup.records.map(p => (
-            p.items?.filter(l => !l.isEmptyItem).map((l, i) => (
-              <tr key={`${p.id||p.date}_${i}`} style={{ borderBottom: "1px solid rgba(63,63,70,.3)" }}>
-                <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)", fontFamily: "'JetBrains Mono',monospace" }}>{i === 0 ? p.date : ""}</td>
-                <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)" }}>{i === 0 ? (p.ref || p.invoice_no || p.notes?.replace(/^Inv:/, "") || "—") : ""}</td>
-                <td style={{ padding: "5px 10px", fontSize: 11.5, fontWeight: 600 }}>{l.itemName || l.name || l.itemCode}</td>
-                <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{l.qty}</td>
-                <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--grn)" }}>Rs.{fmt(l.amount || (Number(l.qty) * Number(l.unitCost)) || 0)}</td>
-              </tr>
-            ))
-          ))}
+          {sup.records.map(p => {
+  const items = p.items?.filter(l => !l.isEmptyItem) || [];
+  const invTotal = items.reduce((a, l) => a + (Number(l.amount) || (Number(l.qty) * Number(l.unitCost)) || 0), 0);
+  const invNo = p.ref || p.invoice_no || p.notes?.replace(/^Inv:/, "") || "—";
+  return (
+    <React.Fragment key={p.id || p.date}>
+      {items.map((l, i) => (
+        <tr key={`${p.id||p.date}_${i}`} style={{ borderBottom: "1px solid rgba(63,63,70,.3)" }}>
+          <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)", fontFamily: "'JetBrains Mono',monospace" }}>{i === 0 ? p.date : ""}</td>
+          <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)" }}>{i === 0 ? invNo : ""}</td>
+          <td style={{ padding: "5px 10px", fontSize: 11.5, fontWeight: 600 }}>{l.itemName || l.name || l.itemCode}</td>
+          <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{l.qty}</td>
+          <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--grn)" }}>Rs.{fmt(l.amount || (Number(l.qty) * Number(l.unitCost)) || 0)}</td>
+        </tr>
+      ))}
+         {items.length > 0 && (
+          <tr style={{ background: "rgba(63,63,70,.15)" }}>
+          <td colSpan={4} style={{ padding: "4px 10px", fontSize: 10.5, fontWeight: 600, color: "var(--mut)", textAlign: "right" }}>
+            Invoice {invNo} Total:
+          </td>
+          <td style={{ padding: "4px 10px", fontSize: 11, fontWeight: 700, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--txt)" }}>
+            Rs.{fmt(invTotal)}
+          </td>
+          </tr>
+         )}
+         </React.Fragment>
+        );
+        })}
           <tr style={{ background: "var(--gd2)" }}>
             <td colSpan={4} style={{ padding: "5px 10px", fontSize: 11, fontWeight: 700, color: "var(--gld2)", textAlign: "right" }}>
               Subtotal {supId.replace(/^\d{4}-/, "")}:
