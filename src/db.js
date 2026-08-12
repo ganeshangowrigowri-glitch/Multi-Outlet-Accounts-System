@@ -905,3 +905,31 @@ export async function getEmptyInventoryMaster() {
     qty:          Number(i.qty)           || 0,
   }));
 }
+// ─── Manual Supplier B/F ───────────────────────────────────────────────
+// Table: supplier_bf
+//   columns: supplier_id (text, PK part), outlet (text, PK part, or 'ALL'),
+//            bf_date (date), bf_amount (numeric), updated_at (timestamptz)
+export async function getSupplierBF(supplierId, outlet = "ALL") {
+  const { data, error } = await supabase
+    .from("supplier_bf")
+    .select("bf_date, bf_amount")
+    .eq("supplier_id", supplierId)
+    .eq("outlet", outlet)
+    .maybeSingle();
+  if (error) { console.error("getSupplierBF error:", error); return null; }
+  if (!data) return null;
+  return { date: data.bf_date, amount: Number(data.bf_amount) || 0 };
+}
+
+export async function setSupplierBF(supplierId, outlet = "ALL", date, amount) {
+  const { data, error } = await supabase
+    .from("supplier_bf")
+    .upsert(
+      { supplier_id: supplierId, outlet, bf_date: date, bf_amount: Number(amount) || 0, updated_at: new Date().toISOString() },
+      { onConflict: "supplier_id,outlet" }
+    )
+    .select()
+    .maybeSingle();
+  if (error) { console.error("setSupplierBF error:", error); return null; }
+  return { date: data.bf_date, amount: Number(data.bf_amount) || 0 };
+}

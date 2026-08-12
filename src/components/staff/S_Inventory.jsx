@@ -580,31 +580,69 @@ const pQ = {}, ipQ = {};
     }
   }));
  
-   (async () => {
+    (async () => {
     const opening = await getOpeningStock(outlet, empDate);
-    const mergedEmp = opening?.emp
+    console.log("EMP-DEBUG for", empDate, "raw opening.emp:", opening?.emp);
+    let mergedEmp = opening?.emp
       ? { ...baseEmp, ...opening.emp }
       : baseEmp;
+    // Same backward-walk recovery Main stock already has. Without this,
+    // Empty stock silently fell back to 0 whenever a day's propagated
+    // opening record was missing, instead of carrying forward the last
+    // saved end stock (e.g. UG EMP showing 0 instead of 12 the next day).
+    if (!opening?.emp || Object.keys(opening.emp).length === 0) {
+      let yDate = prevDate(empDate);
+      let ySale = null;
+      for (let i = 0; i < 365; i++) {
+        ySale = dbSalesRef.current.find(
+          s => s.date === yDate && (s.items || []).some(r => r.isEmptyItem)
+        );
+        if (ySale) break;
+        yDate = prevDate(yDate);
+      }
+      if (ySale) {
+        const recovered = {};
+        (ySale.items || []).forEach(r => {
+          if (!r.isEmptyItem) return;
+          const es = r.endStock !== "" && r.endStock !== undefined && r.endStock !== null
+            ? parseFloat(r.endStock) || 0
+            : null;
+          if (es !== null) {
+            recovered[r.id] = es;
+            recovered[`${r.code}__${r.supplier}`] = es;
+          }
+        });
+        mergedEmp = { ...mergedEmp, ...recovered };
+      }
+    }
+
     const resolvedOpening = { main: opening?.main || {}, emp: mergedEmp };
     const todaySale = dbSalesRef.current.find(
     s => s.date === empDate && (s.items || []).some(r => r.isEmptyItem)
     );
-    const savedMap = todaySale
+     const savedMap = todaySale
       ? Object.fromEntries(
           (todaySale.items || [])
             .filter(r => r.isEmptyItem && r.supplier !== "EMPTY PURCHASE")
-            .map(r => [r.id, r])
+            .flatMap(r => {
+              const entries = [[r.id, r]];
+              if (r.code) entries.push([`${r.code}__${r.supplier}`, r]);
+              return entries;
+            })
         )
       : {};
 
-    setER(() => lsEmp
+      setER(() => lsEmp
       .filter(e => e.supplier !== "EMPTY PURCHASE")
       .map(e => {
         const adminSP = Number(e.sellingPrice) || Number(e.unitCost) || 0;
         const op = resolvedOpening.emp?.[`${e.code}__${e.supplier}`]
         ?? resolvedOpening.emp?.[e.id]
         ?? 0;
-        const saved   = savedMap[e.id];
+        if (e.code === "UEMP Q") {
+          console.log("EMP-DEBUG UG EMP:", { id: e.id, code: e.code, supplier: e.supplier, lookupKey: `${e.code}__${e.supplier}`, foundByComposite: resolvedOpening.emp?.[`${e.code}__${e.supplier}`], foundById: resolvedOpening.emp?.[e.id], finalOp: op });
+        }
+        const saved   = savedMap[e.id] || savedMap[`${e.code}__${e.supplier}`];
 
         if (saved) {
           return {
@@ -831,13 +869,17 @@ toast_("Main stock daily sale saved ✓");
   //  SAVE EMPTY DAILY SALE
   // ─────────────────────────────────────────────────────────
 
- async function saveEmpSale() {
+  async function saveEmpSale() {
   skipNextEmpReloadRef.current = true; 
   const nd = new Date(empDate);
   nd.setDate(nd.getDate() + 1);
   const nextDay = nd.toISOString().slice(0, 10);
   const oe = {};
-  empRows.forEach(r => { oe[r.id] = deriveEmp(r).endStock; });
+  empRows.forEach(r => {
+    const es = deriveEmp(r).endStock;
+    oe[r.id] = es;
+    oe[`${r.code}__${r.supplier}`] = es;   // stable key — survives the row's id changing later
+  });
   openingWriteLockRef.current = openingWriteLockRef.current.then(
   () => propagateOpeningForward(outlet, empDate, null, oe)
 );

@@ -20,6 +20,8 @@ import {
   getCOA,
   getInventoryMaster,
   getOpeningStock,
+  getSupplierBF,   
+  setSupplierBF,   
 } from "../db";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -433,7 +435,7 @@ Object.keys(cosByItem).forEach(code => {
       });
       const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay,sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, stockValBySupplier });
+      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay,sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, stockValBySupplier });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -2063,12 +2065,41 @@ function UGBook({ d, outlet, month }) {
   );
 }
 
+
 function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, applyDiscount, setApplyDiscount }) {
   const { apInvoices, apPayments } = d;
+  
+
+  // ── Manual B/F state (DB-backed) ──
+  const [manualBF, setManualBFState]     = useState(null);
+  const [bfDateInput, setBfDateInput]     = useState(today());
+  const [bfAmountInput, setBfAmountInput] = useState("");
+  const [bfSaving, setBfSaving]           = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getSupplierBF(supplierId, outlet).then(entry => {
+      if (cancelled) return;
+      setManualBFState(entry);
+      setBfDateInput(entry?.date || today());
+      setBfAmountInput(entry?.amount ?? "");
+    });
+    return () => { cancelled = true; };
+  }, [supplierId, outlet]);
+
+  async function handleSetBF() {
+    setBfSaving(true);
+    const entry = await setSupplierBF(supplierId, outlet, bfDateInput, bfAmountInput);
+    setBfSaving(false);
+    if (entry) setManualBFState(entry);
+  }
+
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
 
-  const isSup = raw => (raw || "").trim() === supplierId;
+  // Normalises supplier IDs before comparing — guards against case or
+  // whitespace differences between the SUPPLIERS_LIST used by this dropdown
+  // and the supplier_id values saved from Account Payable (S_AP.jsx).
+   const isSup = raw => normSup(raw) === normSup(supplierId);
 
   const invThisMonth = (apInvoices || []).filter(i => isSup(i.supplier_id || i.supplier));
   const payThisMonth = (apPayments || []).filter(p =>
@@ -2076,32 +2107,52 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
     (!mStart || (p.date >= mStart && p.date <= mEnd))
   );
 
-  // B/F: everything before this month
+ // B/F: everything before this month (unchanged, existing logic)
   const invBefore = (apInvoices || []).filter(i => isSup(i.supplier_id || i.supplier) && mStart && i.date < mStart);
   const payBefore = (apPayments || []).filter(p => isSup(p.supplier_id || p.supplier) && mStart && p.date < mStart);
-  const bfBalance =
+  const computedBfBalance =
     invBefore.reduce((a, i) => a + (Number(i.amount) || 0), 0) -
     payBefore.reduce((a, p) => a + (Number(p.amount) || 0) + (Number(p.discount) || 0), 0);
 
-  // Build one row per invoice, matched against its payment(s) by invoice ref/number.
-  // Falls back to unmatched if a payment's notes/invoiceId doesn't line up with any invoice ref.
+  // Manual B/F override (new): if a manual B/F has been saved for this
+  // supplier and its date falls on/before the end of the period being
+  // viewed, it replaces the computed opening balance. Invoices dated
+  // before the manual B/F date are excluded from the rows below so they
+  // aren't double-counted (they're already folded into the manual figure).
+  const useManualBF     = !!manualBF && (!mEnd || manualBF.date <= mEnd);
+  const bfBalance        = useManualBF ? manualBF.amount : computedBfBalance;
+  const bfEffectiveDate  = useManualBF ? manualBF.date : mStart;
+
+  // Normalises an invoice-reference string for matching — trims whitespace
+  // and ignores case, so a payment saved from Account Payable still matches
+  // its invoice even if Supabase round-trips introduced stray spacing.
+  const normInvRef = v => (v || "").toString().trim().toUpperCase();
+
   const rows = invThisMonth
     .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
+    .filter(i => !useManualBF || i.date >= bfEffectiveDate)
     .map(inv => {
       const invNo = inv.ref || inv.id;
-      const matchedPayments = payThisMonth.filter(p => (p.notes || p.invoiceId) === invNo);
+      // Match Account Payable payments to this invoice. p.invoiceId is what
+      // S_AP.jsx's savePayment() saves (pf.invNo, i.e. the invoice's ref);
+      // p.notes is kept as a fallback for older/alternate save paths.
+      const matchedPayments = payThisMonth.filter(
+        p => normInvRef(p.invoiceId || p.notes) === normInvRef(invNo)
+      );
       const paid      = matchedPayments.reduce((a, p) => a + (Number(p.amount) || 0), 0);
       const discount  = matchedPayments.reduce((a, p) => a + (Number(p.discount) || 0), 0);
       const chq       = matchedPayments.map(p => p.ref).filter(Boolean).join(", ");
       const payDate   = matchedPayments[0]?.date || "";
       const amount    = Number(inv.amount) || 0;
-      const sixPctDis = applyDiscount ? amount * 0.06 : 0;
-      const vatDis    = applyDiscount ? sixPctDis * 0.18 : 0;
-      const outstanding = amount - paid - discount - sixPctDis - vatDis;
+      // 6% Dis = Amount / 1.18 × 0.06
+      // VAT Dis = (Amount × 0.06) − 6% Dis
+      const sixPctDis = applyDiscount ? (amount / 1.18) * 0.06 : 0;
+      const vatDis    = applyDiscount ? (amount * 0.06) - sixPctDis : 0;
+      // Outstanding = Amount − 6% Dis − VAT Dis
+      const outstanding = amount - sixPctDis - vatDis;
       return { invNo, date: inv.date, amount, payDate, paid, chq, sixPctDis, vatDis, outstanding, discount };
     })
     .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-
   const totalAmount      = rows.reduce((a, r) => a + r.amount, 0);
   const totalPaid        = rows.reduce((a, r) => a + r.paid, 0);
   const totalSixPctDis   = rows.reduce((a, r) => a + r.sixPctDis, 0);
@@ -2115,6 +2166,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
 
   return (
+    
     <div>
       <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
@@ -2128,6 +2180,28 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
         </div>
         <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
       </div>
+      {/* Manual B/F control — new, isolated section */}
+      <div className="no-print" style={{ display: "flex", alignItems: "flex-end", gap: 10, marginBottom: 12, flexWrap: "wrap", padding: "10px 12px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8 }}>
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 }}>B/F Date</div>
+          <input type="date" value={bfDateInput} onChange={e => setBfDateInput(e.target.value)}
+            style={{ padding: "6px 10px", background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 }}>B/F Amount</div>
+          <input type="number" step="0.01" value={bfAmountInput} onChange={e => setBfAmountInput(e.target.value)}
+            placeholder="0.00"
+            style={{ padding: "6px 10px", width: 140, background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+        </div>
+        <button className="btn btnd btnsm" onClick={handleSetBF} disabled={bfSaving}>
+        {bfSaving ? "Saving…" : "Set B/F"}
+        </button>
+        {manualBF && (
+          <span style={{ fontSize: 11, color: "var(--mut)" }}>
+            Active: Rs.{fmt(manualBF.amount)} as of {manualBF.date}
+          </span>
+        )}
+      </div> 
 
       <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
         <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
@@ -2160,7 +2234,8 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
                 <tr><td colSpan={10} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No invoices this period</td></tr>
               )}
               {rows.map((r, i) => {
-                runBal += r.amount - r.paid - r.discount - r.sixPctDis - r.vatDis;
+                // Balance = Amount Total − Payment Total
+                runBal += r.amount - r.paid;
                 return (
                   <tr key={i}>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>

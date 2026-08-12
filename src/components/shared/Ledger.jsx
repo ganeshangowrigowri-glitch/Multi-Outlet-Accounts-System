@@ -17,7 +17,7 @@ import { fmt } from "../../utils/helpers";
         <div className="lc">Balance B/F</div>
         <div className="lc"/>
         <div className="lc"/>
-        <div className="lc lbal">Rs.{fmt(bfBal)}</div>
+        <div className="lc lbal">Rs{fmt(bfBal)}</div>
       </div>
       {rows.length === 0 && <div className="empty">No entries yet.</div>}
       {rows.map(e => {
