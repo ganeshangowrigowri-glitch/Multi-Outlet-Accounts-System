@@ -125,21 +125,14 @@ if (pf.payType === "Cash") {
       type: "out", debit: 0, credit: pa,
     });
   }
-  if (pf.payType === "Visa Card") {
-    // Card Settlement Ledger → Debit (one entry)
+if (pf.payType === "Visa Card") {
+    // Card Settlement Ledger → Debit only. No Bank Ledger entry for Visa Card payments.
     await addCardEntry(outlet, {
       date: pf.date,
       cardId: pf.cardId,
       description: `AP Payment ${pf.supId} ${pf.invNo}`,
       txnType: "payment",
       debit: pa, credit: 0,
-    });
-    // Bank Ledger → Credit, settlement side of the same transaction (one entry)
-    await addBankEntry(outlet, {
-      date: pf.date,
-      bankId: pf.bankId,
-      description: `AP Payment ${pf.supId} ${pf.invNo} (Visa Card settlement)`,
-      type: "out", debit: 0, credit: pa,
     });
   }
 
@@ -423,7 +416,7 @@ if (pf.payType === "Cash") {
               )}
 
               {pf.payType === "Visa Card" && (
-                <div className="nbox nb-a" style={{ marginTop: 8 }}>💳 Visa Card payment posts to Card Settlement (Debit) and Bank Ledger (Credit).</div>
+                <div className="nbox nb-a" style={{ marginTop: 8 }}>💳 Visa Card payment posts to Card Settlement (Debit).</div>
               )}
 
               {pf.payType === "Bank" && pf.bankId && (() => {

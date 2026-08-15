@@ -711,7 +711,6 @@ export const getCardBFDate = async (outlet, cardId) => {
   if (!data || !data.length) return null;
   return data[0].date;
 };
-
 export const setCardBF = async (outlet, amount, cardId, date) => {
   let del = supabase.from("card_ledger").delete()
     .eq("outlet_id", outlet).eq("balance_type", "bf");
@@ -725,6 +724,43 @@ export const setCardBF = async (outlet, amount, cardId, date) => {
     txn_type: "bf", fee_pct: 0, interest: 0, net: 0,
   });
   if (error) { console.error("setCardBF:", error); return false; }
+  return true;
+};
+
+// ─── Last Month Pending Amount — stored per card account, same
+// delete-then-insert pattern as B/F above, so editing updates the
+// existing value instead of creating duplicate rows. ────────────
+export const getCardPending = async (outlet, cardId) => {
+  let q = supabase.from("card_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "pending");
+  if (cardId) q = q.eq("card_id", cardId);
+  const { data } = await q;
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const getCardPendingDate = async (outlet, cardId) => {
+  let q = supabase.from("card_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "pending");
+  if (cardId) q = q.eq("card_id", cardId);
+  const { data } = await q.limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setCardPending = async (outlet, amount, cardId, date) => {
+  let del = supabase.from("card_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "pending");
+  if (cardId) del = del.eq("card_id", cardId);
+  await del;
+  const { error } = await supabase.from("card_ledger").insert({
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
+    card_id: cardId || null,
+    description: "Last Month Pending Amount", debit: amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "pending",
+    txn_type: "pending", fee_pct: 0, interest: 0, net: 0,
+  });
+  if (error) { console.error("setCardPending:", error); return false; }
   return true;
 };
 // REMOVED — this is what wrote card settlement/fee rows into bank_ledger,
