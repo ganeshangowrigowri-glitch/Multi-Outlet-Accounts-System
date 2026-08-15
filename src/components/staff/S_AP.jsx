@@ -3,7 +3,7 @@ import { useState,useEffect, useMemo } from "react";
 import { fmt, today } from "../../utils/helpers";
 import {supabase} from "../../supabase";
 import { I } from "../../utils/icons";
-import { addAPPayment, addCashEntry, addBankEntry, addGLEntry } from "../../db";
+import { addAPPayment, addCashEntry, addBankEntry, addCardEntry, addGLEntry } from "../../db";
 
 export default function S_AP({ outlet, user, toast_ }) {
 
@@ -25,7 +25,7 @@ export default function S_AP({ outlet, user, toast_ }) {
 }, [outlet]);
 
 
-  const [pf, setPf] = useState({
+ const [pf, setPf] = useState({
     date:    today(),
     supId: "",
     invDate: today(),
@@ -33,11 +33,14 @@ export default function S_AP({ outlet, user, toast_ }) {
     invAmt:  "",
     payType: "Bank",
     bankId:  "",
+    cardId:  "",
     payAmt:      "",
     discount:    "",
     checkNo:     "",
     lateCharge:  "",
   });
+
+  const [manualInv, setManualInv] = useState(false); // toggle: dropdown vs typed invoice no
    
   const [aged, setAged] = useState("");
 
@@ -45,19 +48,24 @@ useEffect(() => {
   if (suppliers.length > 0 && !aged) setAged(suppliers[0].id);
 }, [suppliers]);
 
-  const [outletBanks, setOutletBanks] = useState([]);
+ const [outletBanks, setOutletBanks] = useState([]);
   useEffect(() => {
-  if (suppliers.length > 0 && !pf.supId) {
-    setPf(p => ({ ...p, supId: suppliers[0].id }));
-  }
-}, [suppliers]);
-
-useEffect(() => {
   supabase.from("bank_accounts")
     .select("*")
     .eq("outlet_id", outlet)
     .eq("active", true)
     .then(({ data }) => { if (data) setOutletBanks(data); });
+}, [outlet]);
+
+  // Visa Card settlement — reuses the same account_type="card" rows as S_Card.jsx
+  const [cardAccounts, setCardAccounts] = useState([]);
+  useEffect(() => {
+  supabase.from("bank_accounts")
+    .select("*")
+    .eq("outlet_id", outlet)
+    .eq("active", true)
+    .eq("account_type", "card")
+    .then(({ data }) => { if (data) setCardAccounts(data); });
 }, [outlet]);
   // ── Invoice numbers filtered by supplier + invDate ──
   const filteredInvoices = useMemo(() => {
@@ -83,8 +91,8 @@ useEffect(() => {
   }
 async function savePayment() {
   if (!pf.invNo || !pf.payAmt) { toast_("Fill invoice no & payment amount", "err"); return; }
-  if (pf.payType === "Bank" && !pf.bankId) { toast_("Select a bank account", "err"); return; }
-
+  if ((pf.payType === "Bank" || pf.payType === "Visa Card") && !pf.bankId) { toast_("Select a bank account", "err"); return; }
+  if (pf.payType === "Visa Card" && !pf.cardId) { toast_("Select a card account", "err"); return; }
   const pa   = parseFloat(pf.payAmt)   || 0;
   const disc = parseFloat(pf.discount) || 0;
   const bankAcc = outletBanks.find(b => b.id === pf.bankId);
@@ -102,8 +110,7 @@ await addAPPayment(outlet, {
   bankName:    bankAcc?.bank || "",
   accountNo:   bankAcc?.account_no || "",
 });
-
-  if (pf.payType === "Cash") {
+if (pf.payType === "Cash") {
     await addCashEntry(outlet, {
       date: pf.date,
       description: `AP Payment ${pf.supId} ${pf.invNo}`,
@@ -115,6 +122,23 @@ await addAPPayment(outlet, {
       date: pf.date,
       bankId: pf.bankId,
       description: `AP Payment ${pf.supId} ${pf.invNo}`,
+      type: "out", debit: 0, credit: pa,
+    });
+  }
+  if (pf.payType === "Visa Card") {
+    // Card Settlement Ledger → Debit (one entry)
+    await addCardEntry(outlet, {
+      date: pf.date,
+      cardId: pf.cardId,
+      description: `AP Payment ${pf.supId} ${pf.invNo}`,
+      txnType: "payment",
+      debit: pa, credit: 0,
+    });
+    // Bank Ledger → Credit, settlement side of the same transaction (one entry)
+    await addBankEntry(outlet, {
+      date: pf.date,
+      bankId: pf.bankId,
+      description: `AP Payment ${pf.supId} ${pf.invNo} (Visa Card settlement)`,
       type: "out", debit: 0, credit: pa,
     });
   }
@@ -133,7 +157,7 @@ await addAPPayment(outlet, {
   if (data) setPayR(data);
 
   toast_("Payment saved ✓");
-  setPf(p => ({ ...p, invNo: "", invAmt: "", payAmt: "", discount: "", checkNo: "", lateCharge: "" }));
+  setPf(p => ({ ...p, invNo: "", invAmt: "", payAmt: "", discount: "", checkNo: "", lateCharge: "", cardId: "" }));
 }
   
 
@@ -231,20 +255,38 @@ await addAPPayment(outlet, {
                   <input type="date" value={pf.invDate} onChange={e => handleInvDateChange(e.target.value)} />
                 </div>
 
-                {/* Invoice No — dropdown, filtered by supplier + date */}
-                <div className="ff">
-                  <label>Invoice No *</label>
-                  <select
-                    value={pf.invNo}
-                    onChange={e => handleInvNoChange(e.target.value)}
-                    style={{ minWidth: 140 }}
-                  >
-                    <option value="">Select invoice…</option>
-                    {filteredInvoices.map(inv => (
-                      <option key={inv.id} value={inv.ref}>{inv.ref}</option>
-                    ))}
-                  </select>
-                  {filteredInvoices.length === 0 && (
+               <div className="ff">
+                  <label>
+                    Invoice No *{" "}
+                    <button
+                      type="button"
+                      className="btn btnsm"
+                      style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10 }}
+                      onClick={() => setManualInv(m => !m)}
+                    >
+                      {manualInv ? "Choose from list" : "Type manually"}
+                    </button>
+                  </label>
+                  {manualInv ? (
+                    <input
+                      value={pf.invNo}
+                      onChange={e => setPf({ ...pf, invNo: e.target.value })}
+                      placeholder="Type invoice no…"
+                      style={{ minWidth: 140 }}
+                    />
+                  ) : (
+                    <select
+                      value={pf.invNo}
+                      onChange={e => handleInvNoChange(e.target.value)}
+                      style={{ minWidth: 140 }}
+                    >
+                      <option value="">Select invoice…</option>
+                      {filteredInvoices.map(inv => (
+                        <option key={inv.id} value={inv.ref}>{inv.ref}</option>
+                      ))}
+                    </select>
+                  )}
+                  {!manualInv && filteredInvoices.length === 0 && (
                     <div style={{ fontSize: 10.5, color: "var(--mut)", marginTop: 3 }}>
                       No invoices for selected supplier &amp; date
                     </div>
@@ -263,19 +305,17 @@ await addAPPayment(outlet, {
                   />
                 </div>
 
-                {/* Payment Type */}
-                <div className="ff">
+                 <div className="ff">
                   <label>Payment Type</label>
                   <select
                     value={pf.payType}
-                    onChange={e => setPf({ ...pf, payType: e.target.value, bankId: "" })}
+                    onChange={e => setPf({ ...pf, payType: e.target.value, bankId: "", cardId: "" })}
                   >
-                    {["Bank", "Cash", "Cheque", "Online"].map(t => <option key={t}>{t}</option>)}
+                    {["Bank", "Cash", "Visa Card"].map(t => <option key={t}>{t}</option>)}
                   </select>
                 </div>
-
-                {/* Bank Account — only when payType === "Bank" */}
-                {pf.payType === "Bank" && (
+                {/* Bank Account — needed for Bank, and for Visa Card settlement */}
+                {(pf.payType === "Bank" || pf.payType === "Visa Card") && (
                   <div className="ff">
                     <label>Bank Account *</label>
                     {outletBanks.length === 0 ? (
@@ -292,6 +332,31 @@ await addAPPayment(outlet, {
                         {outletBanks.map(b => (
                           <option key={b.id} value={b.id}>
                             {b.bank} — {b.account_no} ({b.account_name})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+                  </div>
+                )}
+
+                {/* Card Account — only when payType === "Visa Card" */}
+                {pf.payType === "Visa Card" && (
+                  <div className="ff">
+                    <label>Card Account *</label>
+                    {cardAccounts.length === 0 ? (
+                      <div className="nbox nb-a" style={{ fontSize: 11, padding: "6px 10px" }}>
+                        ⚠ No card accounts set up. Ask admin to configure in Admin → Bank Master (Account Type = Card).
+                      </div>
+                    ) : (
+                      <select
+                        value={pf.cardId}
+                        onChange={e => setPf({ ...pf, cardId: e.target.value })}
+                        style={{ minWidth: 220 }}
+                      >
+                        <option value="">Select card account…</option>
+                        {cardAccounts.map(c => (
+                          <option key={c.id} value={c.id}>
+                            {c.bank} — {c.account_no}
                           </option>
                         ))}
                       </select>
@@ -355,6 +420,10 @@ await addAPPayment(outlet, {
 
               {pf.payType === "Cash" && (
                 <div className="nbox nb-a" style={{ marginTop: 8 }}>⚠ Cash payment will auto-deduct from In Hand Cash.</div>
+              )}
+
+              {pf.payType === "Visa Card" && (
+                <div className="nbox nb-a" style={{ marginTop: 8 }}>💳 Visa Card payment posts to Card Settlement (Debit) and Bank Ledger (Credit).</div>
               )}
 
               {pf.payType === "Bank" && pf.bankId && (() => {

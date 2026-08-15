@@ -1755,7 +1755,7 @@ function UGBook({ d, outlet, month }) {
                       {dd.paymentTotal > 0 ? fmt(dd.paymentTotal) : "-"}
                     </td>
 
-                    {/* BALANCE — left blank on daily rows, matches the Excel sheet
+                    {/* BALANCE — left blank on daily rows
                         (sheet only shows balance on B/F and TOTAL rows) */}
                     <td style={tdNum("var(--mut2)")}>-</td>
                   </tr>
