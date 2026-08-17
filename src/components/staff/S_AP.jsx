@@ -122,6 +122,7 @@ if (pf.payType === "Cash") {
       date: pf.date,
       bankId: pf.bankId,
       description: `AP Payment ${pf.supId} ${pf.invNo}`,
+      checkNo: pf.checkNo,
       type: "out", debit: 0, credit: pa,
     });
   }

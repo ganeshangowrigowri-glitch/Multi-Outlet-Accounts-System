@@ -14,10 +14,22 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
-import { getCardLedger, addCardEntry, getCardBF, getCardBFDate, setCardBF, addBankEntry, getCardPending, getCardPendingDate, setCardPending } from "../../db";
+import { getCardLedger, addCardEntry, getCardBF, getCardBFDate, setCardBF, addBankEntry, getCardPending, getCardPendingDate, setCardPending, getCardCD, getCardCDDate, setCardCD, getCardDifferent, setCardDifferent } from "../../db";
 import { printLedger } from "../../utils/printLedger";
 
 // ════════════════════════════════════════════════════════════
+// ─── Month helpers for month-wise B/F, Pending, C/D, Different ─────
+const monthStr = (d) => (d || today()).slice(0, 7); // "YYYY-MM"
+const prevMonthStr = (m) => {
+  const [y, mo] = m.split("-").map(Number);
+  const d = new Date(y, mo - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+const monthRange = (m) => {
+  const [y, mo] = m.split("-").map(Number);
+  const lastDate = new Date(y, mo, 0).getDate();
+  return [`${m}-01`, `${m}-${String(lastDate).padStart(2, "0")}`];
+};
 export default function S_Card({ outlet, toast_ }) {
   const [tab, setTab] = useState(0);
   const [cardAccounts, setCardAccounts] = useState([]);
@@ -86,6 +98,7 @@ function TransferToBank({ outlet, cardAccounts, outletBanks, toast_ }) {
   const [bankId, setBankId] = useState(outletBanks[0]?.id || "");
   const [amount, setAmount] = useState("");
   const [description, setDescription] = useState("");
+  const [checkNo, setCheckNo] = useState("");
   const [saving, setSaving] = useState(false);
 
   useEffect(() => { if (cardAccounts.length && !cardId) setCardId(cardAccounts[0].id); }, [cardAccounts]);
@@ -108,17 +121,18 @@ function TransferToBank({ outlet, cardAccounts, outletBanks, toast_ }) {
       debit: amt, credit: 0,
     });
 
-    // Bank Ledger → money in, linked to the selected bank account only
+  // Bank Ledger → money in, linked to the selected bank account only
     const bankOk = await addBankEntry(outlet, {
       date, bankId,
       description: desc,
+      checkNo,
       debit: amt, credit: 0,
     });
 
     setSaving(false);
     if (cardOk && bankOk) {
       toast_(`Transfer recorded ✓ Rs.${fmt(amt)} moved to bank`);
-      setAmount(""); setDescription("");
+      setAmount(""); setDescription(""); setCheckNo("");
     } else {
       toast_("Failed to save — check connection", "err");
     }
@@ -161,6 +175,10 @@ function TransferToBank({ outlet, cardAccounts, outletBanks, toast_ }) {
               <div className="ff">
                 <label>Transfer Amount (Rs.) *</label>
                 <input type="number" placeholder="0.00" value={amount} onChange={e => setAmount(e.target.value)} />
+              </div>
+            <div className="ff">
+                <label>Check No</label>
+                <input placeholder="Optional" value={checkNo} onChange={e => setCheckNo(e.target.value)} />
               </div>
               <div className="ff" style={{ gridColumn: "1 / -1" }}>
                 <label>Description / Reference</label>
@@ -293,9 +311,17 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
   const [cardId, setCardId] = useState(cardAccounts[0]?.id || "");
+  const [month, setMonth] = useState(monthStr(today()));
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
 
+  // Selecting a month scopes the ledger totals (and therefore Pending Balance)
+  // to that month. Staff can still fine-tune Period From/To afterward if needed.
+  useEffect(() => {
+    const [first, last] = monthRange(month);
+    setFrom(first);
+    setTo(last);
+  }, [month]);
   useEffect(() => {
     if (cardAccounts.length && !cardId) setCardId(cardAccounts[0].id);
   }, [cardAccounts]);
@@ -310,47 +336,134 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
     return c ? `${c.bank} — ${c.account_no || c.accountNo}` : "—";
   };
 
-  // Entries for the selected card account (or all, when "All Card Accounts" is chosen)
-  const cardEntries = entries.filter(e =>
-    (!cardId || e.card_id === cardId) && e.balance_type !== "bf" && e.balance_type !== "pending"
+const cardEntries = entries.filter(e =>
+    (!cardId || e.card_id === cardId) && e.balance_type !== "bf" && e.balance_type !== "pending" && e.balance_type !== "cd_manual" && e.balance_type !== "different"
   );
 
   // Balance B/F = opening balance set for this account (or combined, if "All") +
   // everything dated before the "From" filter — same pattern as the Bank Ledger.
-  const [openingBF, setOpeningBF] = useState(0);
+const [openingBF, setOpeningBF] = useState(0);
   const [bfDate, setBFD] = useState(today());
+  const [bfIsAuto, setBfIsAuto] = useState(false); // true = value shown is carried forward, not yet saved for this month
   useEffect(() => {
-    getCardBF(outlet, cardId || undefined).then(setOpeningBF);
-    getCardBFDate(outlet, cardId || undefined).then(d => setBFD(d || today()));
-  }, [outlet, cardId]);
+    (async () => {
+      const saved = await getCardBF(outlet, cardId || undefined, month);
+      if (saved !== null) {
+        setOpeningBF(saved);
+        setBFD((await getCardBFDate(outlet, cardId || undefined, month)) || monthRange(month)[0]);
+        setBfIsAuto(false);
+      } else {
+        // Carry forward: previous month's Balance C/D → this month's Balance B/F
+        const prev = prevMonthStr(month);
+        const prevCD = await getCardCD(outlet, cardId || undefined, prev);
+        const prevCDDate = await getCardCDDate(outlet, cardId || undefined, prev);
+        setOpeningBF(prevCD || 0);
+        setBFD(prevCDDate || monthRange(month)[0]);
+        setBfIsAuto(true);
+      }
+    })();
+  }, [outlet, cardId, month]);
 
   async function saveBF() {
     if (!cardId) { toast_ && toast_("Select a specific card account first", "err"); return; }
-    const ok = await setCardBF(outlet, parseFloat(openingBF) || 0, cardId, bfDate);
-    const saved = await getCardBF(outlet, cardId);
-    setOpeningBF(saved);
+    const ok = await setCardBF(outlet, parseFloat(openingBF) || 0, cardId, bfDate, month);
+    const saved = await getCardBF(outlet, cardId, month);
+    setOpeningBF(saved || 0);
+    setBfIsAuto(false);
     toast_ && toast_(ok ? "Opening balance saved ✓" : "Save failed — check console", "err");
   }
-
+  // Computes a previous month's Final Pending Balance from ITS OWN saved
+  // B/F, Pending, Balance C/D, and Different (one month back only — this is
+  // not recursive, so it relies on that month's own explicitly saved values).
+  async function computeFinalPendingBalance(outlet, cardId, m, allEntries) {
+    const [first, last] = monthRange(m);
+    const netOfE = e => Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
+    const monthEntries = allEntries.filter(e =>
+      (!cardId || e.card_id === cardId) &&
+      e.balance_type !== "bf" && e.balance_type !== "pending" &&
+      e.balance_type !== "cd_manual" && e.balance_type !== "different" &&
+      e.date >= first && e.date <= last
+    );
+    const mTotalDebit = monthEntries.reduce((a, e) => a + Number(e.debit || 0), 0);
+    const mTotalNet    = monthEntries.reduce((a, e) => a + netOfE(e), 0);
+    const mBf      = (await getCardBF(outlet, cardId, m)) || 0;
+    const mPending = (await getCardPending(outlet, cardId, m)) || 0;
+    const mCd      = (await getCardCD(outlet, cardId, m)) || 0;
+    const mDiff    = await getCardDifferent(outlet, cardId, m);
+    // Must match the live Pending Balance formula exactly: bf + Net − Debit + Pending − Balance C/D
+    const mPendingBalance = mBf + mTotalNet - mTotalDebit + mPending - mCd;
+    return mDiff.sign === "-" ? mPendingBalance - mDiff.amount : mPendingBalance + mDiff.amount;
+  }
   // Last Month Pending Amount — same per-card storage pattern as B/F above.
   const [pendingAmt, setPendingAmt] = useState(0);
   const [pendingDate, setPendingDate] = useState(today());
+  const [pendingIsAuto, setPendingIsAuto] = useState(false); // true = carried from prev month's Final Pending Balance
   useEffect(() => {
-    getCardPending(outlet, cardId || undefined).then(setPendingAmt);
-    getCardPendingDate(outlet, cardId || undefined).then(d => setPendingDate(d || today()));
-  }, [outlet, cardId]);
+    (async () => {
+      const saved = await getCardPending(outlet, cardId || undefined, month);
+      if (saved !== null) {
+        setPendingAmt(saved);
+        setPendingDate((await getCardPendingDate(outlet, cardId || undefined, month)) || monthRange(month)[0]);
+        setPendingIsAuto(false);
+      } else {
+        // Carry forward: previous month's Final Pending Balance → this month's Last Month Pending Amount
+        const prev = prevMonthStr(month);
+        const prevFinal = await computeFinalPendingBalance(outlet, cardId, prev, entries);
+        setPendingAmt(prevFinal || 0);
+        setPendingDate(monthRange(prev)[1]);
+        setPendingIsAuto(true);
+      }
+    })();
+  }, [outlet, cardId, month, entries]);
 
   async function savePending() {
     if (!cardId) { toast_ && toast_("Select a specific card account first", "err"); return; }
-    const ok = await setCardPending(outlet, parseFloat(pendingAmt) || 0, cardId, pendingDate);
-    const saved = await getCardPending(outlet, cardId);
-    setPendingAmt(saved);
+    const ok = await setCardPending(outlet, parseFloat(pendingAmt) || 0, cardId, pendingDate, month);
+    const saved = await getCardPending(outlet, cardId, month);
+    setPendingAmt(saved || 0);
+    setPendingIsAuto(false);
     toast_ && toast_(ok ? "Last month pending amount saved ✓" : "Save failed — check console", "err");
   }
 
-  const netOf = e => Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
-  const before = from ? cardEntries.filter(e => e.date < from) : [];
-  const bf = (Number(openingBF) || 0) + before.reduce((a, e) => a + netOf(e) - Number(e.debit || 0), 0);
+  // Manually-set Balance C/D — purely a persisted display value, does not
+  // affect the existing calculated `cd` used by Pending Balance etc.
+const [cdManual, setCdManual] = useState(0);
+  const [cdManualDate, setCdManualDate] = useState(today());
+  useEffect(() => {
+    getCardCD(outlet, cardId || undefined, month).then(v => setCdManual(v || 0));
+    getCardCDDate(outlet, cardId || undefined, month).then(d => setCdManualDate(d || monthRange(month)[1]));
+  }, [outlet, cardId, month]);
+
+  async function saveCDManual() {
+    if (!cardId) { toast_ && toast_("Select a specific card account first", "err"); return; }
+    const ok = await setCardCD(outlet, parseFloat(cdManual) || 0, cardId, cdManualDate, month);
+    const saved = await getCardCD(outlet, cardId, month);
+    setCdManual(saved || 0);
+    toast_ && toast_(ok ? "Balance C/D saved ✓" : "Save failed — check console", "err");
+  }
+
+  // Different — manual +/− adjustment applied to Pending Balance.
+ const [diffAmt, setDiffAmt] = useState(0);
+  const [diffSign, setDiffSign] = useState("+");
+  useEffect(() => {
+    getCardDifferent(outlet, cardId || undefined, month).then(({ amount, sign }) => {
+      setDiffAmt(amount); setDiffSign(sign); // month-specific only — never carried from another month
+    });
+  }, [outlet, cardId, month]);
+
+  async function saveDifferent() {
+    if (!cardId) { toast_ && toast_("Select a specific card account first", "err"); return; }
+    const ok = await setCardDifferent(outlet, parseFloat(diffAmt) || 0, diffSign, cardId, month);
+    const saved = await getCardDifferent(outlet, cardId, month);
+    setDiffAmt(saved.amount); setDiffSign(saved.sign);
+    toast_ && toast_(ok ? "Different saved ✓" : "Save failed — check console", "err");
+  }
+    const netOf = e => Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
+  // Balance B/F already reflects everything up to this month's opening date
+  // (either staff-set or carried forward from last month's Balance C/D), so
+  // it must NOT be added to again here — that was double-counting last
+  // month's transactions into this month's balance.
+  const bf = Number(openingBF) || 0;
   const period = cardEntries
     .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
     .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
@@ -359,25 +472,24 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
   const totalCredit   = period.reduce((a, e) => a + Number(e.credit || 0), 0);
   const totalInterest = period.reduce((a, e) => a + Number(e.interest || 0), 0);
   const totalNet      = period.reduce((a, e) => a + netOf(e), 0);
-  // Display-only: Net (Bank Deposit) Total shown in the Total row includes
-  // Last Month Pending Amount. Balance C/D keeps using totalNet as-is, unchanged.
   const totalNetWithPending = totalNet + (Number(pendingAmt) || 0);
-  const cd = bf + totalNet - totalDebit;
-  // Pending Balance = B/F + Net Bank Deposit Total − Debit Total + Last Month Pending Amount − Bank Balance
-  const bankBalance = cd; // "Bank Balance" = this ledger's own Balance C/D
+  // Pending Balance = B/F + Net Bank Deposit Total -  Debit Total + Last Month Pending Amount − Balance C/D
+  const bankBalance = Number(cdManual) || 0; // "Bank Balance" = staff-set Balance C/D (manual)
   const pendingBalance = bf + totalNet - totalDebit + (Number(pendingAmt) || 0) - bankBalance;
-
+  // Final Pending Balance = Pending Balance ± Different (sign staff-selected)
+  const finalPendingBalance = diffSign === "-"
+    ? pendingBalance - (Number(diffAmt) || 0)
+    : pendingBalance + (Number(diffAmt) || 0);
   let running = bf;
 
   // Pending/running balance per card (summary boxes above the table) = sum(net) - sum(debit),
   // matching Excel's E = E_prev + (Credit * (1 - fee%)) - Debit — unchanged.
-   const balances = {};
+ const balances = {};
   cardAccounts.forEach(c => {
     balances[c.id] = entries
-      .filter(e => e.card_id === c.id && e.balance_type !== "bf" && e.balance_type !== "pending")
+      .filter(e => e.card_id === c.id && e.balance_type !== "bf" && e.balance_type !== "pending" && e.balance_type !== "cd_manual" && e.balance_type !== "different")
       .reduce((s, e) => s + Number(e.net ?? e.credit ?? 0) - Number(e.debit || 0), 0);
   });
-
   return (
     <div className="card">
       <div className="chd">
@@ -399,6 +511,12 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
           </div>
         ))}
       </div>
+     <div className="no-print" style={{ padding: "10px 14px 0" }}>
+        <div className="ff" style={{ maxWidth: 220 }}>
+          <label>Select Month</label>
+          <input type="month" value={month} onChange={e => setMonth(e.target.value)} />
+        </div>
+      </div>
 
       <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
         <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
@@ -411,8 +529,13 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
         </div>
         <button className="btn btnd btnsm" onClick={saveBF}>{I.check} Set</button>
       </div>
+      {bfIsAuto && (
+        <div className="no-print" style={{ padding: "0 14px 8px", fontSize: 10.5, color: "var(--mut)" }}>
+          Carried forward from {prevMonthStr(month)}'s Balance C/D — click Set to confirm for this month.
+        </div>
+      )}
 
-      <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+     <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
         <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
           <label>Pending Amount Date</label>
           <input type="date" value={pendingDate} onChange={e => setPendingDate(e.target.value)} />
@@ -422,6 +545,38 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
           <input type="number" value={pendingAmt} onChange={e => setPendingAmt(e.target.value)} />
         </div>
         <button className="btn btnd btnsm" onClick={savePending}>{I.check} Set</button>
+      </div>
+      {pendingIsAuto && (
+        <div className="no-print" style={{ padding: "0 14px 8px", fontSize: 10.5, color: "var(--mut)" }}>
+          Carried forward from {prevMonthStr(month)}'s Final Pending Balance — click Set to confirm for this month.
+        </div>
+      )}
+
+      <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+          <label>Balance C/D Date</label>
+          <input type="date" value={cdManualDate} onChange={e => setCdManualDate(e.target.value)} />
+        </div>
+        <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+          <label>Balance C/D Amount (Rs.)</label>
+          <input type="number" value={cdManual} onChange={e => setCdManual(e.target.value)} />
+        </div>
+        <button className="btn btnd btnsm" onClick={saveCDManual}>{I.check} Set</button>
+      </div>
+
+      <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+        <div className="ff" style={{ marginBottom: 0, minWidth: 90 }}>
+          <label>Sign</label>
+          <select value={diffSign} onChange={e => setDiffSign(e.target.value)}>
+            <option value="+">+</option>
+            <option value="-">−</option>
+          </select>
+        </div>
+        <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+          <label>Different (Rs.)</label>
+          <input type="number" value={diffAmt} onChange={e => setDiffAmt(e.target.value)} />
+        </div>
+        <button className="btn btnd btnsm" onClick={saveDifferent}>{I.check} Set</button>
       </div>
 
       <div className="no-print" style={{ padding: "10px 14px", display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
@@ -493,16 +648,26 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
                 </tr>
               );
             })}
-
-            <tr style={{ background: "var(--s2)" }}>
+          <tr style={{ background: "var(--s2)" }}>
               <td style={{ padding: "6px 10px" }} colSpan={7}><strong>Pending Balance</strong></td>
               <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(pendingBalance)}</td>
             </tr>
             <tr style={{ background: "var(--s2)" }}>
-              <td style={{ padding: "6px 10px" }} colSpan={7}><strong>Balance C/D</strong></td>
-              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(cd)}</td>
+              <td style={{ padding: "6px 10px" }} colSpan={7}>
+                <strong>Different</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({diffSign})</span>
+              </td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(diffAmt)}</td>
             </tr>
-     
+            <tr style={{ background: "var(--s2)" }}>
+              <td style={{ padding: "6px 10px" }} colSpan={7}><strong>Final Pending Balance</strong></td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(finalPendingBalance)}</td>
+            </tr>
+            <tr style={{ background: "var(--s2)" }}>
+              <td style={{ padding: "6px 10px" }} colSpan={7}>
+                <strong>Balance C/D</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({cdManualDate})</span>
+              </td>
+              <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(cdManual)}</td>
+            </tr>
           <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
               <td style={{ padding: "6px 10px", fontWeight: 700 }} colSpan={3}>Total</td>
               <td style={{ padding: "6px 10px", textAlign: "right", fontWeight: 700 }}>{fmt(totalDebit)}</td>

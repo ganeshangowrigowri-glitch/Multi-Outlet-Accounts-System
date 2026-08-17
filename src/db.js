@@ -692,33 +692,35 @@ export const addCardEntry = async (outlet, entry) => {
   if (error) console.error("addCardEntry:", error);
   return !error;
 };
-
-export const getCardBF = async (outlet, cardId) => {
+export const getCardBF = async (outlet, cardId, period) => {
   let q = supabase.from("card_ledger").select("debit,credit")
     .eq("outlet_id", outlet).eq("balance_type", "bf");
   if (cardId) q = q.eq("card_id", cardId);
+  if (period) q = q.eq("period", period);
   const { data } = await q;
-  if (!data || !data.length) return 0;
+  if (!data || !data.length) return null; // null = nothing saved for this month yet
   return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
 };
 
-// Returns the date stored against a card account's Opening Balance (B/F) row.
-export const getCardBFDate = async (outlet, cardId) => {
+export const getCardBFDate = async (outlet, cardId, period) => {
   let q = supabase.from("card_ledger").select("date")
     .eq("outlet_id", outlet).eq("balance_type", "bf");
   if (cardId) q = q.eq("card_id", cardId);
+  if (period) q = q.eq("period", period);
   const { data } = await q.limit(1);
   if (!data || !data.length) return null;
   return data[0].date;
 };
-export const setCardBF = async (outlet, amount, cardId, date) => {
+
+export const setCardBF = async (outlet, amount, cardId, date, period) => {
   let del = supabase.from("card_ledger").delete()
     .eq("outlet_id", outlet).eq("balance_type", "bf");
   if (cardId) del = del.eq("card_id", cardId);
+  if (period) del = del.eq("period", period);
   await del;
   const { error } = await supabase.from("card_ledger").insert({
     outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
-    card_id: cardId || null,
+    card_id: cardId || null, period: period || null,
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
     txn_type: "bf", fee_pct: 0, interest: 0, net: 0,
@@ -730,37 +732,117 @@ export const setCardBF = async (outlet, amount, cardId, date) => {
 // ─── Last Month Pending Amount — stored per card account, same
 // delete-then-insert pattern as B/F above, so editing updates the
 // existing value instead of creating duplicate rows. ────────────
-export const getCardPending = async (outlet, cardId) => {
+export const getCardPending = async (outlet, cardId, period) => {
   let q = supabase.from("card_ledger").select("debit,credit")
     .eq("outlet_id", outlet).eq("balance_type", "pending");
   if (cardId) q = q.eq("card_id", cardId);
+  if (period) q = q.eq("period", period);
   const { data } = await q;
-  if (!data || !data.length) return 0;
+  if (!data || !data.length) return null; // null = nothing saved for this month yet
   return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
 };
 
-export const getCardPendingDate = async (outlet, cardId) => {
+export const getCardPendingDate = async (outlet, cardId, period) => {
   let q = supabase.from("card_ledger").select("date")
     .eq("outlet_id", outlet).eq("balance_type", "pending");
   if (cardId) q = q.eq("card_id", cardId);
+  if (period) q = q.eq("period", period);
   const { data } = await q.limit(1);
   if (!data || !data.length) return null;
   return data[0].date;
 };
 
-export const setCardPending = async (outlet, amount, cardId, date) => {
+export const setCardPending = async (outlet, amount, cardId, date, period) => {
   let del = supabase.from("card_ledger").delete()
     .eq("outlet_id", outlet).eq("balance_type", "pending");
   if (cardId) del = del.eq("card_id", cardId);
+  if (period) del = del.eq("period", period);
   await del;
   const { error } = await supabase.from("card_ledger").insert({
     outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
-    card_id: cardId || null,
+    card_id: cardId || null, period: period || null,
     description: "Last Month Pending Amount", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "pending",
     txn_type: "pending", fee_pct: 0, interest: 0, net: 0,
   });
   if (error) { console.error("setCardPending:", error); return false; }
+  return true;
+};
+
+// ─── Manually-set Balance C/D — stored per card account, same
+// delete-then-insert pattern as B/F and Pending above. This is purely
+// a persisted display value; it does NOT feed into the existing
+// calculated `cd` (Balance C/D) used elsewhere in the ledger. ────────
+export const getCardCD = async (outlet, cardId, period) => {
+  let q = supabase.from("card_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "cd_manual");
+  if (cardId) q = q.eq("card_id", cardId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q;
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const getCardCDDate = async (outlet, cardId, period) => {
+  let q = supabase.from("card_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "cd_manual");
+  if (cardId) q = q.eq("card_id", cardId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q.limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setCardCD = async (outlet, amount, cardId, date, period) => {
+  let del = supabase.from("card_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "cd_manual");
+  if (cardId) del = del.eq("card_id", cardId);
+  if (period) del = del.eq("period", period);
+  await del;
+  const { error } = await supabase.from("card_ledger").insert({
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
+    card_id: cardId || null, period: period || null,
+    description: "Balance C/D (Manual)", debit: amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "cd_manual",
+    txn_type: "cd_manual", fee_pct: 0, interest: 0, net: 0,
+  });
+  if (error) { console.error("setCardCD:", error); return false; }
+  return true;
+};
+
+// ─── Different (manual +/− adjustment to Pending Balance) — stored per
+// card account, same delete-then-insert pattern as above. Sign is encoded
+// via which column is used: credit = "+", debit = "−" (amount itself is
+// always stored positive; getCardDifferent returns amount + sign back out).
+export const getCardDifferent = async (outlet, cardId, period) => {
+  let q = supabase.from("card_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "different");
+  if (cardId) q = q.eq("card_id", cardId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q;
+  if (!data || !data.length) return { amount: 0, sign: "+" };
+  const r = data[0];
+  return Number(r.credit) > 0
+    ? { amount: Number(r.credit), sign: "+" }
+    : { amount: Number(r.debit), sign: "-" };
+};
+
+export const setCardDifferent = async (outlet, amount, sign, cardId, period) => {
+  let del = supabase.from("card_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "different");
+  if (cardId) del = del.eq("card_id", cardId);
+  if (period) del = del.eq("period", period);
+  await del;
+  const amt = Math.abs(Number(amount) || 0);
+  const { error } = await supabase.from("card_ledger").insert({
+    outlet_id: outlet, date: new Date().toISOString().split("T")[0],
+    card_id: cardId || null, period: period || null,
+    description: "Different (Manual Adjustment)",
+    debit: sign === "-" ? amt : 0,
+    credit: sign === "+" ? amt : 0,
+    balance_type: "different", txn_type: "different", fee_pct: 0, interest: 0, net: 0,
+  });
+  if (error) { console.error("setCardDifferent:", error); return false; }
   return true;
 };
 // REMOVED — this is what wrote card settlement/fee rows into bank_ledger,
