@@ -453,7 +453,7 @@ Object.keys(cosByItem).forEach(code => {
 // Per PDF: Sales Revenue → Returns → Net → Cost of Sales → Gross Profit
 //          → Other Income → Total Income → Expenses → Net Profit
 // ══════════════════════════════════════════════════════
-function IncomeStatement({ d, outlet, month }) {
+    function IncomeStatement({ d, outlet, month }) {
   const {
     totalSalesAmt, totalReturns, netSalesAmt,
     openingStockVal, openingStockByCode,
@@ -466,6 +466,12 @@ function IncomeStatement({ d, outlet, month }) {
     expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp, netProfit,
   } = d;
 
+  // Show More / Show Less — Cost of Sales item-level detail rows only.
+  // Default OFF (Show Less) so both screen and print default to the
+  // clean summary-totals view; item rows only render (and therefore
+  // only print) when staff explicitly expands them.
+  const [showCosDetails, setShowCosDetails] = useState(false);
+
   return (
     <ReportWrap title="Income Statement" outlet={outlet} month={month}>
       {/* Sales Revenue */}
@@ -475,13 +481,20 @@ function IncomeStatement({ d, outlet, month }) {
 
       {/* Cost of Sales */}
       <SH>Cost of Sales</SH>
+      <tr className="no-print">
+        <td colSpan={3} style={{ padding: "0 12px 6px" }}>
+          <button className="btn btnd btnsm" onClick={() => setShowCosDetails(v => !v)}>
+            {showCosDetails ? "Show Less" : "Show More"}
+          </button>
+        </td>
+      </tr>
       <TR label="Opening Stock" col2={openingStockVal} indent={1} />
-      {Object.entries(openingStockByCode).filter(([, v]) => v.qty > 0).map(([code, v]) => (
+      {showCosDetails && Object.entries(openingStockByCode).filter(([, v]) => v.qty > 0).map(([code, v]) => (
         <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
       ))}
 
       <TR label="(+) Purchases" col2={totalPurchase} indent={1} />
-      {Object.entries(purBySup).map(([supId, sup]) => (
+      {showCosDetails && Object.entries(purBySup).map(([supId, sup]) => (
         <TR key={`pur-${supId}`} label={supId.replace(/^\d{4}-/, "")} col2={sup.total} indent={2} />
       ))}
 
@@ -489,7 +502,7 @@ function IncomeStatement({ d, outlet, month }) {
       {transOutAmt > 0 && <TR label="(-) Transfer Out" col2={transOutAmt} neg indent={1} />}
 
       <TR label="(-) End Stock" col2={endStockVal} neg indent={1} />
-      {Object.entries(endStockByCode).filter(([, v]) => v.qty > 0).map(([code, v]) => (
+      {showCosDetails && Object.entries(endStockByCode).filter(([, v]) => v.qty > 0).map(([code, v]) => (
         <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
       ))}
 
