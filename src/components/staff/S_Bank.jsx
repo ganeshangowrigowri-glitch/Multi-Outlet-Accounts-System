@@ -7,9 +7,20 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
-import { getBankLedger, getBankBF, getBankBFDate, setBankBF, addBankEntry } from "../../db";
+import { getBankLedger, getBankBF, getBankBFDate, setBankBF, addBankEntry, getBankBFMonthly, getBankBFMonthlyDate, setBankBFMonthly, getBankPending, getBankPendingDate, setBankPending, getBankCD, getBankCDDate, setBankCD, getBankDifferent, setBankDifferent } from "../../db";
 import { printLedger } from "../../utils/printLedger";
 
+const monthStr = (d) => (d || today()).slice(0, 7);
+const prevMonthStr = (m) => {
+  const [y, mo] = m.split("-").map(Number);
+  const d = new Date(y, mo - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+const monthRange = (m) => {
+  const [y, mo] = m.split("-").map(Number);
+  const lastDate = new Date(y, mo, 0).getDate();
+  return [`${m}-01`, `${m}-${String(lastDate).padStart(2, "0")}`];
+};
 
 
 const ENTRY_TYPES = [
@@ -551,6 +562,13 @@ const [entries, setEntries] = useState([]);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [bankId, setBankId] = useState(outletBanks[0]?.id || "");
+  const [month, setMonth] = useState(monthStr(today()));
+
+  useEffect(() => {
+    const [first, last] = monthRange(month);
+    setFrom(first);
+    setTo(last);
+  }, [month]);
 
   useEffect(() => {
     if (outletBanks.length && !bankId) setBankId(outletBanks[0].id);
@@ -561,41 +579,136 @@ const [entries, setEntries] = useState([]);
     getBankLedger(outlet).then(data => { setEntries(data || []); setLoading(false); });
   }, [outlet]);
 
-  // All entries for the selected bank account only (each account has its own passbook)
-  const bankEntries = entries.filter(e => e.bank_id === bankId && e.balance_type !== "bf");
+  const bankEntries = entries.filter(e =>
+    e.bank_id === bankId && e.balance_type !== "bf" && e.balance_type !== "bf_monthly" &&
+    e.balance_type !== "pending" && e.balance_type !== "cd_manual" && e.balance_type !== "different"
+  );
 
-  // Balance B/F = opening balance set for this account + everything dated before the "From" filter
   const [openingBF, setOpeningBF] = useState(0);
   const [bfDate, setBFD] = useState(today());
+  const [bfIsAuto, setBfIsAuto] = useState(false);
   useEffect(() => {
-    if (bankId) {
-      getBankBF(outlet, bankId).then(setOpeningBF);
-      getBankBFDate(outlet, bankId).then(d => setBFD(d || today()));
-    }
-  }, [outlet, bankId]);
+    if (!bankId) return;
+    (async () => {
+      const saved = await getBankBFMonthly(outlet, bankId, month);
+      if (saved !== null) {
+        setOpeningBF(saved);
+        setBFD((await getBankBFMonthlyDate(outlet, bankId, month)) || monthRange(month)[0]);
+        setBfIsAuto(false);
+      } else {
+        const prev = prevMonthStr(month);
+        const prevCD = await getBankCD(outlet, bankId, prev);
+        const prevCDDate = await getBankCDDate(outlet, bankId, prev);
+        setOpeningBF(prevCD || 0);
+        setBFD(prevCDDate || monthRange(month)[0]);
+        setBfIsAuto(true);
+      }
+    })();
+  }, [outlet, bankId, month]);
 
   async function saveBF() {
-    if (!bankId) return;
-    await setBankBF(outlet, parseFloat(openingBF) || 0, bankId, bfDate);
-    const saved = await getBankBF(outlet, bankId);
-    setOpeningBF(saved);
-    toast_ && toast_("Opening balance saved ✓");
+    if (!bankId) { toast_ && toast_("Select a bank account first", "err"); return; }
+    await setBankBFMonthly(outlet, parseFloat(openingBF) || 0, bankId, bfDate, month);
+    const saved = await getBankBFMonthly(outlet, bankId, month);
+    setOpeningBF(saved || 0);
+    setBfIsAuto(false);
+    toast_ && toast_("Balance B/F saved ✓");
   }
 
-  const before = from ? bankEntries.filter(e => e.date < from) : [];
-  const bf = (Number(openingBF) || 0) + before.reduce((a, e) => a + Number(e.debit || 0) - Number(e.credit || 0), 0);
+  async function computeFinalPendingBalance(outlet, bankId, m, allEntries) {
+    const [first, last] = monthRange(m);
+    const monthEntries = allEntries.filter(e =>
+      e.bank_id === bankId &&
+      e.balance_type !== "bf" && e.balance_type !== "bf_monthly" &&
+      e.balance_type !== "pending" && e.balance_type !== "cd_manual" && e.balance_type !== "different" &&
+      e.date >= first && e.date <= last
+    );
+    const mStoredIn  = monthEntries.reduce((a, e) => a + Number(e.debit  || 0), 0);
+    const mStoredOut = monthEntries.reduce((a, e) => a + Number(e.credit || 0), 0);
+    const mBf      = (await getBankBFMonthly(outlet, bankId, m)) || 0;
+    const mPending = (await getBankPending(outlet, bankId, m)) || 0;
+    const mCd      = (await getBankCD(outlet, bankId, m)) || 0;
+    const mDiff    = await getBankDifferent(outlet, bankId, m);
+    const mPendingBalance = mBf + mStoredIn - mStoredOut + mPending - mCd;
+    return mDiff.sign === "-" ? mPendingBalance - mDiff.amount : mPendingBalance + mDiff.amount;
+  }
+
+  const [pendingAmt, setPendingAmt] = useState(0);
+  const [pendingDate, setPendingDate] = useState(today());
+  const [pendingIsAuto, setPendingIsAuto] = useState(false);
+  useEffect(() => {
+    if (!bankId) return;
+    (async () => {
+      const saved = await getBankPending(outlet, bankId, month);
+      if (saved !== null) {
+        setPendingAmt(saved);
+        setPendingDate((await getBankPendingDate(outlet, bankId, month)) || monthRange(month)[0]);
+        setPendingIsAuto(false);
+      } else {
+        const prev = prevMonthStr(month);
+        const prevFinal = await computeFinalPendingBalance(outlet, bankId, prev, entries);
+        setPendingAmt(prevFinal || 0);
+        setPendingDate(monthRange(prev)[1]);
+        setPendingIsAuto(true);
+      }
+    })();
+  }, [outlet, bankId, month, entries]);
+
+  async function savePending() {
+    if (!bankId) { toast_ && toast_("Select a bank account first", "err"); return; }
+    await setBankPending(outlet, parseFloat(pendingAmt) || 0, bankId, pendingDate, month);
+    const saved = await getBankPending(outlet, bankId, month);
+    setPendingAmt(saved || 0);
+    setPendingIsAuto(false);
+    toast_ && toast_("Last month pending amount saved ✓");
+  }
+
+  const [cdManual, setCdManual] = useState(0);
+  const [cdManualDate, setCdManualDate] = useState(today());
+  useEffect(() => {
+    if (!bankId) return;
+    getBankCD(outlet, bankId, month).then(v => setCdManual(v || 0));
+    getBankCDDate(outlet, bankId, month).then(d => setCdManualDate(d || monthRange(month)[1]));
+  }, [outlet, bankId, month]);
+
+  async function saveCDManual() {
+    if (!bankId) { toast_ && toast_("Select a bank account first", "err"); return; }
+    await setBankCD(outlet, parseFloat(cdManual) || 0, bankId, cdManualDate, month);
+    const saved = await getBankCD(outlet, bankId, month);
+    setCdManual(saved || 0);
+    toast_ && toast_("Balance C/D saved ✓");
+  }
+
+  const [diffAmt, setDiffAmt] = useState(0);
+  const [diffSign, setDiffSign] = useState("+");
+  useEffect(() => {
+    if (!bankId) return;
+    getBankDifferent(outlet, bankId, month).then(({ amount, sign }) => {
+      setDiffAmt(amount); setDiffSign(sign);
+    });
+  }, [outlet, bankId, month]);
+
+  async function saveDifferent() {
+    if (!bankId) { toast_ && toast_("Select a bank account first", "err"); return; }
+    await setBankDifferent(outlet, parseFloat(diffAmt) || 0, diffSign, bankId, month);
+    const saved = await getBankDifferent(outlet, bankId, month);
+    setDiffAmt(saved.amount); setDiffSign(saved.sign);
+    toast_ && toast_("Different saved ✓");
+  }
+
+  const bf = Number(openingBF) || 0;
 
   const period = bankEntries
     .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
     .sort((a, b) => (a.date || "").localeCompare(b.date || "") || (a.created_at || "").localeCompare(b.created_at || ""));
 
-  // Stored fields keep their existing meaning (debit=money in, credit=money out).
-  // The passbook DISPLAY convention is the opposite: Debit column = money out,
-  // Credit column = money in. Running balance math is unchanged either way:
-  // Closing = Opening + (money in) - (money out) = Opening + stored.debit - stored.credit.
-  const storedIn  = period.reduce((a, e) => a + Number(e.debit || 0), 0);  // shown under Credit
-  const storedOut = period.reduce((a, e) => a + Number(e.credit || 0), 0); // shown under Debit
-  const cd = bf + storedIn - storedOut;
+  const storedIn  = period.reduce((a, e) => a + Number(e.debit || 0), 0);
+  const storedOut = period.reduce((a, e) => a + Number(e.credit || 0), 0);
+
+  const pendingBalance = bf + storedIn - storedOut + (Number(pendingAmt) || 0) - (Number(cdManual) || 0);
+  const finalPendingBalance = diffSign === "-"
+    ? pendingBalance - (Number(diffAmt) || 0)
+    : pendingBalance + (Number(diffAmt) || 0);
 
   let running = bf;
   const selectedBank = outletBanks.find(b => b.id === bankId);
@@ -609,8 +722,7 @@ const [entries, setEntries] = useState([]);
   const bankLabel = selectedBank
     ? `${selectedBank.bank} — ${selectedBank.account_no || selectedBank.accountNo}`
     : outlet;
-
-  return (
+      return (
     <div className="card">
       <div className="chd">
         <div>
@@ -624,10 +736,17 @@ const [entries, setEntries] = useState([]);
         )}
       </div>
 
+      <div className="no-print" style={{ padding: "12px 14px 0" }}>
+        <div className="ff" style={{ maxWidth: 220 }}>
+          <label>Select Month</label>
+          <input type="month" value={month} onChange={e => setMonth(e.target.value)} />
+        </div>
+      </div>
+
             {outletBanks.length > 0 && (
         <div className="no-print" style={{ padding: "12px 14px 0", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
           <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
-            <label>Opening Balance Date</label>
+            <label>Balance B/F Date</label>
             <input type="date" value={bfDate} onChange={e => setBFD(e.target.value)} />
           </div>
           <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
@@ -635,6 +754,61 @@ const [entries, setEntries] = useState([]);
             <input type="number" value={openingBF} onChange={e => setOpeningBF(e.target.value)} />
           </div>
           <button className="btn btnd btnsm" onClick={saveBF}>{I.check} Set</button>
+        </div>
+      )}
+      {bfIsAuto && (
+        <div className="no-print" style={{ padding: "0 14px 8px", fontSize: 10.5, color: "var(--mut)" }}>
+          Carried forward from {prevMonthStr(month)}'s Balance C/D — click Set to confirm for this month.
+        </div>
+      )}
+
+      {outletBanks.length > 0 && (
+        <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+            <label>Pending Amount Date</label>
+            <input type="date" value={pendingDate} onChange={e => setPendingDate(e.target.value)} />
+          </div>
+          <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+            <label>Last Month Pending Amount (Rs.)</label>
+            <input type="number" value={pendingAmt} onChange={e => setPendingAmt(e.target.value)} />
+          </div>
+          <button className="btn btnd btnsm" onClick={savePending}>{I.check} Set</button>
+        </div>
+      )}
+      {pendingIsAuto && (
+        <div className="no-print" style={{ padding: "0 14px 8px", fontSize: 10.5, color: "var(--mut)" }}>
+          Carried forward from {prevMonthStr(month)}'s Final Pending Balance — click Set to confirm for this month.
+        </div>
+      )}
+
+      {outletBanks.length > 0 && (
+        <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+            <label>Balance C/D Date</label>
+            <input type="date" value={cdManualDate} onChange={e => setCdManualDate(e.target.value)} />
+          </div>
+          <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+            <label>Balance C/D Amount (Rs.)</label>
+            <input type="number" value={cdManual} onChange={e => setCdManual(e.target.value)} />
+          </div>
+          <button className="btn btnd btnsm" onClick={saveCDManual}>{I.check} Set</button>
+        </div>
+      )}
+
+      {outletBanks.length > 0 && (
+        <div className="no-print" style={{ padding: "0 14px", display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <div className="ff" style={{ marginBottom: 0, minWidth: 90 }}>
+            <label>Sign</label>
+            <select value={diffSign} onChange={e => setDiffSign(e.target.value)}>
+              <option value="+">+</option>
+              <option value="-">−</option>
+            </select>
+          </div>
+          <div className="ff" style={{ marginBottom: 0, flex: 1, minWidth: 140 }}>
+            <label>Different (Rs.)</label>
+            <input type="number" value={diffAmt} onChange={e => setDiffAmt(e.target.value)} />
+          </div>
+          <button className="btn btnd btnsm" onClick={saveDifferent}>{I.check} Set</button>
         </div>
       )}
 
@@ -688,6 +862,12 @@ const [entries, setEntries] = useState([]);
                   <td style={td} colSpan={5}><strong>Balance B/F</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({bfDate})</span></td>
                   <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(bf)}</td>
                 </tr>
+                <tr style={{ background: "var(--s2)" }}>
+                  <td style={td} colSpan={5}>
+                    <strong>Last Month Pending Amount</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({pendingDate})</span>
+                  </td>
+                  <td className="rt" style={{ ...td, fontWeight: 700, color: "var(--grn,#4ade80)" }}>{fmt(pendingAmt)}</td>
+                </tr>
                 {loading && <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
                 {!loading && period.length === 0 && (
                   <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>
@@ -707,9 +887,25 @@ const [entries, setEntries] = useState([]);
                   );
                 })}
 
+                <tr style={{ background: "var(--s2)" }}>
+                  <td style={td} colSpan={5}><strong>Pending Balance</strong></td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(pendingBalance)}</td>
+                </tr>
+                <tr style={{ background: "var(--s2)" }}>
+                  <td style={td} colSpan={5}>
+                    <strong>Different</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({diffSign})</span>
+                  </td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(diffAmt)}</td>
+                </tr>
+                <tr style={{ background: "var(--s2)" }}>
+                  <td style={td} colSpan={5}><strong>Final Pending Balance</strong></td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(finalPendingBalance)}</td>
+                </tr>
                 <tr className="ledger-cd-row" style={{ background: "var(--s2)" }}>
-                  <td style={td} colSpan={5}><strong>Balance C/D</strong></td>
-                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(cd)}</td>
+                  <td style={td} colSpan={5}>
+                    <strong>Balance C/D</strong> <span style={{ fontWeight: 400, color: "var(--mut)" }}>({cdManualDate})</span>
+                  </td>
+                  <td className="rt" style={{ ...td, fontWeight: 700 }}>{fmt(cdManual)}</td>
                 </tr>
                 <tr className="ledger-total-row" style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
                   <td style={{ ...td, fontWeight: 700 }} colSpan={3}>Total</td>

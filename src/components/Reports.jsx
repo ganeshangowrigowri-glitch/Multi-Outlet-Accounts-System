@@ -1455,11 +1455,57 @@ function buildUGPriceLookup(inv) {
   return lookup;
 }
 
+// Builds the set of inventory item CODES (e.g. "U0001") that are UG
+// products — by matching each inventory item's name/code against the
+// fixed UG short-name list, same matching rule as buildUGPriceLookup.
+// openingStockByCode is keyed by inventory item code, not by the fixed
+// sheet column names, so this bridges the two for P/Stock.
+function buildUGCodeSet(inv) {
+  const set = new Set();
+  (inv || []).forEach(item => {
+    const candidates = [item.name, item.code, item.itemCode, item.itemName];
+    for (const c of candidates) {
+      const n = normUGName(c);
+      if (UG_NAME_SET.has(n)) {
+        if (item.code) set.add(item.code);
+        if (item.id)   set.add(item.id);
+        break;
+      }
+    }
+  });
+  return set;
+}
+
 function UGBook({ d, outlet, month }) {
   const { purchases, apPayments, apInvoices, openingStockByCode } = d;
 
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
+
+  // ── Manual B/F state (DB-backed, reuses existing supplier_bf table /
+  //    getSupplierBF/setSupplierBF, same as SupplierCreditLedger) ────────
+  const UG_SUPPLIER_ID = "2003-UG";
+  const [manualBF, setManualBFState]     = useState(null);
+  const [bfDateInput, setBfDateInput]     = useState(today());
+  const [bfAmountInput, setBfAmountInput] = useState("");
+  const [bfSaving, setBfSaving]           = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    getSupplierBF(UG_SUPPLIER_ID, outlet).then(entry => {
+      if (cancelled) return;
+      setManualBFState(entry);
+      setBfDateInput(entry?.date || today());
+      setBfAmountInput(entry?.amount ?? "");
+    });
+    return () => { cancelled = true; };
+  }, [outlet]);
+
+  async function handleSetBF() {
+    setBfSaving(true);
+    const entry = await setSupplierBF(UG_SUPPLIER_ID, outlet, bfDateInput, bfAmountInput);
+    setBfSaving(false);
+    if (entry) setManualBFState(entry);
+  }
 
   // ── 1. UG supplier matcher ────────────────────────────────────────────
   const isUG = raw => {
@@ -1476,17 +1522,25 @@ function UGBook({ d, outlet, month }) {
     (!mStart || (p.date >= mStart && p.date <= mEnd))
   );
 
-  // ── 3. B/F: UG balance from all months before this one ───────────────
+  // ── 3. B/F: UG balance from all months before this one (existing,
+  //      unchanged carry-forward logic) ─────────────────────────────────
   const ugInvBefore = (apInvoices || []).filter(p =>
     isUG(p.supplier_id || p.supplier || "") && mStart && p.date < mStart
   );
   const ugPayBefore = (apPayments || []).filter(p =>
     isUG(p.supplier_id || p.supplier || "") && mStart && p.date < mStart
   );
-  const bfBalance =
+  const computedBfBalance =
     ugInvBefore.reduce((a, i) => a + (Number(i.amount)   || 0), 0) -
     ugPayBefore.reduce((a, p) => a + (Number(p.amount)   || 0)
                                    + (Number(p.discount) || 0), 0);
+
+  // Manual B/F override: only applies from its saved date onward, so it
+  // doesn't leak into unrelated earlier months. Months before the manual
+  // B/F date keep using the existing computed (from-history) balance.
+  const useManualBF    = !!manualBF && (!mEnd || manualBF.date <= mEnd);
+  const bfBalance       = useManualBF ? manualBF.amount : computedBfBalance;
+  const bfEffectiveDate = useManualBF ? manualBF.date : mStart;
 
   // ── 4. Fixed product columns (always all 28, in sheet order, using the
   //      exact DB short names as headers). Prices loaded live from the
@@ -1559,20 +1613,15 @@ function UGBook({ d, outlet, month }) {
 
   // ── 7. Footer calculations ────────────────────────────────────────────
   const grossBalance = bfBalance + totalPurchase - totalPayment;
-  const ugDiscount   = totalPurchase * 0.06;    // UG 6% trade discount
-  const vatDiscount  = ugDiscount    * 0.18;    // VAT on the discount
+   const ugDiscount   = (totalPurchase / 1.18) * 0.06;      // UG 6% trade discount 
+  const vatDiscount  = (totalPurchase * 0.06) - ugDiscount; // VAT on the discount 
   const netBalance   = grossBalance - ugDiscount - vatDiscount;
 
-  // P/Stock: opening stock value for UG item codes only.
-  // NOTE: openingStockByCode is keyed by your inventory item codes (e.g.
-  // "U0001"), not by the fixed sheet columns (E1, SP1...). If P/Stock still
-  // doesn't match, you'll need to map your inventory codes to these 28
-  // columns the same way we mapped purchase line names above.
-  const ugCodes = UG_NAME_SET;
-  const pStock  = Object.entries(openingStockByCode || {})
-    .filter(([code]) => ugCodes.has(normUGName(code)))
+    // P/Stock: END-of-month stock value for UG item codes only 
+  const ugItemCodes = buildUGCodeSet(d.inv);
+  const pStock  = Object.entries(d.endStockByCode || {})
+    .filter(([code]) => ugItemCodes.has(code))
     .reduce((a, [, v]) => a + (v.qty || 0) * (v.unitCost || 0), 0);
-
   const mo = month
     ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
     : "All Periods";
@@ -1648,14 +1697,37 @@ function UGBook({ d, outlet, month }) {
   // ── 9. Render ─────────────────────────────────────────────────────────
   return (
     <div>
-      {/* Print button */}
+           {/* Print button */}
       <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
         <button className="btn btnd btnsm" onClick={() => window.print()}>
           {I.print} Print
         </button>
       </div>
 
-      <div style={{
+      {/* Manual B/F control — new, isolated section (reuses supplier_bf) */}
+      <div className="no-print" style={{ display: "flex", alignItems: "flex-end", gap: 10, marginBottom: 12, flexWrap: "wrap", padding: "10px 12px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8 }}>
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 }}>B/F Date</div>
+          <input type="date" value={bfDateInput} onChange={e => setBfDateInput(e.target.value)}
+            style={{ padding: "6px 10px", background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 }}>B/F Amount</div>
+          <input type="number" step="0.01" value={bfAmountInput} onChange={e => setBfAmountInput(e.target.value)}
+            placeholder="0.00"
+            style={{ padding: "6px 10px", width: 140, background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+        </div>
+        <button className="btn btnd btnsm" onClick={handleSetBF} disabled={bfSaving}>
+          {bfSaving ? "Saving…" : "Set B/F"}
+        </button>
+        {manualBF && (
+          <span style={{ fontSize: 11, color: "var(--mut)" }}>
+            Active: Rs.{fmt(manualBF.amount)} as of {manualBF.date}
+          </span>
+        )}
+      </div>
+
+            <div style={{
         background: "var(--s1)", border: "1px solid var(--bdr)",
         borderRadius: "var(--rl)", overflow: "hidden",
       }}>
@@ -1706,9 +1778,11 @@ function UGBook({ d, outlet, month }) {
             </thead>
             <tbody>
 
-              {/* B/F row */}
+             {/* B/F row */}
               <tr style={{ background: "var(--s2)", borderBottom: "1px solid var(--bdr)" }}>
-                <td style={{ ...dayTd, fontWeight: 700, fontSize: 9.5, color: "var(--gld2)" }}>B/F</td>
+                <td style={{ ...dayTd, fontWeight: 700, fontSize: 9.5, color: "var(--gld2)" }}>
+                  B/F{useManualBF ? ` — ${bfEffectiveDate}` : ""}
+                </td>
                 {products.map(p => (
                   <td key={p.code} style={tdNum("var(--mut2)")} />
                 ))}

@@ -568,7 +568,6 @@ export const getBankBFDate = async (outlet, bankId) => {
   if (!data || !data.length) return null;
   return data[0].date;
 };
-
 export const setBankBF = async (outlet, amount, bankId, date) => {
   let del = supabase.from("bank_ledger").delete()
     .eq("outlet_id", outlet).eq("balance_type", "bf");
@@ -582,7 +581,153 @@ export const setBankBF = async (outlet, amount, bankId, date) => {
   });
 };
 
+// ─── Bank Ledger — Month-wise Balance B/F, Last Month Pending Amount,
+// Balance C/D (manual), and Different — mirrors Card Settlement
+// Ledger's month-scoped pattern exactly, but uses balance_type values
+// distinct from the plain "bf" above, so existing Reports/Balance
+// Sheet and Bank Deposit flows are unaffected.
+export const getBankBFMonthly = async (outlet, bankId, period) => {
+  let q = supabase.from("bank_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "bf_monthly");
+  if (bankId) q = q.eq("bank_id", bankId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q;
+  if (!data || !data.length) return null;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const getBankBFMonthlyDate = async (outlet, bankId, period) => {
+  let q = supabase.from("bank_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "bf_monthly");
+  if (bankId) q = q.eq("bank_id", bankId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q.limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setBankBFMonthly = async (outlet, amount, bankId, date, period) => {
+  let del = supabase.from("bank_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "bf_monthly");
+  if (bankId) del = del.eq("bank_id", bankId);
+  if (period) del = del.eq("period", period);
+  await del;
+  const { error } = await supabase.from("bank_ledger").insert({
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
+    bank_id: bankId || null, period: period || null,
+    description: "Balance B/F", debit: amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf_monthly",
+  });
+  if (error) { console.error("setBankBFMonthly:", error); return false; }
+  return true;
+};
+
+export const getBankPending = async (outlet, bankId, period) => {
+  let q = supabase.from("bank_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "pending");
+  if (bankId) q = q.eq("bank_id", bankId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q;
+  if (!data || !data.length) return null;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const getBankPendingDate = async (outlet, bankId, period) => {
+  let q = supabase.from("bank_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "pending");
+  if (bankId) q = q.eq("bank_id", bankId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q.limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setBankPending = async (outlet, amount, bankId, date, period) => {
+  let del = supabase.from("bank_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "pending");
+  if (bankId) del = del.eq("bank_id", bankId);
+  if (period) del = del.eq("period", period);
+  await del;
+  const { error } = await supabase.from("bank_ledger").insert({
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
+    bank_id: bankId || null, period: period || null,
+    description: "Last Month Pending Amount", debit: amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "pending",
+  });
+  if (error) { console.error("setBankPending:", error); return false; }
+  return true;
+};
+
+export const getBankCD = async (outlet, bankId, period) => {
+  let q = supabase.from("bank_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "cd_manual");
+  if (bankId) q = q.eq("bank_id", bankId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q;
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const getBankCDDate = async (outlet, bankId, period) => {
+  let q = supabase.from("bank_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "cd_manual");
+  if (bankId) q = q.eq("bank_id", bankId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q.limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setBankCD = async (outlet, amount, bankId, date, period) => {
+  let del = supabase.from("bank_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "cd_manual");
+  if (bankId) del = del.eq("bank_id", bankId);
+  if (period) del = del.eq("period", period);
+  await del;
+  const { error } = await supabase.from("bank_ledger").insert({
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
+    bank_id: bankId || null, period: period || null,
+    description: "Balance C/D (Manual)", debit: amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "cd_manual",
+  });
+  if (error) { console.error("setBankCD:", error); return false; }
+  return true;
+};
+
+export const getBankDifferent = async (outlet, bankId, period) => {
+  let q = supabase.from("bank_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "different");
+  if (bankId) q = q.eq("bank_id", bankId);
+  if (period) q = q.eq("period", period);
+  const { data } = await q;
+  if (!data || !data.length) return { amount: 0, sign: "+" };
+  const r = data[0];
+  return Number(r.credit) > 0
+    ? { amount: Number(r.credit), sign: "+" }
+    : { amount: Number(r.debit), sign: "-" };
+};
+
+export const setBankDifferent = async (outlet, amount, sign, bankId, period) => {
+  let del = supabase.from("bank_ledger").delete()
+    .eq("outlet_id", outlet).eq("balance_type", "different");
+  if (bankId) del = del.eq("bank_id", bankId);
+  if (period) del = del.eq("period", period);
+  await del;
+  const amt = Math.abs(Number(amount) || 0);
+  const { error } = await supabase.from("bank_ledger").insert({
+    outlet_id: outlet, date: new Date().toISOString().split("T")[0],
+    bank_id: bankId || null, period: period || null,
+    description: "Different (Manual Adjustment)",
+    debit: sign === "-" ? amt : 0,
+    credit: sign === "+" ? amt : 0,
+    balance_type: "different",
+  });
+  if (error) { console.error("setBankDifferent:", error); return false; }
+  return true;
+};
+
 // ─── CAPITAL LEDGER (partner contributions / drawings) ──────────
+
 // Mirrors Excel CAPITAL sheet's "BY MR.K.K/K.J/K.M" (contributions)
 // and "TO MR.K.K.Personal/K.J/K.M/Building Owner/Licensee/Manager Loan"
 // (drawings) lines. direction: 'in' = contribution (BY), 'out' = drawing (TO).
