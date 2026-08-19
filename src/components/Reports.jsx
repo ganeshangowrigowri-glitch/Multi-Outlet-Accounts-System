@@ -1093,37 +1093,104 @@ function SalesSummary({ d, outlet, month }) {
 }
 
 // ══════════════════════════════════════════════════════
-// EXPENSE SUMMARY
+// EXPENSE SUMMARY — chronological detail list: Date, Description,
+// Amount for every expense this period, plus a Total row.
+// ══════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════
+// EXPENSE SUMMARY — chronological detail list: Date, Account,
+// Description, Method, Amount for every expense this period,
+// plus a Total row. Mirrors the Expense History table's format.
+// Self-contained table (not ReportWrap) since ReportWrap's <colgroup>
+// is hardcoded for 3 columns and would squeeze Method/Total together.
 // ══════════════════════════════════════════════════════
 function ExpenseSummary({ d, outlet, month }) {
-  const { expByAcc, totalExp } = d;
-  const expCats = Object.values(expByAcc);
+  const { expenses, totalExp, coa } = d;
+
+  const [methodFilter, setMethodFilter] = useState("All");
+  const methods = ["All", ...new Set((expenses || []).map(e => e.paid_via).filter(Boolean))];
+
+  const rows = [...(expenses || [])]
+    .filter(e => methodFilter === "All" || e.paid_via === methodFilter)
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  const filteredTotal = methodFilter === "All"
+    ? totalExp
+    : rows.reduce((a, e) => a + (Number(e.amount) || 0), 0);
+
+  const acctName = accId => (coa || []).find(a => a.id === accId)?.name || accId || "—";
+
+  const mo = month
+    ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
+    : "All Periods";
+
+  const th = { padding: "8px 12px", fontSize: 9, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--txt)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
+  const td = { padding: "7px 12px", fontSize: 12, borderBottom: "1px solid rgba(63,63,70,.15)" };
 
   return (
-    <ReportWrap title="Expense Summary" outlet={outlet} month={month}>
-      <tr style={{ background: "var(--s3)" }}>
-        {["Description", "Total"].map(h => (
-          <td key={h} style={{ padding: "6px 10px", fontSize: 9, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut2)", borderBottom: "1px solid var(--bdr)", textAlign: h === "Total" ? "right" : "left" }}>{h}</td>
-        ))}
-        <td />
-      </tr>
-      {expCats.length === 0 && <tr><td colSpan={3} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No expenses recorded.</td></tr>}
-      {expCats.sort((a, b) => b.total - a.total).map((e, i) => (
-        <tr key={i} style={{ borderBottom: "1px solid rgba(63,63,70,.3)" }}>
-          <td style={{ padding: "6px 12px", fontSize: 12, color: "var(--txt)" }}>{e.name} <span style={{ fontSize: 10, color: "var(--mut)" }}>({e.id})</span></td>
-          <td style={{ padding: "6px 12px", fontFamily: "'JetBrains Mono',monospace", fontSize: 12, textAlign: "right", color: "var(--red)" }}>Rs.{fmt(e.total)}</td>
-          <td />
-        </tr>
-      ))}
-      <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
-        <td style={{ padding: "7px 12px", fontWeight: 700, fontSize: 12 }}>Total Expenses</td>
-        <td style={{ padding: "7px 12px", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, fontSize: 13, color: "var(--red)", textAlign: "right" }}>Rs.{fmt(totalExp)}</td>
-        <td />
-      </tr>
-    </ReportWrap>
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 12 }}>
+        <select value={methodFilter} onChange={e => setMethodFilter(e.target.value)}
+          style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
+          {methods.map(m => <option key={m} value={m}>{m === "All" ? "All Payment Methods" : m}</option>)}
+        </select>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+
+      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Expense Summary</div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>
+            {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
+            {methodFilter !== "All" && <> &nbsp;·&nbsp; {methodFilter} only</>}
+          </div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <colgroup>
+              <col style={{ width: "12%" }} />
+              <col style={{ width: "23%" }} />
+              <col style={{ width: "30%" }} />
+              <col style={{ width: "13%" }} />
+              <col style={{ width: "22%" }} />
+            </colgroup>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Date</th>
+                <th style={{ ...th, textAlign: "left" }}>Account</th>
+                <th style={{ ...th, textAlign: "left" }}>Description</th>
+                <th style={{ ...th, textAlign: "left" }}>Method</th>
+                <th style={{ ...th, textAlign: "right" }}>Total</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr><td colSpan={5} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No expenses recorded.</td></tr>
+              )}
+              {rows.map((e, i) => (
+                <tr key={e.id || i}>
+                  <td style={{ ...td, fontFamily: "'JetBrains Mono',monospace", color: "var(--mut)" }}>{e.date}</td>
+                  <td style={{ ...td, color: "var(--txt)" }}>{acctName(e.account_id)}</td>
+                  <td style={{ ...td, color: "var(--mut)" }}>{e.description || "—"}</td>
+                  <td style={td}>
+                    <span className={`badge ${e.paid_via === "Cash" ? "ba" : "bb"}`}>{e.paid_via || "—"}</span>
+                  </td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--red)" }}>Rs.{fmt(e.amount)}</td>
+                </tr>
+              ))}
+                 {/* ...table... */}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+                <td style={{ ...td, fontWeight: 700, borderBottom: "none" }} colSpan={4}>
+                  {methodFilter === "All" ? "Total Expenses" : `Total (${methodFilter})`}
+                </td>
+                <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, fontSize: 13, color: "var(--red)", borderBottom: "none" }}>Rs.{fmt(filteredTotal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
   );
 }
-
 // ══════════════════════════════════════════════════════
 // PURCHASE SUMMARY — broken down by supplier per PDF
 // ══════════════════════════════════════════════════════
