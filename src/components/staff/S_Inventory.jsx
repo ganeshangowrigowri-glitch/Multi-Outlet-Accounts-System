@@ -448,9 +448,19 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       ? { ...baseMain, ...opening.main }
       : baseMain;
 
-       // Walk backward day-by-day (capped at 365 days) until a date with an
+           // Walk backward day-by-day (capped at 365 days) until a date with an
     // actual saved sale is found, instead of only checking yesterday.
-    if (!opening?.main || Object.keys(opening.main).length === 0) {
+    // IMPORTANT: trigger this per missing item KEY, not only when the whole
+    // day's opening record is empty. Previously, if even one supplier's key
+    // already existed for this date (the common case — other suppliers save
+    // fine), the whole recovery block was skipped, so a single supplier
+    // whose key failed to propagate on one occasion (e.g. UG) stayed stuck
+    // at a permanent 0 opening while every other supplier on the same date
+    // carried forward correctly.
+    const hasMissingMainKey = lsMain.some(
+      i => opening?.main?.[`${i.code}__${i.supplier}`] === undefined
+    );
+    if (hasMissingMainKey) {
       let yDate = prevDate(mainDate);
       let ySale = null;
       for (let i = 0; i < 365; i++) {
@@ -465,10 +475,13 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
         const recovered = {};
         (ySale.items || []).forEach(r => {
           if (r.isEmptyItem) return;
+          const key = `${r.code}__${r.supplier}`;
+          // Never override a key that's already explicitly saved for this date.
+          if (opening?.main?.[key] !== undefined) return;
           const es = r.endStock !== "" && r.endStock !== undefined && r.endStock !== null
             ? parseFloat(r.endStock) || 0
             : null;
-          if (es !== null) recovered[`${r.code}__${r.supplier}`] = es;
+          if (es !== null) recovered[key] = es;
         });
         mergedMain = { ...mergedMain, ...recovered };
       }
@@ -586,11 +599,19 @@ const pQ = {}, ipQ = {};
     let mergedEmp = opening?.emp
       ? { ...baseEmp, ...opening.emp }
       : baseEmp;
-    // Same backward-walk recovery Main stock already has. Without this,
-    // Empty stock silently fell back to 0 whenever a day's propagated
-    // opening record was missing, instead of carrying forward the last
-    // saved end stock (e.g. UG EMP showing 0 instead of 12 the next day).
-    if (!opening?.emp || Object.keys(opening.emp).length === 0) {
+       // Same backward-walk recovery Main stock already has. IMPORTANT: trigger
+    // this per missing item KEY, not only when the whole day's opening
+    // record is empty. Previously, if even one supplier's key already
+    // existed for this date (the common case — other suppliers save fine),
+    // the whole recovery block was skipped, so a single supplier whose key
+    // failed to propagate on one occasion (e.g. UG EMP) stayed stuck at a
+    // permanent 0 opening — showing 0 instead of 12 the next day — while
+    // every other supplier on the same date carried forward correctly.
+    const hasMissingEmpKey = lsEmp.some(
+      e => opening?.emp?.[`${e.code}__${e.supplier}`] === undefined
+        && opening?.emp?.[e.id] === undefined
+    );
+    if (hasMissingEmpKey) {
       let yDate = prevDate(empDate);
       let ySale = null;
       for (let i = 0; i < 365; i++) {
@@ -604,12 +625,17 @@ const pQ = {}, ipQ = {};
         const recovered = {};
         (ySale.items || []).forEach(r => {
           if (!r.isEmptyItem) return;
+          const key = `${r.code}__${r.supplier}`;
+          // Never override a key that's already explicitly saved for this date.
+          const alreadyHasKey =
+            opening?.emp?.[key] !== undefined || opening?.emp?.[r.id] !== undefined;
+          if (alreadyHasKey) return;
           const es = r.endStock !== "" && r.endStock !== undefined && r.endStock !== null
             ? parseFloat(r.endStock) || 0
             : null;
           if (es !== null) {
             recovered[r.id] = es;
-            recovered[`${r.code}__${r.supplier}`] = es;
+            recovered[key] = es;
           }
         });
         mergedEmp = { ...mergedEmp, ...recovered };

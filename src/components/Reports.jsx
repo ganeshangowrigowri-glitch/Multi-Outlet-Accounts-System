@@ -1093,15 +1093,7 @@ function SalesSummary({ d, outlet, month }) {
 }
 
 // ══════════════════════════════════════════════════════
-// EXPENSE SUMMARY — chronological detail list: Date, Description,
-// Amount for every expense this period, plus a Total row.
-// ══════════════════════════════════════════════════════
-// ══════════════════════════════════════════════════════
-// EXPENSE SUMMARY — chronological detail list: Date, Account,
-// Description, Method, Amount for every expense this period,
-// plus a Total row. Mirrors the Expense History table's format.
-// Self-contained table (not ReportWrap) since ReportWrap's <colgroup>
-// is hardcoded for 3 columns and would squeeze Method/Total together.
+// EXPENSE SUMMARY 
 // ══════════════════════════════════════════════════════
 function ExpenseSummary({ d, outlet, month }) {
   const { expenses, totalExp, coa } = d;
@@ -1192,7 +1184,7 @@ function ExpenseSummary({ d, outlet, month }) {
   );
 }
 // ══════════════════════════════════════════════════════
-// PURCHASE SUMMARY — broken down by supplier per PDF
+// PURCHASE SUMMARY 
 // ══════════════════════════════════════════════════════
 function PurchaseSummary({ d, outlet, month }) {
   const { purBySup, totalPurchase } = d;
@@ -1465,13 +1457,7 @@ function EmptyBottles({ d, outlet, month }) {
   );
 }
 // ══════════════════════════════════════════════════════════════════════════
-// FIXED UG PRODUCT LIST — mirrors the physical Excel "BAR NAME" sheet.
-// These are the EXACT short names used throughout the system/database.
-// Column headers in the UG Book table use these names directly (no
-// relabeling to E1/SP1/etc.), so Excel copy-paste and DB lookups always
-// line up. Prices are NOT stored here — they're loaded live from the
-// inventory master (getInventoryMaster) every time the report runs, so
-// price edits by the admin reflect automatically.
+// FIXED UG PRODUCT LIST — 
 // ══════════════════════════════════════════════════════════════════════════
 const UG_FIXED_PRODUCTS = [
   "UES Q", "UES P", "UES N",
@@ -1535,11 +1521,7 @@ function buildUGPriceLookup(inv) {
   return lookup;
 }
 
-// Builds the set of inventory item CODES (e.g. "U0001") that are UG
-// products — by matching each inventory item's name/code against the
-// fixed UG short-name list, same matching rule as buildUGPriceLookup.
-// openingStockByCode is keyed by inventory item code, not by the fixed
-// sheet column names, so this bridges the two for P/Stock.
+// Builds the set of inventory item CODES 
 function buildUGCodeSet(inv) {
   const set = new Set();
   (inv || []).forEach(item => {
