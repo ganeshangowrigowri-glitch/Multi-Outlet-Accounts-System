@@ -135,10 +135,11 @@ function useReportData(outlet, month, outletList) {
 
       const arrayResults = [];
 for (const o of outlets) {
-  const result = await Promise.all([
+    const result = await Promise.all([
     getSales(o), getPurchases(o), getReturns(o), getTransfers(o),
     getExpenses(o), getCashLedger(o), getBankLedger(o),
     getARLedger(o), getAPInvoices(o), getAPPayments(o), getCapitalLedger(o),
+    getCardLedger(o),
   ]);
   arrayResults.push(result);
 }
@@ -160,9 +161,10 @@ const [inv, coa] = await Promise.all([
 
       let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
       let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[], crateLedgerAll=[];
+      let cardLedgerAll=[];
       let cashBF=0, bankBF=0;
 
-      arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crt]) => {
+        arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,crt]) => {
         sales      = [...sales,      ...inMonth(sal)];
         purchases  = [...purchases,  ...inMonth(pur)];
         returns    = [...returns,    ...inMonth(ret)];
@@ -175,6 +177,7 @@ const [inv, coa] = await Promise.all([
         apPayments = [...apPayments, ...(apPay || [])];
         capitalLedger = [...capitalLedger, ...inMonth(cap)];
         crateLedgerAll = [...crateLedgerAll, ...(crt || [])];
+        cardLedgerAll  = [...cardLedgerAll,  ...inMonth(crd)];
       });
       scalarResults.forEach(([cbf,bbf]) => { cashBF += Number(cbf)||0; bankBF += Number(bbf)||0; });
 
@@ -435,7 +438,7 @@ Object.keys(cosByItem).forEach(code => {
       });
       const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay,sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, stockValBySupplier });
+      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay,sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -796,7 +799,7 @@ function brandOf(rawSupplier) {
 
 // ─────────────────────────────────────────────────────────────────────────
 function SalesSummary({ d, outlet, month }) {
-  const { sales, totalSalesAmt, bankLedger, purchases } = d;
+  const { sales, totalSalesAmt, bankLedger, purchases, cardLedgerAll } = d;
 
   // ── 1. Per-brand, per-day aggregates ─────────────────────────────────
   // brandDay[brandKey][dayNum] = { amt, qty }
@@ -806,13 +809,14 @@ function SalesSummary({ d, outlet, month }) {
   const dailySale = {};   // dayNum → total Rs amount
   const dailySold = {};   // dayNum → total units
 
-  // r.sold is the direct daily qty entered by staff (not cumulative)
-  // — confirmed from console log: D0001=31, D0002=96, D0003=40 etc.
-  // No incremental diff needed — just sum r.sold directly per day.
-  const salesFiltered = [...sales]
+    const salesFiltered = [...sales]
     .filter(s => (s.items || []).some(r => !r.isEmptyItem));
 
   salesFiltered.forEach(s => {
+    // Exact-date guard: only ever bucket a record into the day it actually
+    // belongs to (selectedDate === rowDate). Prevents any stray/out-of-range
+    // record from silently adding onto another day's totals.
+    if (month && monthOf(s.date) !== month) return;
     const day = dayOf(s.date);
 
     (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
@@ -834,9 +838,35 @@ function SalesSummary({ d, outlet, month }) {
   // ── 2. Daily Deposit — from bankLedger debit entries ─────────────────
   const dailyDeposit = {};
   (bankLedger || []).forEach(r => {
+    // Exclude non-transaction marker rows (B/F, monthly B/F, pending,
+    // manual C/D, "different") — same exclusion BankLedgerView already
+    // applies. Without this, the B/F balance row was being summed in as
+    // if it were a deposit, inflating whichever day it's dated to.
+    if (["bf", "bf_monthly", "pending", "cd_manual", "different"].includes(r.balance_type)) return;
+    // Exact-date guard: only ever bucket a row into the day it belongs to.
+    if (month && monthOf(r.date) !== month) return;
+    // Deposit-only guard: bank transfers post debit rows to the same
+    // ledger (e.g. reference-number rows like "823816") and must NOT be
+    // counted here — only rows actually entered as a Bank Deposit.
+    const desc = (r.description || "").trim().toLowerCase();
+    if (desc !== "bank deposit") return;
     const day = dayOf(r.date);
     const deb = Number(r.debit) || 0;
     if (deb > 0) dailyDeposit[day] = (dailyDeposit[day] || 0) + deb;
+  });
+
+  // ── 2b. Daily Card Settlement — from Card Ledger, credit (gross) side.
+  // Only "sale" rows (RecordCollection) carry credit > 0 — "transfer" rows
+  // (TransferToBank) carry debit instead, so they're naturally excluded.
+  // Marker rows (bf/pending/cd_manual/different) are excluded explicitly,
+  // matching how S_Card.jsx's own LedgerView filters cardEntries.
+  const dailyCardSettlement = {};
+  (cardLedgerAll || []).forEach(r => {
+    if (["bf", "pending", "cd_manual", "different"].includes(r.balance_type)) return;
+    if (month && monthOf(r.date) !== month) return;
+    const day = dayOf(r.date);
+    const gross = Number(r.credit) || 0;
+    if (gross > 0) dailyCardSettlement[day] = (dailyCardSettlement[day] || 0) + gross;
   });
 
   // ── 3. Daily Purchase — from purchases records ────────────────────────
@@ -861,10 +891,11 @@ function SalesSummary({ d, outlet, month }) {
   const wkSimple = (map, s, e) =>
     days.filter(d => d >= s && d <= e).reduce((a, d) => a + (map[d] || 0), 0);
 
-   const grandDailySale = Object.values(dailySale   ).reduce((a, v) => a + v, 0);
-   const grandDeposit   = Object.values(dailyDeposit ).reduce((a, v) => a + v, 0);
-   const grandPurchase  = Object.values(dailyPurchase).reduce((a, v) => a + v, 0);
-   const grandSold      = Object.values(dailySold    ).reduce((a, v) => a + v, 0);
+  const grandDailySale  = Object.values(dailySale   ).reduce((a, v) => a + v, 0);
+   const grandDeposit    = Object.values(dailyDeposit ).reduce((a, v) => a + v, 0);
+   const grandCardSettle = Object.values(dailyCardSettlement).reduce((a, v) => a + v, 0);
+   const grandPurchase   = Object.values(dailyPurchase).reduce((a, v) => a + v, 0);
+   const grandSold       = Object.values(dailySold    ).reduce((a, v) => a + v, 0);
 
   const grandBrandAmt = bk => days.reduce((a, d) => a + (brandDay[bk][d]?.amt || 0), 0);
   const grandBrandQty = bk => days.reduce((a, d) => a + (brandDay[bk][d]?.qty || 0), 0);
@@ -906,9 +937,10 @@ function SalesSummary({ d, outlet, month }) {
   });
 
   // ── 6. Weekly subtotal row ────────────────────────────────────────────
-  const WeekRow = ({ s, e }) => {
+    const WeekRow = ({ s, e }) => {
     const wSale    = wkSimple(dailySale,     s, e);
     const wDeposit = wkSimple(dailyDeposit,  s, e);
+    const wCard    = wkSimple(dailyCardSettlement, s, e);
     const wPur     = wkSimple(dailyPurchase, s, e);
     const wSold    = wkSimple(dailySold,     s, e);
     return (
@@ -916,6 +948,7 @@ function SalesSummary({ d, outlet, month }) {
         <td style={{ ...wkTd(), textAlign: "center", whiteSpace: "nowrap" }}>Wk {s}–{e}</td>
         <td style={wkTd()}>{wSale    > 0 ? fmt(wSale)    : ""}</td>
         <td style={wkTd()}>{wDeposit > 0 ? fmt(wDeposit) : ""}</td>
+        <td style={wkTd()}>{wCard    > 0 ? fmt(wCard)    : ""}</td>
 
         {BRAND_CONFIG.map(b => (
           <React.Fragment key={b.key}>
@@ -962,6 +995,7 @@ function SalesSummary({ d, outlet, month }) {
                 <th rowSpan={2} style={{ ...thBase, textAlign: "center", minWidth: 42 }}>Date</th>
                 <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Daily Sale</th>
                 <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Daily Deposit</th>
+                <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Card Settlement</th>
 
                 {BRAND_CONFIG.map(b => b.hasQty ? (
                   // Brands with Qty: span 2 sub-cols
@@ -994,10 +1028,11 @@ function SalesSummary({ d, outlet, month }) {
             </thead>
 
             <tbody>
-              {days.map(day => {
+               {days.map(day => {
                 const weekBreakBefore = weeks.find(([, e]) => e === day - 1);
                 const sale    = dailySale[day]     || 0;
                 const deposit = dailyDeposit[day]  || 0;
+                const card    = dailyCardSettlement[day] || 0;
                 const pur     = dailyPurchase[day] || 0;
                 const sold    = dailySold[day]     || 0;
 
@@ -1017,6 +1052,11 @@ function SalesSummary({ d, outlet, month }) {
                       {/* Daily Deposit */}
                       <td style={tdBase(deposit > 0 ? "var(--blu)" : "var(--mut2)")}>
                         {deposit > 0 ? fmt(deposit) : "-"}
+                      </td>
+
+                      {/* Card Settlement */}
+                      <td style={tdBase(card > 0 ? "var(--blu)" : "var(--mut2)")}>
+                        {card > 0 ? fmt(card) : "-"}
                       </td>
 
                       {/* Brand columns */}
@@ -1065,6 +1105,7 @@ function SalesSummary({ d, outlet, month }) {
                 </td>
                 <td style={totTd("var(--grn)")}>{grandDailySale > 0 ? fmt(grandDailySale) : ""}</td>
                 <td style={totTd("var(--blu)")}>{fmt(grandDeposit)}</td>
+                <td style={totTd("var(--blu)")}>{fmt(grandCardSettle)}</td>
 
                 {BRAND_CONFIG.map(b => (
                   <React.Fragment key={b.key}>
