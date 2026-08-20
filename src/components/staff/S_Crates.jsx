@@ -91,13 +91,21 @@ export default function S_Crates({ outlet, toast_ }) {
   const totals = { purchase: 0, received: 0, returned: 0, ex: 0, issued: 0, sold: 0, short: 0 };
   period.forEach(e => { Object.keys(totals).forEach(k => totals[k] += Number(e[k] || 0)); });
 
+  // Loan / Overpaid — mirrors the Excel sheet's little RECEIVED/ISSUED/LOAN box.
+  // Loan (received > issued): outlet is holding more crates than it gave back.
+  // Overpaid (issued > received): outlet gave back more crates than it received.
+  const loanOverpaidDiff = totals.received - totals.issued;
+  const isLoan = loanOverpaidDiff >= 0;
+  const loanOverpaidLabel = isLoan ? "Loan / OI" : "Over Paid / OS";
+  const loanOverpaidAmt = Math.abs(loanOverpaidDiff);
+
   const th = { padding: "6px 8px", fontSize: 10, fontWeight: 700, letterSpacing: ".03em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
   const td = { padding: "6px 8px", fontSize: 12 };
 
   return (
     <div>
-      {/* ── Crate Type + Opening Balance ── */}
-      <div className="card" style={{ marginBottom: 14 }}>
+            {/* ── Crate Type + Opening Balance ── */}
+      <div className="card no-print" style={{ marginBottom: 14 }}>
         <div className="chd">
           <div>
             <h3>Crate Ledger</h3>
@@ -126,7 +134,7 @@ export default function S_Crates({ outlet, toast_ }) {
       </div>
 
       {/* ── New Entry ── */}
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card no-print" style={{ marginBottom: 14 }}>
         <div className="chd">
           <h3>New Daily Entry</h3>
           <p>{CRATE_TYPES.find(t => t.value === crateType)?.label}</p>
@@ -255,8 +263,28 @@ export default function S_Crates({ outlet, toast_ }) {
                 <td style={td}></td>
                 <td style={td}></td>
               </tr>
-            </tbody>
+                        </tbody>
           </table>
+        </div>
+
+        {/* ── Loan / Overpaid summary — mirrors Excel's RECEIVED/ISSUED/LOAN box ── */}
+        <div style={{ padding: 14, display: "flex", justifyContent: "flex-end" }}>
+          <div style={{ border: "1px solid var(--bdr)", borderRadius: 6, overflow: "hidden", minWidth: 220 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 24, padding: "6px 10px", background: "var(--s2)", borderBottom: "1px solid var(--bdr)" }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "var(--mut2,var(--mut))" }}>RECEIVED</span>
+              <span style={{ fontSize: 12, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{fmt(totals.received)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 24, padding: "6px 10px", background: "var(--s2)", borderBottom: "1px solid var(--bdr)" }}>
+              <span style={{ fontSize: 11, fontWeight: 600, color: "var(--mut2,var(--mut))" }}>ISSUED</span>
+              <span style={{ fontSize: 12, fontFamily: "'JetBrains Mono',monospace", fontWeight: 600 }}>{fmt(totals.issued)}</span>
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 24, padding: "6px 10px", background: "var(--s3)" }}>
+              <span style={{ fontSize: 11, fontWeight: 700, color: isLoan ? "var(--grn)" : "var(--red)" }}>{loanOverpaidLabel}</span>
+              <span style={{ fontSize: 12, fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, color: isLoan ? "var(--grn)" : "var(--red)" }}>
+                {isLoan ? fmt(loanOverpaidAmt) : `-${fmt(loanOverpaidAmt)}`}
+              </span>
+            </div>
+          </div>
         </div>
       </div>
     </div>
