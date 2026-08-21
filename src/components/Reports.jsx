@@ -409,11 +409,19 @@ Object.keys(cosByItem).forEach(code => {
       const cashFlowOut=totalExp+totalEmpRet+bankDeposit+totalReturns;
       const netCashFlow=cashFlowIn-cashFlowOut;
 
-      // ── Empty Bottles ──
-      const empDailyData={};
+                // ── Empty Bottles ──
+      // KEY CHANGE: grouped by Supplier + Item/Code (not supplier alone), so
+      // multiple empty-bottle varieties from the same supplier (e.g. DCSL's
+      // DEMP Q / DEMP P / DEMP N) get fully independent daily figures and
+      // running balances, while still nesting under the supplier for display.
+      const empDailyData={};   // itemKey -> { day: {...} }
+      const empItemMeta={};    // itemKey -> { supplier, code, label }
       sales.forEach(s=>{ const day=dayOf(s.date);
         (s.items||[]).filter(r=>r.isEmptyItem&&r.supplier!=="EMPTY PURCHASE").forEach(e=>{
-          const key=e.supplier||e.name||"Empty";
+          const supplier = e.supplier || "Empty";
+          const itemCode = e.code || e.itemCode || e.name || "ITEM";
+          const key = `${supplier}::${itemCode}`;
+          if(!empItemMeta[key]) empItemMeta[key] = { supplier, code: itemCode, label: e.name || itemCode };
           if(!empDailyData[key]) empDailyData[key]={};
           if(!empDailyData[key][day]) empDailyData[key][day]={sold:0,return_:0,purchase:0,invPurchase:0,received:0,invIssue:0,issue:0};
           empDailyData[key][day].sold+=parseFloat(e.sold)||0; empDailyData[key][day].return_+=parseFloat(e.return_)||0;
@@ -422,7 +430,44 @@ Object.keys(cosByItem).forEach(code => {
           empDailyData[key][day].issue+=parseFloat(e.issue)||0;
         });
       });
-      const empSuppliers=Object.keys(empDailyData);
+      // Supplier (parent) → ordered list of item keys (children), preserving
+      // first-seen order so DCSL's Q/P/N stay grouped together in sequence.
+      const empSupplierGroups = [];
+      const empSupplierIndex = {};
+      Object.keys(empItemMeta).forEach(key => {
+        const { supplier } = empItemMeta[key];
+        if (!(supplier in empSupplierIndex)) {
+          empSupplierIndex[supplier] = empSupplierGroups.length;
+          empSupplierGroups.push({ supplier, items: [] });
+        }
+        empSupplierGroups[empSupplierIndex[supplier]].items.push(key);
+      });
+
+      // Real opening balance (B/F) per supplier, taken from the first empty-item
+      // sale record in the month (same "first date, actual openingStock" pattern
+      // used above for Main opening stock). Without this, every supplier's
+      // running balance always started the month at 0 regardless of the real
+      // carried-forward balance, so B/F (and every day after it) was wrong.
+            // Same "first date, actual openingStock" pattern as before, but now
+      // keyed per item (Supplier::Code) instead of per supplier, so each
+      // DCSL variety carries forward its own correct B/F.
+      const empOpeningByItem = {};
+      const empSalesSortedAsc = [...sales]
+        .filter(s => (s.items||[]).some(r => r.isEmptyItem && r.supplier!=="EMPTY PURCHASE"))
+        .sort((a,b) => (a.date||"").localeCompare(b.date||""));
+      const firstEmpDate = empSalesSortedAsc[0]?.date;
+      const firstEmpDateSales = firstEmpDate
+        ? empSalesSortedAsc.filter(s => s.date === firstEmpDate)
+        : [];
+      firstEmpDateSales.forEach(sale => {
+        (sale.items||[]).filter(r => r.isEmptyItem && r.supplier!=="EMPTY PURCHASE").forEach(r => {
+          const supplier = r.supplier || "Empty";
+          const itemCode = r.code || r.itemCode || r.name || "ITEM";
+          const key = `${supplier}::${itemCode}`;
+          const q = parseFloat(r.openingStock) || 0;
+          empOpeningByItem[key] = (empOpeningByItem[key] || 0) + q;
+        });
+      });
       // crateLedgerAll is already accumulated above (all-time, not month-filtered,
       // since we need the cumulative balance as of period-end for the crate
       // section in Stock Summary — no cost/rate data exists for crates, so
@@ -436,9 +481,9 @@ Object.keys(cosByItem).forEach(code => {
         if (!capitalByParty[p]) capitalByParty[p] = { in: 0, out: 0 };
         capitalByParty[p][e.direction] += Number(e.amount || 0);
       });
-      const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
+        const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay,sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empSuppliers, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier });
+      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -1336,27 +1381,39 @@ function CostOfSalesSummary({ d, outlet, month }) {
 
 // ══════════════════════════════════════════════════════
 // EMPTY BOTTLES
+// Grouped by Supplier (parent) → Item/Code (child). Each item keeps its
+// own independent daily B/F, PUR, IN PUR, REC, RET, EX, IN ISS, ISS, SOL,
+// SHO, BAL — items sharing a supplier are never merged.
 // Columns: DATE | B/F | PUR | IN PUR | REC | RET | EX | IN ISS | ISS | SOL | SHO | BAL
 // ══════════════════════════════════════════════════════
 function EmptyBottles({ d, outlet, month }) {
-  const { empDailyData, empSuppliers } = d;
+  const { empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem } = d;
   const COLS = ["B/F", "PUR", "IN PUR", "REC", "RET", "EX", "IN ISS", "ISS", "SOL", "SHO", "BAL"];
   const days = Array.from({ length: 31 }, (_, i) => i + 1);
 
-  const mo = month
+  // Supplier filter — "ALL" prints/shows every supplier together (existing
+  // behavior); picking one supplier narrows both the on-screen table and
+  // the print output to just that supplier's item groups.
+  const [supplierFilter, setSupplierFilter] = useState("ALL");
+  const allSuppliers = (empSupplierGroups || []).map(g => g.supplier);
+  const visibleGroups = supplierFilter === "ALL"
+    ? empSupplierGroups
+    : (empSupplierGroups || []).filter(g => g.supplier === supplierFilter);
+    const mo = month
     ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
     : "All Periods";
 
+  // ── Styles (narrow-column table, unchanged values, reused per item block) ──
   const thStyle = {
-    padding: "5px 6px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em",
-    textTransform: "uppercase", color: "var(--mut2)", borderBottomWidth: "1px", borderBottomStyle: "solid", borderBottomColor: "var(--bdr)",
-    borderRight: "1px solid var(--bdr)", textAlign: "center", whiteSpace: "nowrap", background: "var(--s3)",
+    padding: "6px 6px", fontSize: 9.5, fontWeight: 800, letterSpacing: ".07em",
+    textTransform: "uppercase", color: "var(--txt)", borderBottom: "1.5px solid var(--bdr2)",
+    borderRight: "1px solid var(--bdr)", textAlign: "center", whiteSpace: "nowrap", background: "var(--s2)",
   };
   const tdStyle = (bold, color) => ({
     padding: "3px 6px", fontSize: 10.5, fontFamily: "'JetBrains Mono',monospace",
     textAlign: "right", borderRight: "1px solid rgba(63,63,70,.2)",
     borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400,
-    color: color || "var(--txt)", minWidth: 38,
+    color: color || "var(--txt)", minWidth: 46,
   });
   const dayTdStyle = {
     padding: "3px 7px", fontSize: 11, fontWeight: 600, color: "var(--mut2)",
@@ -1364,11 +1421,10 @@ function EmptyBottles({ d, outlet, month }) {
     textAlign: "center", background: "var(--s2)",
   };
 
-  // Compute running balance per supplier
-  const runningBal = {};
-  empSuppliers.forEach(s => { runningBal[s] = 0; });
+  const empItemKeys = (visibleGroups || []).flatMap(g => g.items);
+  const totalItems = empItemKeys.length;
 
-  if (empSuppliers.length === 0) {
+  if ((empSupplierGroups || []).length === 0) {
     return (
       <ReportWrap title="Empty Bottles" outlet={outlet} month={month}>
         <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>
@@ -1378,122 +1434,166 @@ function EmptyBottles({ d, outlet, month }) {
     );
   }
 
-  return (
-    <div>
-      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
-      </div>
-      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
-        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Empty Bottles</div>
-          <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}</div>
+  if (totalItems === 0) {
+    return (
+      <ReportWrap title="Empty Bottles" outlet={outlet} month={month}>
+        <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>
+          No empty bottle data for the selected supplier.
+        </td></tr>
+      </ReportWrap>
+    );
+  }
+
+  // Renders one full-width item block (its own header + 31-day table +
+  // TOTAL row + Loan/Overpaid row). Same calculations as before, just laid
+  // out vertically per item instead of tiled horizontally.
+  const ItemBlock = ({ itemKey, supplierLabel }) => {
+    const label = empItemMeta[itemKey]?.label || itemKey;
+    let runBal = empOpeningByItem?.[itemKey] || 0;
+
+    const totals = { purchase: 0, invPurchase: 0, received: 0, return_: 0, invIssue: 0, issue: 0, sold: 0 };
+    Object.values(empDailyData[itemKey] || {}).forEach(dd => {
+      totals.purchase    += dd.purchase    || 0;
+      totals.invPurchase += dd.invPurchase || 0;
+      totals.received    += dd.received    || 0;
+      totals.return_     += dd.return_     || 0;
+      totals.invIssue    += dd.invIssue    || 0;
+      totals.issue       += dd.issue       || 0;
+      totals.sold         += dd.sold        || 0;
+    });
+    const totalBal = totals.purchase + totals.invPurchase + totals.received + totals.return_
+      - totals.invIssue - totals.issue - totals.sold;
+    const diff = totals.received - totals.issue;
+    const isLoan = diff >= 0;
+    const loanLabel = isLoan ? "Loan / OI" : "Over Paid / OS";
+    const loanColor = isLoan ? "var(--grn)" : "var(--red)";
+
+    return (
+      <div style={{ marginBottom: 22 }}>
+        {/* Item block header — Supplier · Item name, e.g. "DCSL — DEMP Q" */}
+                <div style={{
+          padding: "8px 14px", background: "var(--s2)", borderRadius: "8px 8px 0 0",
+          border: "1px solid var(--bdr2)", borderBottom: "none",
+        }}>
+          <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 14, color: "var(--gld2)", fontWeight: 700 }}>
+            {supplierLabel}
+          </span>
+          <span style={{ fontSize: 12, color: "var(--txt)" }}> &nbsp;—&nbsp; {label}</span>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
+
+        <div style={{ overflowX: "auto", border: "1px solid var(--bdr)", borderTop: "none", borderRadius: "0 0 8px 8px" }}>
+          <table style={{ borderCollapse: "collapse", fontSize: 11, width: "100%" }}>
             <thead>
               <tr>
-                <th rowSpan={3} style={{ ...thStyle, minWidth: 42, fontSize: 11 }}>DATE</th>
-                {empSuppliers.map(sup => (
-                  <th key={sup} colSpan={COLS.length} style={{ ...thStyle, background: "var(--gd2)", color: "var(--gld2)", fontSize: 11, borderBottom: "1px solid var(--bdr2)" }}>
-                    {sup}
-                  </th>
-                ))}
-              </tr>
-              <tr>
-                {empSuppliers.map(sup => (
-                  <th key={sup + "eb"} colSpan={COLS.length} style={{ ...thStyle, background: "var(--s3)", color: "var(--mut2)", fontSize: 8.5 }}>
-                    EMPTY BOTTLE
-                  </th>
-                ))}
-              </tr>
-              <tr>
-                {empSuppliers.map(sup =>
-                  COLS.map(col => <th key={sup + col} style={thStyle}>{col}</th>)
-                )}
+                <th style={{ ...thStyle, minWidth: 42 }}>DATE</th>
+                {COLS.map(col => <th key={col} style={thStyle}>{col}</th>)}
               </tr>
             </thead>
             <tbody>
-              {days.map(day => (
-                <tr key={day}>
-                  <td style={dayTdStyle}>{day}</td>
-                  {empSuppliers.map(sup => {
-                    const dd  = (empDailyData[sup] || {})[day] || {};
-                    const pur = dd.purchase    || 0;
-                    const ip  = dd.invPurchase || 0;
-                    const rec = dd.received    || 0;
-                    const ret = dd.return_     || 0;
-                    const ii  = dd.invIssue    || 0;
-                    const iss = dd.issue       || 0;
-                    const sol = dd.sold        || 0;
-                    const bf  = runningBal[sup] || 0;
-                    const bal = bf + pur + ip + rec + ret - ii - iss - sol;
-                    runningBal[sup] = bal;
+              {days.map(day => {
+                const dd  = (empDailyData[itemKey] || {})[day] || {};
+                const pur = dd.purchase    || 0;
+                const ip  = dd.invPurchase || 0;
+                const rec = dd.received    || 0;
+                const ret = dd.return_     || 0;
+                const ii  = dd.invIssue    || 0;
+                const iss = dd.issue       || 0;
+                const sol = dd.sold        || 0;
+                const bf  = runBal;
+                const bal = bf + pur + ip + rec + ret - ii - iss - sol;
+                runBal = bal;
 
-                    return COLS.map(col => {
-                      let val = "";
-                      if (col === "B/F"    && bf  !== 0) val = fmtN(bf);
-                      if (col === "PUR"    && pur  > 0)  val = fmtN(pur);
-                      if (col === "IN PUR" && ip   > 0)  val = fmtN(ip);
-                      if (col === "REC"    && rec  > 0)  val = fmtN(rec);
-                      if (col === "RET"    && ret  > 0)  val = fmtN(ret);
-                      if (col === "IN ISS" && ii   > 0)  val = fmtN(ii);
-                      if (col === "ISS"    && iss  > 0)  val = fmtN(iss);
-                      if (col === "SOL"    && sol  > 0)  val = fmtN(sol);
-                      if (col === "BAL")                  val = fmtN(bal);
-                      return (
-                        <td key={sup + col + day} style={tdStyle(
-                          col === "BAL",
-                          col === "SOL" ? "var(--grn)"
-                            : col === "BAL" ? (bal >= 0 ? "var(--grn)" : "var(--red)")
-                            : "var(--txt)"
-                        )}>
-                          {val}
-                        </td>
-                      );
-                    });
-                  })}
-                </tr>
-              ))}
+                const cell = (col) => {
+                  let val = "";
+                  if (col === "B/F"    && bf  !== 0) val = fmtN(bf);
+                  if (col === "PUR"    && pur  > 0)  val = fmtN(pur);
+                  if (col === "IN PUR" && ip   > 0)  val = fmtN(ip);
+                  if (col === "REC"    && rec  > 0)  val = fmtN(rec);
+                  if (col === "RET"    && ret  > 0)  val = fmtN(ret);
+                  if (col === "IN ISS" && ii   > 0)  val = fmtN(ii);
+                  if (col === "ISS"    && iss  > 0)  val = fmtN(iss);
+                  if (col === "SOL"    && sol  > 0)  val = fmtN(sol);
+                  if (col === "BAL")                  val = fmtN(bal);
+                  return val;
+                };
+
+                return (
+                  <tr key={day}>
+                    <td style={dayTdStyle}>{day}</td>
+                    {COLS.map(col => (
+                      <td key={col} style={tdStyle(
+                        col === "BAL",
+                        col === "SOL" ? "var(--grn)"
+                          : col === "BAL" ? (bal >= 0 ? "var(--grn)" : "var(--red)")
+                          : "var(--txt)"
+                      )}>
+                        {cell(col)}
+                      </td>
+                    ))}
+                  </tr>
+                );
+              })}
+
               {/* TOTAL row */}
               <tr style={{ borderTop: "2px solid var(--bdr2)", background: "var(--s3)" }}>
                 <td style={{ ...dayTdStyle, fontWeight: 700, fontSize: 10, color: "var(--txt)" }}>TOTAL</td>
-                {empSuppliers.map(sup => {
-                  const allDays = Object.values(empDailyData[sup] || {});
-                  const t = { purchase: 0, invPurchase: 0, received: 0, return_: 0, invIssue: 0, issue: 0, sold: 0 };
-                  allDays.forEach(dd => {
-                    t.purchase    += dd.purchase    || 0;
-                    t.invPurchase += dd.invPurchase || 0;
-                    t.received    += dd.received    || 0;
-                    t.return_     += dd.return_     || 0;
-                    t.invIssue    += dd.invIssue    || 0;
-                    t.issue       += dd.issue       || 0;
-                    t.sold        += dd.sold        || 0;
-                  });
-                  const totalBal = t.purchase + t.invPurchase + t.received + t.return_ - t.invIssue - t.issue - t.sold;
-                  return COLS.map(col => {
-                    let val = "";
-                    if (col === "PUR")    val = fmtN(t.purchase);
-                    if (col === "IN PUR") val = fmtN(t.invPurchase);
-                    if (col === "REC")    val = fmtN(t.received);
-                    if (col === "RET")    val = fmtN(t.return_);
-                    if (col === "IN ISS") val = fmtN(t.invIssue);
-                    if (col === "ISS")    val = fmtN(t.issue);
-                    if (col === "SOL")    val = fmtN(t.sold);
-                    if (col === "BAL")    val = fmtN(totalBal);
-                    return (
-                      <td key={"tot" + sup + col} style={tdStyle(true,
-                        col === "SOL" ? "var(--grn)" : col === "BAL" ? "var(--gld2)" : "var(--txt)"
-                      )}>
-                        {val}
-                      </td>
-                    );
-                  });
-                })}
+                <td style={tdStyle(true)} />{/* B/F blank on total, matches prior behavior */}
+                <td style={tdStyle(true)}>{fmtN(totals.purchase)}</td>
+                <td style={tdStyle(true)}>{fmtN(totals.invPurchase)}</td>
+                <td style={tdStyle(true)}>{fmtN(totals.received)}</td>
+                <td style={tdStyle(true)}>{fmtN(totals.return_)}</td>
+                <td style={tdStyle(true)} />{/* EX not tracked, same as before */}
+                <td style={tdStyle(true)}>{fmtN(totals.invIssue)}</td>
+                <td style={tdStyle(true)}>{fmtN(totals.issue)}</td>
+                <td style={tdStyle(true, "var(--grn)")}>{fmtN(totals.sold)}</td>
+                <td style={tdStyle(true)} />{/* SHO not tracked, same as before */}
+                <td style={tdStyle(true, "var(--gld2)")}>{fmtN(totalBal)}</td>
+              </tr>
+
+              {/* Loan / Overpaid row */}
+              <tr style={{ background: "var(--s2)" }}>
+                <td colSpan={COLS.length + 1} style={{ ...tdStyle(true, loanColor), textAlign: "left" }}>
+                  RECEIVED {fmtN(totals.received)} &nbsp;·&nbsp; ISSUED {fmtN(totals.issue)} &nbsp;·&nbsp; {loanLabel}: {fmtN(Math.abs(diff))}
+                </td>
               </tr>
             </tbody>
           </table>
         </div>
       </div>
+    );
+  };
+
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 }}>Supplier</div>
+          <select value={supplierFilter} onChange={e => setSupplierFilter(e.target.value)}
+            style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
+            <option value="ALL">All Suppliers</option>
+            {allSuppliers.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Empty Bottles</div>
+        <div style={{ fontSize: 11, color: "var(--mut)" }}>
+          {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
+          {supplierFilter !== "ALL" && <> &nbsp;·&nbsp; {supplierFilter} only</>}
+        </div>
+      </div>
+
+      {/* One stacked block per item — grouped visually by supplier via the
+          block header, but each item has its own full-width 11-column table. */}
+      {visibleGroups.map(g => (
+        <div key={g.supplier} className="print-break-inside-avoid" style={{ marginBottom: 8 }}>
+          {g.items.map(itemKey => (
+            <ItemBlock key={itemKey} itemKey={itemKey} supplierLabel={g.supplier} />
+          ))}
+        </div>
+      ))}
     </div>
   );
 }
