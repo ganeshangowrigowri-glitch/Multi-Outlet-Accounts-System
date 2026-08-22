@@ -234,11 +234,13 @@ function ScrollArrows({ scrollBy }) {
   const totOpening   = csData.reduce((a, r) => a + (Number(r.opening)     || 0), 0);
   const totInHand    = csData.reduce((a, r) => a + (Number(r.inHandStock)  || 0), 0);
   const totPurchase  = csData.reduce((a, r) => a + (Number(r.totalPurchase)|| 0), 0);
-  return (
+ return (
     <tfoot>
       <tr style={{ background:"var(--s3)", fontWeight:700 }}>
-        <td colSpan={3} className="rt" style={{ paddingRight:11, fontSize:11.5 }}>Totals:</td>
-        <td />
+        <td className="col-num" />
+        <td className="col-code" />
+        <td className="rt" style={{ paddingRight:11, fontSize:11.5 }}>Totals:</td>
+        <td className="col-type" />
         <td className="rt mono bold">{totOpening}</td>
         <td className="rt mono bold">{totPurchase || "—"}</td>
         <td className="rt mono bold" style={{ color:"var(--grn)" }}>{totInHand}</td>
@@ -246,7 +248,11 @@ function ScrollArrows({ scrollBy }) {
         <td className="rt mono bold">Rs.{fmt(totPhys)}</td>
         <td className="rt mono cg bold">Rs.{fmt(totSale)}</td>
         <td className="rt mono cg bold">Rs.{fmt(totProfit)}</td>
-        <td colSpan={5} />
+        <td className="col-margin" />
+        <td />
+        <td />
+        <td />
+        <td />
       </tr>
     </tfoot>
   );
@@ -1175,10 +1181,11 @@ if (salesInRange.length > 0) {
   // ─────────────────────────────────────────────────────────
   //  RENDER
   // ─────────────────────────────────────────────────────────
-  return (
-  <div style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden", width:"100%" }}>
+   return (
+  <div className="sinv-root" style={{ display:"flex", flexDirection:"column", height:"100vh", overflow:"hidden", width:"100%" }}>
 
       <style>{`
+
         [data-inv-tbl]::-webkit-scrollbar { width: 8px; height: 0px; }
         [data-inv-tbl]::-webkit-scrollbar-thumb { background: #f59e0b; border-radius: 4px; }
         [data-inv-tbl]::-webkit-scrollbar-thumb:hover { background: #fbbf24; }
@@ -1436,7 +1443,7 @@ if (salesInRange.length > 0) {
   @page { size: legal landscape; margin: 5mm; }  /* ← Reduced from 8mm */
   .no-print, button, select, input[type=date] { display:none !important; }
   body, html { background:#fff !important; color:#000 !important; font-size:5.5px !important; }  /* ← Reduced from 6.5px */
-  .shell, .main, .page-content, .cs-page {
+   .shell, .main, .page-content, .cs-page, .sinv-root {
     height:auto !important;
     max-height:none !important;
     overflow:visible !important;
@@ -1444,19 +1451,20 @@ if (salesInRange.length > 0) {
   }
   .sidebar, .topbar { display:none !important; }
   
-  .cs-tbl {
+    .cs-tbl {
     width:100% !important;
-    font-size:5.5px !important;  /* ← Reduced from 6.5px */
+    font-size:5.5px !important;
     border-collapse:collapse !important;
-    table-layout:fixed !important;  /* ← Changed from 'auto' */
-    page-break-inside:avoid !important;
+    table-layout:fixed !important;
+    page-break-inside:auto !important;   /* was: avoid — table itself must be allowed to break across pages so all rows print */
+    break-inside:auto !important;        /* modern equivalent, for browsers that prefer the newer property */
   }
-  .cs-tbl thead {
-    display:table-header-group !important;
+   .cs-tbl thead {
+    display:table-row-group !important;   /* was table-header-group — that repeats on every printed page */
     background:#f0f0f0 !important;
   }
   .cs-tbl tbody { display:table-row-group !important; }
-  .cs-tbl tfoot { display:table-footer-group !important; }
+  .cs-tbl tfoot { display:table-row-group !important; }   /* was table-footer-group — that repeats a subtotal at the bottom of every page */
   .cs-tbl tr {
     page-break-inside:avoid !important;
     page-break-after:auto !important;
@@ -1531,10 +1539,18 @@ if (salesInRange.length > 0) {
   /* .cs-tbl-p1 tbody tr td:nth-child(n+9) { display:none !important; } */
   /* .cs-tbl-p1 tfoot tr td:nth-child(n+7) { display:none !important; } */
   
-  /* Hide page 2 table during print (all columns on page 1 now) */
+   /* Hide page 2 table during print (all columns on page 1 now) */
   .cs-tbl-p2 { display:none !important; }
   
   .cs-tbl-p1 { width:100% !important; }
+
+  /* Print-only: hide #, Item Code, Item Type, Margin columns */
+  .cs-tbl-p1 .col-num,
+  .cs-tbl-p1 .col-code,
+  .cs-tbl-p1 .col-type,
+  .cs-tbl-p1 .col-margin {
+    display:none !important;
+  }
 }
 
 /* Screen styles (not printing) */
@@ -1603,11 +1619,12 @@ if (salesInRange.length > 0) {
     <div data-cs-tbl ref={csTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
       <table className="cs-tbl cs-tbl-p1" style={{ width:"100%", minWidth:1100 }}>
       <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
-      <tr>
-            <th style={{ width:30 }}>#</th>
-            <th style={{ width:72 }}>Item Code</th>
+      
+          <tr>
+            <th className="col-num" style={{ width:30 }}>#</th>
+            <th className="col-code" style={{ width:72 }}>Item Code</th>
             <th>Description</th>
-            <th style={{ width:70 }}>Item Type</th>
+            <th className="col-type" style={{ width:70 }}>Item Type</th>
             <th className="rt" style={{ width:82 }}>Opening Stk</th>
             <th className="rt" style={{ width:82 }}>Total Pur</th>
             <th className="rt" style={{ width:82 }}>In Hand Stk</th>
@@ -1615,7 +1632,7 @@ if (salesInRange.length > 0) {
             <th className="rt" style={{ width:108 }}>Phy Stk (Rs.)</th>
             <th className="rt" style={{ width:100 }}>Total Sale (Rs.)</th>
             <th className="rt" style={{ width:100 }}>Profit (Rs.)</th>
-            <th className="rt" style={{ width:80 }}>Margin</th>
+            <th className="rt col-margin" style={{ width:80 }}>Margin</th>
             <th className="rt" style={{ width:76 }}>Trans.In</th>
             <th className="rt" style={{ width:76 }}>Trans.Out</th>
             <th className="rt" style={{ width:70 }}>Return</th>
@@ -1628,10 +1645,10 @@ if (salesInRange.length > 0) {
           )}
           {csData.map((row, idx) => (
             <tr key={row.id}>
-              <td style={{ color:"var(--mut2)", fontSize:11, fontFamily:"monospace" }}>{idx + 1}</td>
-              <td><span className="ctag">{row.code}</span></td>
+              <td className="col-num" style={{ color:"var(--mut2)", fontSize:11, fontFamily:"monospace" }}>{idx + 1}</td>
+              <td className="col-code"><span className="ctag">{row.code}</span></td>
               <td className="bold">{row.name}</td>
-              <td><span className="tpill">{row.type}</span></td>
+              <td className="col-type"><span className="tpill">{row.type}</span></td>
               <td className="rt mono">{row.opening ?? "—"}</td>
               <td className="rt mono">{row.totalPurchase || "—"}</td>
               <td className="rt mono bold" style={{ color: row.inHandStock >= 0 ? "var(--grn)" : "var(--red)" }}>
@@ -1643,7 +1660,7 @@ if (salesInRange.length > 0) {
               </td>
               <td className="rt mono cg">Rs.{fmt(row.totalSaleAmt)}</td>
               <td className="rt mono cg bold">Rs.{fmt(row.profit)}</td>
-              <td className="rt mono">{row.margin !== undefined ? `Rs.${fmt(row.margin)}` : "—"}</td>
+              <td className="rt mono col-margin">{row.margin !== undefined ? `Rs.${fmt(row.margin)}` : "—"}</td>
               <td className="rt mono cb">{row.transferIn || "—"}</td>
               <td className="rt mono ca">{row.transferOut || "—"}</td>
               <td className="rt mono cr">{row.totalReturn || "—"}</td>
