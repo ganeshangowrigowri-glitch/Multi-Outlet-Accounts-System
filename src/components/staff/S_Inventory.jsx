@@ -14,6 +14,17 @@ const MAIN_EMPTY_SUP_IDS = new Set([
   "2007-TODDY",
 ]);
 
+// ── Auto Received: Main-stock purchase qty → Empty "Received" (date-wise) ──
+const EMPTY_RECEIVED_AUTO_MAP = [
+  { emptyCode: "DEMP Q", supplier: "2001-DCSL",         names: ["DES Q","DSP Q","DCA Q"] },
+  { emptyCode: "DEMP P", supplier: "2001-DCSL",         names: ["DES P","DSP P","DCA P"] },
+  { emptyCode: "DEMP N", supplier: "2001-DCSL",         names: ["DES N","DSP N","DCA N","DDB N","DEC N"] },
+  { emptyCode: "UEMP Q", supplier: "2003-UG",           names: ["UES Q","USP Q"] },
+  { emptyCode: "BEMP Q", supplier: "2002-LION BREWERY", quart: true },
+  { emptyCode: "TEMP Q", supplier: "2007-TODDY",        quart: true },
+  { emptyCode: "HEMP Q", supplier: "2006-DCSL BEER",    quart: true },
+];
+
 // ─────────────────────────────────────────────────────────────
 //  OUTLET MAIN INVENTORY
 //  Reads master + outlet overrides (Tab 3).
@@ -592,13 +603,32 @@ const pQ = {}, ipQ = {};
         sid === s || sid.includes(s) || s.includes(sid)
       );
 
-    if (isEmptyPurchaseSup) {
+        if (isEmptyPurchaseSup) {
       pQ[itemCode] = (pQ[itemCode] || 0) + qty;
     } else if (isMainSup) {
       ipQ[itemCode] = (ipQ[itemCode] || 0) + qty;
     }
   }));
- 
+
+  // ── Auto Received: sum matching Main-stock purchase qty for empDate ONLY ──
+  const autoReceivedByCode = {};
+  EMPTY_RECEIVED_AUTO_MAP.forEach(cfg => {
+    const srcCodes = new Set(
+      seedMain
+        .filter(i => i.supplier === cfg.supplier &&
+          (cfg.quart ? (i.name || "").trim().endsWith(" Q") : cfg.names.includes(i.name)))
+        .map(i => i.code)
+    );
+    let sum = 0;
+    dbPurchases
+      .filter(r => txnDate(r) === empDate)
+      .forEach(rec => (rec.items || []).forEach(l => {
+        const ic = l.itemCode || l.code || "";
+        if (srcCodes.has(ic)) sum += parseFloat(l.qty) || 0;
+      }));
+    autoReceivedByCode[cfg.emptyCode] = sum;
+  });
+
     (async () => {
     const opening = await getOpeningStock(outlet, empDate);
     console.log("EMP-DEBUG for", empDate, "raw opening.emp:", opening?.emp);
@@ -693,13 +723,13 @@ const pQ = {}, ipQ = {};
             endStockEdited: saved.endStockEdited || false,
           };
         }
-        return {
+              return {
           ...e,
           adminSellingPrice: adminSP,
           openingStock:      op,
           purchase:    pQ[e.code]  || 0,
           invPurchase: ipQ[e.code] || 0,
-          received:    "",
+          received:    autoReceivedByCode[e.code] ? String(autoReceivedByCode[e.code]) : "",
           return_:     "",
           invIssue:    "",
           issue:       "",
