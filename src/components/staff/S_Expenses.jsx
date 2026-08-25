@@ -2,9 +2,13 @@
 import { useState, useEffect } from "react";
 import { fmt, today, monthOf } from "../../utils/helpers";
 import { I } from "../../utils/icons";
-import { addCashEntry, addBankEntry, addCardEntry, addGLEntry } from "../../db";
+import {
+  addCashEntry, addBankEntry, addCardEntry, addGLEntry,
+  getCashPettyCash, setCashPettyCash, getCashCoins, setCashCoins,
+  getCashPending, getCashPendingDate, setCashPending,
+  getCashDifferent, setCashDifferent,
+} from "../../db";
 import { supabase } from "../../supabase";
-
 
 export default function S_Expenses({ outlet, user, toast_ }) {
 
@@ -174,8 +178,71 @@ export default function S_Expenses({ outlet, user, toast_ }) {
       return a;
     }, {});
 
-  const selectedBank = outletBanks.find(b => b.id === bankId);
+    const selectedBank = outletBanks.find(b => b.id === bankId);
   const selectedCard = cardAccounts.find(c => c.id === cardId);
+
+  // ── Other Cash Payments / Personal Drawings ──
+  // Excel's "CASH PAYEMENT" sheet — logged straight to cash_ledger with a
+  // distinct balance_type so Reports.jsx's Cash Flow Statement can break
+  // them out from ordinary expenses.
+  const [ocpDate, setOcpDate] = useState(today());
+  const [ocpType, setOcpType] = useState("drawing"); // "drawing" | "other_cash"
+  const [ocpDesc, setOcpDesc] = useState("");
+  const [ocpAmt,  setOcpAmt]  = useState("");
+  const [ocpRecords, setOcpRecords] = useState([]);
+  useEffect(() => {
+    supabase.from("cash_ledger")
+      .select("*").eq("outlet_id", outlet)
+      .in("balance_type", ["drawing", "other_cash"])
+      .order("date", { ascending: false })
+      .then(({ data }) => setOcpRecords(data || []));
+  }, [outlet]);
+
+   const [ocpSaving, setOcpSaving] = useState(false);
+
+  async function submitOtherCashPayment() {
+    if (ocpSaving) return; // prevents a double-click (or double-fire) from inserting twice
+    if (!ocpAmt || parseFloat(ocpAmt) <= 0) { toast_("Enter valid amount", "err"); return; }
+    setOcpSaving(true);
+    try {
+      const amt = parseFloat(ocpAmt);
+      const label = ocpType === "drawing" ? "Personal Drawing" : "Other Cash Payment";
+      await addCashEntry(outlet, {
+        date: ocpDate, description: ocpDesc || label,
+        type: ocpType, debit: 0, credit: amt,
+      });
+      setOcpRecords(prev => [{ date: ocpDate, description: ocpDesc || label, credit: amt, balance_type: ocpType, id: `tmp_${Date.now()}` }, ...prev]);
+      toast_(`${label} saved ✓`);
+      setOcpDesc(""); setOcpAmt("");
+    } finally {
+      setOcpSaving(false);
+    }
+  }
+  // ── Cash Balance Detail reconciliation (Petty Cash / Coins / Total
+  // Pending / Different) — month-scoped, mirrors S_Bank.jsx's reconciliation
+  // pattern but for the single In Hand Cash ledger.
+  const cbMonth = today().slice(0, 7);
+  const [pettyCash, setPettyCashVal] = useState(0);
+  const [coins,     setCoinsVal]     = useState(0);
+  const [pendAmt,   setPendAmtVal]   = useState(0);
+  const [pendDate,  setPendDateVal]  = useState(today());
+  const [diffAmt,   setDiffAmtVal]   = useState(0);
+  const [diffSign,  setDiffSignVal]  = useState("+");
+  useEffect(() => {
+    getCashPettyCash(outlet, cbMonth).then(setPettyCashVal);
+    getCashCoins(outlet, cbMonth).then(setCoinsVal);
+    getCashPending(outlet, cbMonth).then(v => setPendAmtVal(v || 0));
+    getCashPendingDate(outlet, cbMonth).then(d => setPendDateVal(d || today()));
+    getCashDifferent(outlet, cbMonth).then(({ amount, sign }) => { setDiffAmtVal(amount); setDiffSignVal(sign); });
+  }, [outlet, cbMonth]);
+
+  async function saveCashDetail() {
+    await setCashPettyCash(outlet, parseFloat(pettyCash) || 0, cbMonth);
+    await setCashCoins(outlet, parseFloat(coins) || 0, cbMonth);
+    await setCashPending(outlet, parseFloat(pendAmt) || 0, pendDate, cbMonth);
+    await setCashDifferent(outlet, parseFloat(diffAmt) || 0, diffSign, cbMonth);
+    toast_("Cash Balance Detail saved ✓");
+  }
 
   return (
     <>
@@ -309,6 +376,92 @@ export default function S_Expenses({ outlet, user, toast_ }) {
           </tbody>
         </table>
       </div>
-    </>
+ 
+  {/* ── Other Cash Payments / Personal Drawings ── */}
+      <div className="card">
+        <div className="chd"><h3>Other Cash Payments</h3></div>
+        <div style={{ padding: 14 }}>
+          <div className="fg">
+            <div className="ff">
+              <label>Date</label>
+              <input type="date" value={ocpDate} onChange={e => setOcpDate(e.target.value)} />
+            </div>
+            <div className="ff">
+              <label>Type</label>
+              <select value={ocpType} onChange={e => setOcpType(e.target.value)}>
+                <option value="drawing">Personal Drawing</option>
+                <option value="other_cash">Other Cash Payment</option>
+              </select>
+            </div>
+            <div className="ff">
+              <label>Amount (Rs.) *</label>
+              <input type="number" placeholder="0.00" value={ocpAmt} onChange={e => setOcpAmt(e.target.value)} />
+            </div>
+            <div className="ff full">
+              <label>Description</label>
+              <input placeholder="Details…" value={ocpDesc} onChange={e => setOcpDesc(e.target.value)} />
+            </div>
+          </div>
+          <div className="nbox nb-a" style={{ marginBottom: 10 }}>
+            ⚠ Deducts from In Hand Cash and appears as its own line in the Cash Flow Statement.
+          </div>
+           <button className="btn btng" onClick={submitOtherCashPayment} disabled={ocpSaving}>
+          {I.check} {ocpSaving ? "Saving…" : "Save"}
+          </button> 
+        </div>
+        <table className="tbl">
+          <thead><tr><th>Date</th><th>Type</th><th>Description</th><th className="rt">Amount</th></tr></thead>
+          <tbody>
+            {ocpRecords.length === 0 && <tr><td colSpan={4}><div className="empty">No entries yet.</div></td></tr>}
+            {ocpRecords.slice(0, 25).map(r => (
+              <tr key={r.id}>
+                <td className="mono">{r.date}</td>
+                <td><span className="badge ba">{r.balance_type === "drawing" ? "Personal Drawing" : "Other Cash"}</span></td>
+                <td style={{ fontSize: 11, color: "var(--mut)" }}>{r.description || "—"}</td>
+                <td className="rt mono cr bold">Rs.{fmt(r.credit)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* ── Cash Balance Detail (month-end reconciliation) ── */}
+      <div className="card">
+        <div className="chd"><h3>Cash Balance Detail — {cbMonth}</h3></div>
+        <div style={{ padding: 14 }}>
+          <div className="fg">
+            <div className="ff">
+              <label>Petty Cash (Rs.)</label>
+              <input type="number" value={pettyCash} onChange={e => setPettyCashVal(e.target.value)} />
+            </div>
+            <div className="ff">
+              <label>Coins (Rs.)</label>
+              <input type="number" value={coins} onChange={e => setCoinsVal(e.target.value)} />
+            </div>
+            <div className="ff">
+              <label>Total Pending Date</label>
+              <input type="date" value={pendDate} onChange={e => setPendDateVal(e.target.value)} />
+            </div>
+            <div className="ff">
+              <label>Total Pending (Rs.)</label>
+              <input type="number" value={pendAmt} onChange={e => setPendAmtVal(e.target.value)} />
+            </div>
+            <div className="ff">
+              <label>Different Sign</label>
+              <select value={diffSign} onChange={e => setDiffSignVal(e.target.value)}>
+                <option value="+">+ (Cash Over)</option>
+                <option value="-">− (Cash Short)</option>
+              </select>
+            </div>
+            <div className="ff">
+              <label>Different (Rs.)</label>
+              <input type="number" value={diffAmt} onChange={e => setDiffAmtVal(e.target.value)} />
+            </div>
+          </div>
+          <button className="btn btnd btnsm" onClick={saveCashDetail}>{I.check} Save Cash Balance Detail</button>
+        </div>
+      </div>
+       </>
   );
 }
+  

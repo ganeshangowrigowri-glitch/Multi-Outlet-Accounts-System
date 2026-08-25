@@ -525,7 +525,109 @@ export const setCashBF = async (outlet, amount, date) => {
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
   });
 };
- 
+
+// ─── Cash Ledger — Month-wise Petty Cash, Coins, Total Pending, and
+// Different — mirrors the Bank Ledger's period-scoped reconciliation
+// pattern (bf_monthly/pending/cd_manual/different) so the Cash Flow
+// Statement's "Cash Balance Detail" block can show the same breakdown
+// as Excel's CASHFLOW STATEMENT sheet.
+// NOTE: requires a `period` text column on cash_ledger (same column
+// already used on bank_ledger) — run once:
+//   ALTER TABLE cash_ledger ADD COLUMN IF NOT EXISTS period text;
+export const getCashPettyCash = async (outlet, period) => {
+  const { data } = await supabase
+    .from("cash_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "petty_cash").eq("period", period);
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const setCashPettyCash = async (outlet, amount, period) => {
+  await supabase.from("cash_ledger")
+    .delete().eq("outlet_id", outlet).eq("balance_type", "petty_cash").eq("period", period);
+  const amt = Math.abs(Number(amount) || 0);
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id: outlet, date: new Date().toISOString().split("T")[0], period,
+    description: "Petty Cash", debit: amt, credit: 0, balance_type: "petty_cash",
+  });
+  if (error) { console.error("setCashPettyCash:", error); return false; }
+  return true;
+};
+
+export const getCashCoins = async (outlet, period) => {
+  const { data } = await supabase
+    .from("cash_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "coins").eq("period", period);
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const setCashCoins = async (outlet, amount, period) => {
+  await supabase.from("cash_ledger")
+    .delete().eq("outlet_id", outlet).eq("balance_type", "coins").eq("period", period);
+  const amt = Math.abs(Number(amount) || 0);
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id: outlet, date: new Date().toISOString().split("T")[0], period,
+    description: "Coins", debit: amt, credit: 0, balance_type: "coins",
+  });
+  if (error) { console.error("setCashCoins:", error); return false; }
+  return true;
+};
+
+export const getCashPending = async (outlet, period) => {
+  const { data } = await supabase
+    .from("cash_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "pending").eq("period", period);
+  if (!data || !data.length) return 0;
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const getCashPendingDate = async (outlet, period) => {
+  const { data } = await supabase
+    .from("cash_ledger").select("date")
+    .eq("outlet_id", outlet).eq("balance_type", "pending").eq("period", period).limit(1);
+  if (!data || !data.length) return null;
+  return data[0].date;
+};
+
+export const setCashPending = async (outlet, amount, date, period) => {
+  await supabase.from("cash_ledger")
+    .delete().eq("outlet_id", outlet).eq("balance_type", "pending").eq("period", period);
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0], period,
+    description: "Total Pending", debit: amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "pending",
+  });
+  if (error) { console.error("setCashPending:", error); return false; }
+  return true;
+};
+
+export const getCashDifferent = async (outlet, period) => {
+  const { data } = await supabase
+    .from("cash_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "different").eq("period", period);
+  if (!data || !data.length) return { amount: 0, sign: "+" };
+  const r = data[0];
+  return Number(r.credit) > 0
+    ? { amount: Number(r.credit), sign: "+" }
+    : { amount: Number(r.debit), sign: "-" };
+};
+
+export const setCashDifferent = async (outlet, amount, sign, period) => {
+  await supabase.from("cash_ledger")
+    .delete().eq("outlet_id", outlet).eq("balance_type", "different").eq("period", period);
+  const amt = Math.abs(Number(amount) || 0);
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id: outlet, date: new Date().toISOString().split("T")[0], period,
+    description: "Different (Manual Adjustment)",
+    debit: sign === "-" ? amt : 0,
+    credit: sign === "+" ? amt : 0,
+    balance_type: "different",
+  });
+  if (error) { console.error("setCashDifferent:", error); return false; }
+  return true;
+};
+
 // ─── BANK LEDGER ─────────────────────────────────────────────
 export const getBankLedger = async (outlet) => {
   const { data, error } = await supabase

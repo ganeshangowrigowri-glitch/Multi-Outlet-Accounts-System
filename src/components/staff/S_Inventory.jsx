@@ -32,7 +32,7 @@ const EMPTY_RECEIVED_AUTO_MAP = [
 //  code to exist under different suppliers (e.g. LION BREWERY
 //  and KASTHURI W/S sharing the same item codes).
 // ─────────────────────────────────────────────────────────────
-  function getOutletInventory(outlet, masterOverride) {
+   export function getOutletInventory(outlet, masterOverride) {
   const master    = masterOverride || ls("inv_main", SEED_INVENTORY);
   const overrides = ls(outletInvKey(outlet), {});
   return master
@@ -749,9 +749,8 @@ const pQ = {}, ipQ = {};
   // ─────────────────────────────────────────────────────────
 
   /**
-   * MAIN STOCK derivation (doc page 4):
+   * MAIN STOCK derivation 
    *   Total   = Opening + Purchase + TransferIn − TransferOut + Returns
-   *             NOTE: Returns are ADDED (goods returned TO the outlet)
    *   Balance = Total − Sold
    *   Amount  = Sold × Rate
    *   End Stock → defaults to Balance, editable by staff
@@ -760,7 +759,6 @@ const pQ = {}, ipQ = {};
    *     if sold=0 → stkSE × adminSellingPrice
    *     if sold>0 → (stkSE × adminSellingPrice) + ((rate − adminSellingPrice) × sold)
    */
-  // REPLACE WITH:
 function deriveMain(r) {
     const opening     = Number(r.openingStock) || 0;
     const purchase    = Number(r.purchase)     || 0;

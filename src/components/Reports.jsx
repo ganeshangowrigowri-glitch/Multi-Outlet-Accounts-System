@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { I } from "../utils/icons";
+import { supabase } from "../supabase";
 import { OUTLETS, SUPPLIERS_LIST } from "../data/seeds";
+import { getOutletInventory } from "./staff/S_Inventory";
 import {
   getOutlets,
   getSales,
@@ -17,6 +19,11 @@ import {
   getAPPayments,
   getCashBF,
   getBankBF,
+  getCardBF,
+  getCashPettyCash,
+  getCashCoins,
+  getCashPending,
+  getCashDifferent,
   getCOA,
   getInventoryMaster,
   getOpeningStock,
@@ -146,7 +153,11 @@ for (const o of outlets) {
 
 const scalarResults = [];
 for (const o of outlets) {
-  const result = await Promise.all([getCashBF(o), getBankBF(o)]);
+  const result = await Promise.all([
+    getCashBF(o), getBankBF(o),
+    getCashPettyCash(o, month), getCashCoins(o, month),
+    getCashPending(o, month), getCashDifferent(o, month),
+  ]);
   scalarResults.push(result);
 }
 
@@ -162,7 +173,7 @@ const [inv, coa] = await Promise.all([
       let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
       let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[], crateLedgerAll=[];
       let cardLedgerAll=[];
-      let cashBF=0, bankBF=0;
+      let cashBF=0, bankBF=0, cashPettyCash=0, cashCoins=0, cashPendingBal=0, cashDiffSigned=0;
 
         arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,crt]) => {
         sales      = [...sales,      ...inMonth(sal)];
@@ -179,21 +190,88 @@ const [inv, coa] = await Promise.all([
         crateLedgerAll = [...crateLedgerAll, ...(crt || [])];
         cardLedgerAll  = [...cardLedgerAll,  ...inMonth(crd)];
       });
-      scalarResults.forEach(([cbf,bbf]) => { cashBF += Number(cbf)||0; bankBF += Number(bbf)||0; });
+        scalarResults.forEach(([cbf,bbf,petty,coins,pend,diff]) => {
+        cashBF += Number(cbf)||0; bankBF += Number(bbf)||0;
+        cashPettyCash += Number(petty)||0; cashCoins += Number(coins)||0;
+        cashPendingBal += Number(pend)||0;
+        cashDiffSigned += diff?.sign === "-" ? -(Number(diff.amount)||0) : (Number(diff?.amount)||0);
+      });
 
-      const invMap = {};
+           const invMap = {};
       (inv||[]).forEach(i => { invMap[i.code]=i; if(i.id) invMap[i.id]=i; });
+
       // ── Sales Revenue ──
-      // Sums actual daily entered qty × rate across every sale record and every
-      // item in the month (same logic as Sales Summary's dailySale calc), so
-      // items missing from the last day's entry are no longer silently dropped.
+      // Mirrors Current Status "Total Sale (Rs.)" exactly (per outlet):
+      // totalBottleSale = opening + purchase − inHandStock (end stock),
+      // totalSaleAmt = totalBottleSale × current selling price.
       let totalSalesAmt = 0;
-      sales.forEach(s => {
-        (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
-          const item = invMap[r.code] || invMap[r.id];
-          const sp  = Number(item?.sellingPrice) || Number(r.sellingPrice) || Number(r.rate) || 0;
-          const qty = parseFloat(r.sold) || 0;
-          totalSalesAmt += qty * sp;
+      outlets.forEach((o, oi) => {
+        const [oSal, oPur] = arrayResults[oi];
+        const oSales     = inMonth(oSal);
+        const oPurchases = inMonth(oPur);
+        const oInv       = getOutletInventory(o, inv);
+
+        oInv.forEach(item => {
+          const sp = Number(item.sellingPrice) || 0;
+
+          const salesInRange = oSales
+            .filter(s => (s.items || []).some(r => !r.isEmptyItem))
+            .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+          let lastEndStock = null;
+          const endRows = [];
+          salesInRange.filter(s => s.date === mEnd).forEach(sale => {
+            const row = (sale.items || []).find(r => !r.isEmptyItem && (
+              (r.id && r.id === item.id) ||
+              (r.code && r.code === item.code && r.supplier === item.supplier)
+            ));
+            if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined) endRows.push(row);
+          });
+          if (endRows.length > 0) {
+            const soldRow = endRows.find(r => parseFloat(r.sold) > 0);
+            lastEndStock = soldRow ? parseFloat(soldRow.endStock)
+              : Math.max(...endRows.map(r => parseFloat(r.endStock)));
+          }
+          if (lastEndStock === null) {
+            for (let i = salesInRange.length - 1; i >= 0; i--) {
+              const row = (salesInRange[i].items || []).find(r => !r.isEmptyItem && (
+                (r.id && r.id === item.id) ||
+                (r.code && r.code === item.code && r.supplier === item.supplier)
+              ));
+              if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined && parseFloat(row.endStock) > 0) {
+                lastEndStock = parseFloat(row.endStock);
+                break;
+              }
+            }
+          }
+
+          let firstOpening = null;
+          if (salesInRange.length > 0) {
+            const firstDate = salesInRange[0].date;
+            salesInRange.filter(s => s.date === firstDate).forEach(sale => {
+              const row = (sale.items || []).find(r => !r.isEmptyItem && (
+                (r.id && r.id === item.id) ||
+                (r.code && r.code === item.code && r.supplier === item.supplier)
+              ));
+              if (row && row.openingStock !== null && row.openingStock !== undefined) {
+                const op = Number(row.openingStock);
+                if (firstOpening === null || op > firstOpening) firstOpening = op;
+              }
+            });
+          }
+
+          let totalPurchase = 0;
+          oPurchases
+            .filter(p => (p.supplier || p.supplier_id) === item.supplier)
+            .forEach(p => (p.items || []).forEach(l => {
+              if (l.itemCode === item.code && !l.isEmptyItem) totalPurchase += parseFloat(l.qty) || 0;
+            }));
+
+          const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+          const inHandStock = lastEndStock !== null ? lastEndStock : opening;
+          const totalBottleSale = opening + totalPurchase - inHandStock;
+
+          totalSalesAmt += totalBottleSale * sp;
         });
       });
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
@@ -335,7 +413,12 @@ const [inv, coa] = await Promise.all([
       const netProfit=totalIncome-totalExp;
 
       // ── Balance Sheet ──
-      const cashBal=cashBF+cashLedger.reduce((a,r)=>a+(Number(r.debit)||0),0)-cashLedger.reduce((a,r)=>a+(Number(r.credit)||0),0);
+       // Petty Cash / Coins / Total Pending / Different are informational
+      // reconciliation entries (Cash Balance Detail), not real cash
+      // movements — same treatment as bank_ledger's bf/pending/cd_manual/
+      // different marker rows, so they must not double-count into cashBal.
+      const cashLedgerTxns = cashLedger.filter(r => !["petty_cash","coins","pending","different"].includes(r.balance_type));
+      const cashBal=cashBF+cashLedgerTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-cashLedgerTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
       const bankBal=bankBF+bankLedger.reduce((a,r)=>a+(Number(r.debit)||0),0)-bankLedger.reduce((a,r)=>a+(Number(r.credit)||0),0);
       const arBal=arLedger.reduce((a,r)=>a+(Number(r.debit)||0)-(Number(r.credit)||0),0);
       const apInvTotal=apInvoices.reduce((a,i)=>a+(Number(i.amount)||0),0);
@@ -403,12 +486,47 @@ Object.keys(cosByItem).forEach(code => {
   if (!(soldQtyByCode[code] > 0)) delete cosByItem[code];
 });
 
-      // ── Cash Flow ──
-      const bankDeposit=bankLedger.filter(t=>Number(t.debit)>0).reduce((a,t)=>a+Number(t.debit),0);
-      const cashFlowIn=totalSalesAmt+totalEmpSold;
-      const cashFlowOut=totalExp+totalEmpRet+bankDeposit+totalReturns;
-      const netCashFlow=cashFlowIn-cashFlowOut;
+              // ── Cash Flow ──
+      // Total Sales Cash — matches Sales Summary's "Daily Sale" total
+      // exactly: sold × rate per item, only for items whose supplier maps
+      // to a known brand (same brandOf() filter Sales Summary uses, which
+      // silently skips unmapped suppliers).
+      const totalDailySaleCash = sales.reduce((a, s) => {
+        if (month && monthOf(s.date) !== month) return a;
+        return a + (s.items || []).filter(r => !r.isEmptyItem).reduce((sum, r) => {
+          const bk = brandOf(r.supplier);
+          if (!bk) return sum;
+          const qty = parseFloat(r.sold) || 0;
+          return sum + qty * (parseFloat(r.rate) || 0);
+        }, 0);
+      }, 0);
 
+      // Bank Deposit — matches Sales Summary's "Total Bank Deposit" exactly:
+      // only rows actually entered as "Bank Deposit" (excludes transfer
+      // reference rows and B/F/pending/CD marker rows).
+      const bankDeposit = (bankLedger||[]).reduce((a,r) => {
+        if (["bf","bf_monthly","pending","cd_manual","different"].includes(r.balance_type)) return a;
+        if ((r.description||"").trim().toLowerCase() !== "bank deposit") return a;
+        return a + (Number(r.debit)||0);
+      }, 0);
+
+      // Visa Card Deposit — matches Sales Summary's "Total Card Settlement"
+      // exactly: card ledger credit (gross settlement) side, excluding
+      // marker rows.
+      const totalCardSettle = (cardLedgerAll||[]).reduce((a,r) => {
+        if (["bf","pending","cd_manual","different"].includes(r.balance_type)) return a;
+        return a + (Number(r.credit)||0);
+      }, 0);
+
+      // Personal Drawings / Other Cash Payments — Excel's "CASH PAYEMENT"
+      // sheet, fed by cash_ledger rows tagged balance_type "drawing" /
+      // "other_cash" (entered from S_Expenses.jsx's Other Cash Payments card).
+      const personalDrawings = cashLedgerTxns.reduce((a,r)=> r.balance_type==="drawing" ? a+(Number(r.credit)||0) : a, 0);
+      const otherCashPayments = cashLedgerTxns.reduce((a,r)=> r.balance_type==="other_cash" ? a+(Number(r.credit)||0) : a, 0);
+
+      const cashFlowIn=totalDailySaleCash+totalEmpSold;
+      const cashFlowOut=totalExp+totalCardSettle+totalEmpRet+bankDeposit+totalReturns+personalDrawings+otherCashPayments;
+      const netCashFlow=cashFlowIn-cashFlowOut;
                 // ── Empty Bottles ──
       // KEY CHANGE: grouped by Supplier + Item/Code (not supplier alone), so
       // multiple empty-bottle varieties from the same supplier (e.g. DCSL's
@@ -481,9 +599,9 @@ Object.keys(cosByItem).forEach(code => {
         if (!capitalByParty[p]) capitalByParty[p] = { in: 0, out: 0 };
         capitalByParty[p][e.direction] += Number(e.amount || 0);
       });
-        const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
+      const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier });
+      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, cashPettyCash, cashCoins, cashPendingBal, cashDiffSigned, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -716,19 +834,29 @@ function BalanceSheet({ d, outlet, month }) {
 // ══════════════════════════════════════════════════════
 // CASH FLOW STATEMENT
 // ══════════════════════════════════════════════════════
-function CashFlowStatement({ d, outlet, month }) {
-  const {
-    totalSalesAmt, empSoldByName, empRetByName,
+  function CashFlowStatement({ d, outlet, month }) {
+    const {
+    totalDailySaleCash, empSoldByName, empRetByName,
     totalEmpSold, totalEmpRet,
     cashFlowIn, cashFlowOut, netCashFlow,
-    bankDeposit, totalReturns, totalExp,
+    bankDeposit, totalCardSettle, totalReturns, totalExp,
+    personalDrawings, otherCashPayments,
+    cashPettyCash, cashCoins, cashPendingBal, cashDiffSigned,
     cashBF, cashBal,
   } = d;
+
+  // Cash Balance Detail plug — mirrors Excel: Petty Cash + Coins +
+  // Total Pending + Cash (ledger) + Different = Total, shown for both
+  // B/F and End columns (petty/coins/pending/different are point-in-time
+  // figures entered for the period, so they read the same on both sides;
+  // only "Cash" moves between B/F and End).
+  const detailTotalBF  = cashPettyCash + cashCoins + cashPendingBal + cashBF + cashDiffSigned;
+  const detailTotalEnd = cashPettyCash + cashCoins + cashPendingBal + cashBal + cashDiffSigned;
 
   return (
     <ReportWrap title="Cash Flow Statement" outlet={outlet} month={month}>
       <SH>Cash Inflows</SH>
-      <TR label="Total Sales Cash" col2={totalSalesAmt} indent={1} />
+      <TR label="Total Sales Cash" col2={totalDailySaleCash} indent={1} />
       {totalEmpSold > 0 && <TR label="Empty Sold" col2={totalEmpSold} indent={1} />}
       {Object.entries(empSoldByName).map(([n, v]) => (
         <TR key={n} label={`  BY ${n}`} col2={v} indent={2} />
@@ -736,8 +864,11 @@ function CashFlowStatement({ d, outlet, month }) {
       <TR label="(1) Total Cash Inflows" val={cashFlowIn} bold total />
 
       <SH>Cash Outflows</SH>
-      <TR label="Day Sheet Expenses" col2={totalExp}     indent={1} />
-      <TR label="Bank Deposit"       col2={bankDeposit}  indent={1} />
+      <TR label="Day Sheet Expenses"     col2={totalExp}           indent={1} />
+      {personalDrawings > 0 && <TR label="Personal Drawings"    col2={personalDrawings}  indent={1} />}
+      {otherCashPayments > 0 && <TR label="Other Cash Payments" col2={otherCashPayments} indent={1} />}
+      <TR label="Bank Deposit"       col2={bankDeposit}      indent={1} />
+      <TR label="Visa Card Deposit"  col2={totalCardSettle}  indent={1} />
       {totalEmpRet > 0 && <TR label="Empty Return" col2={totalEmpRet} indent={1} />}
       {Object.entries(empRetByName).map(([n, v]) => (
         <TR key={n} label={`  TO ${n}`} col2={v} indent={2} />
@@ -747,12 +878,21 @@ function CashFlowStatement({ d, outlet, month }) {
       <TR label="(1) − (2) Net Cash Balance" val={netCashFlow} bold total />
 
       <SH>Cash Balance Detail</SH>
-      <TRSplit label="" col2="B/F Balance" col3="End Balance" />
+      <tr>
+        <td style={{ padding:"5px 12px" }}></td>
+        <td style={{ padding:"5px 14px", textAlign:"right", fontSize:11.5, fontWeight:600, color:"var(--mut)" }}>B/F Balance</td>
+        <td style={{ padding:"5px 14px", textAlign:"right", fontSize:11.5, fontWeight:600, color:"var(--mut)" }}>End Balance</td>
+      </tr>
+      <TRSplit label="Petty Cash"    col2={cashPettyCash}  col3={cashPettyCash} />
+      <TRSplit label="Coins"         col2={cashCoins}      col3={cashCoins} />
+      <TRSplit label="Total Pending" col2={cashPendingBal} col3={cashPendingBal} />
       <TRSplit label="Cash" col2={cashBF} col3={cashBal} />
+      <TRSplit label="Different" col2={cashDiffSigned} col3={cashDiffSigned} />
+      <TRSplit label="Total" col2={detailTotalBF} col3={detailTotalEnd} bold total />
       <TRSplit label="Net Cash" col3={netCashFlow} bold total />
     </ReportWrap>
   );
-}
+  }
 
 // ══════════════════════════════════════════════════════════════════════════
 // SALES SUMMARY
@@ -2547,6 +2687,258 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   );
 }
 
+// ══════════════════════════════════════════════════════
+// BANK STATEMENT (Per Account) — mirrors Excel's "BANK 1".."BANK 4" sheets.
+// Reuses the already-loaded, month-scoped d.bankLedger (every account's
+// rows come through in one array, each tagged with bank_id) and the
+// existing getBankBF(outlet, bankId) helper — no new data-layer code.
+// ══════════════════════════════════════════════════════
+function BankStatement({ d, outlet, month }) {
+  const [accounts, setAccounts] = useState([]);
+  const [bankId, setBankId]     = useState("");
+  const [openingBF, setOpeningBF] = useState(0);
+
+  // Same bank_accounts query S_Bank.jsx already uses for its own dropdown.
+  useEffect(() => {
+    if (outlet === "ALL") { setAccounts([]); setBankId(""); return; }
+    supabase.from("bank_accounts").select("*")
+      .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+      .neq("account_type", "card")
+      .order("bank")
+      .then(({ data }) => setAccounts(data || []));
+  }, [outlet]);
+
+  useEffect(() => {
+    if (accounts.length && !accounts.find(a => a.id === bankId)) setBankId(accounts[0].id);
+  }, [accounts]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (!bankId || outlet === "ALL") { setOpeningBF(0); return; }
+    getBankBF(outlet, bankId).then(v => setOpeningBF(v || 0));
+  }, [outlet, bankId, month]);
+
+  const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
+  const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
+
+  if (outlet === "ALL") {
+    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>Select a specific outlet to view a per-account Bank Statement.</div>;
+  }
+  if (!accounts.length) {
+    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>No bank accounts set up for this outlet.</div>;
+  }
+
+  // Same balance_type exclusions S_Bank.jsx's own Ledger tab uses — keeps
+  // month-scoped B/F, Pending, and manual C/D rows out of the transaction list.
+  const rows = (d.bankLedger || [])
+    .filter(r => r.bank_id === bankId &&
+      r.balance_type !== "bf" && r.balance_type !== "bf_monthly" &&
+      r.balance_type !== "pending" && r.balance_type !== "cd_manual" &&
+      r.balance_type !== "different")
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  let running = Number(openingBF) || 0;
+  const totalDebit  = rows.reduce((a, r) => a + (Number(r.debit)  || 0), 0);
+  const totalCredit = rows.reduce((a, r) => a + (Number(r.credit) || 0), 0);
+  const closingBal  = running + totalDebit - totalCredit;
+
+  const acc = accounts.find(a => a.id === bankId);
+  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
+
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+        <select value={bankId} onChange={e => setBankId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
+          {accounts.map(a => <option key={a.id} value={a.id}>{a.bank} — {a.account_no || a.accountNo}</option>)}
+        </select>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+
+      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>
+            Bank Statement — {acc?.bank}{acc?.account_no ? ` (${acc.account_no})` : ""}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet} &nbsp;·&nbsp; {mo}</div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Date</th>
+                <th style={{ ...th, textAlign: "left" }}>Description</th>
+                <th style={th}>Cheque No</th>
+                <th style={th}>Debit</th>
+                <th style={th}>Credit</th>
+                <th style={th}>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={{ ...td(true), textAlign: "left" }}>—</td>
+                <td style={{ ...td(true), textAlign: "left" }}>Balance B/F</td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(true)}>{fmt(running)}</td>
+              </tr>
+              {rows.map((r, i) => {
+                running += (Number(r.debit) || 0) - (Number(r.credit) || 0);
+                return (
+                  <tr key={r.id || i}>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.description}</td>
+                    <td style={td(false)}>{r.check_no || ""}</td>
+                    <td style={td(false)}>{r.debit  ? fmt(r.debit)  : ""}</td>
+                    <td style={td(false)}>{r.credit ? fmt(r.credit) : ""}</td>
+                    <td style={td(true)}>{fmt(running)}</td>
+                  </tr>
+                );
+              })}
+              <tr>
+                <td style={{ ...td(true), textAlign: "left" }} colSpan={3}>Total / Closing Balance</td>
+                <td style={td(true)}>{fmt(totalDebit)}</td>
+                <td style={td(true)}>{fmt(totalCredit)}</td>
+                <td style={td(true)}>{fmt(closingBal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════
+// CARD STATEMENT (Per Terminal) — mirrors Excel's "VIZA CARD" /
+// "VIZA CARD 2" sheets. Reuses d.cardLedgerAll (already loaded,
+// already month-scoped, already tagged with card_id per row) and
+// the existing getCardBF(outlet, cardId, period) helper — no new
+// data-layer code, no changes to S_Card.jsx's own ledger/interest logic.
+// ══════════════════════════════════════════════════════
+function CardStatement({ d, outlet, month }) {
+  const [cards, setCards]   = useState([]);
+  const [cardId, setCardId] = useState("");
+  const [openingBF, setOpeningBF] = useState(0);
+
+  // Same bank_accounts query S_Card.jsx already uses (account_type = "card").
+  useEffect(() => {
+    if (outlet === "ALL") { setCards([]); setCardId(""); return; }
+    supabase.from("bank_accounts").select("*")
+      .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+      .eq("account_type", "card")
+      .order("bank")
+      .then(({ data }) => setCards(data || []));
+  }, [outlet]);
+
+  useEffect(() => {
+    if (cards.length && !cards.find(c => c.id === cardId)) setCardId(cards[0].id);
+  }, [cards]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // getCardBF is period-scoped (month string) — same "month" value already
+  // driving this whole Reports screen, so it lines up with no conversion.
+  useEffect(() => {
+    if (!cardId || outlet === "ALL") { setOpeningBF(0); return; }
+    getCardBF(outlet, cardId, month).then(v => setOpeningBF(v || 0));
+  }, [outlet, cardId, month]);
+
+  const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
+  const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
+
+  if (outlet === "ALL") {
+    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>Select a specific outlet to view a per-terminal Card Statement.</div>;
+  }
+  if (!cards.length) {
+    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>No card accounts set up for this outlet.</div>;
+  }
+
+  // Same balance_type exclusions S_Card.jsx's own Ledger tab uses.
+  const netOf = e => Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
+  const rows = (d.cardLedgerAll || [])
+    .filter(r => r.card_id === cardId &&
+      r.balance_type !== "bf" && r.balance_type !== "pending" &&
+      r.balance_type !== "cd_manual" && r.balance_type !== "different")
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  let running = Number(openingBF) || 0;
+  const totalGross    = rows.reduce((a, r) => a + (Number(r.credit) || 0), 0);
+  const totalInterest = rows.reduce((a, r) => a + (Number(r.interest) || 0), 0);
+  const totalNet       = rows.reduce((a, r) => a + netOf(r), 0);
+  const totalDebit    = rows.reduce((a, r) => a + (Number(r.debit) || 0), 0);
+  const closingBal    = running + totalNet - totalDebit;
+
+  const card = cards.find(c => c.id === cardId);
+  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
+
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+        <select value={cardId} onChange={e => setCardId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
+          {cards.map(c => <option key={c.id} value={c.id}>{c.bank} — {c.account_no || c.accountNo}</option>)}
+        </select>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+
+      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>
+            Card Statement — {card?.bank}{card?.account_no ? ` (${card.account_no})` : ""}
+            {card?.fee_pct ? ` · ${card.fee_pct}% fee` : ""}
+          </div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet} &nbsp;·&nbsp; {mo}</div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Date</th>
+                <th style={{ ...th, textAlign: "left" }}>Description</th>
+                <th style={th}>Gross</th>
+                <th style={th}>Interest</th>
+                <th style={th}>Net</th>
+                <th style={th}>Debit</th>
+                <th style={th}>Balance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td style={{ ...td(true), textAlign: "left" }}>—</td>
+                <td style={{ ...td(true), textAlign: "left" }}>Balance B/F</td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(true)}>{fmt(running)}</td>
+              </tr>
+              {rows.map((r, i) => {
+                running += netOf(r) - (Number(r.debit) || 0);
+                return (
+                  <tr key={r.id || i}>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.description}</td>
+                    <td style={td(false)}>{r.credit   ? fmt(r.credit)   : ""}</td>
+                    <td style={td(false)}>{r.interest ? fmt(r.interest) : ""}</td>
+                    <td style={td(false)}>{netOf(r) ? fmt(netOf(r)) : ""}</td>
+                    <td style={td(false)}>{r.debit    ? fmt(r.debit)    : ""}</td>
+                    <td style={td(true)}>{fmt(running)}</td>
+                  </tr>
+                );
+              })}
+              <tr>
+                <td style={{ ...td(true), textAlign: "left" }} colSpan={2}>Total / Closing Balance</td>
+                <td style={td(true)}>{fmt(totalGross)}</td>
+                <td style={td(true)}>{fmt(totalInterest)}</td>
+                <td style={td(true)}>{fmt(totalNet)}</td>
+                <td style={td(true)}>{fmt(totalDebit)}</td>
+                <td style={td(true)}>{fmt(closingBal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 export default function Reports({ user }) {
   const isAdmin    = user?.role === "admin";
@@ -2589,7 +2981,9 @@ export default function Reports({ user }) {
     { id: "emptybott", label: "Empty Bottles",         icon: "🍾" },
     { id: "ugbook",    label: "UG Book",               icon: "📒" },
     { id: "supledger", label: "Supplier Credit Ledger", icon: "🧾" },
-    { id: "stocksum",  label: "Stock Summary",          icon: "📦" }
+    { id: "stocksum",  label: "Stock Summary",          icon: "📦" },
+   { id: "bankstmt",  label: "Bank Statement (Per Account)", icon: "🏦" },
+   { id: "cardstmt",  label: "Card Statement (Per Terminal)", icon: "💳" }
   ];
 
   const iS  = { width: "100%", padding: "5px 8px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11.5, fontFamily: "'Inter',sans-serif", color: "var(--txt)", outline: "none" };
@@ -2646,6 +3040,8 @@ export default function Reports({ user }) {
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={handleSupplierChange} applyDiscount={applyDiscount} setApplyDiscount={val => { setApplyDiscount(val); setDiscountTouched(true); }}/>}
             {report==="stocksum"  && <StockSummary d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="bankstmt"  && <BankStatement d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="cardstmt"  && <CardStatement d={d} outlet={effectiveOutlet} month={month}/>}
           </>
         )}
       </div>
