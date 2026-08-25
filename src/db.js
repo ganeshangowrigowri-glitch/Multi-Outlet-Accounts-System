@@ -857,6 +857,69 @@ export const deleteCapitalEntry = async (id) => {
   if (error) console.error("deleteCapitalEntry:", error);
 };
 
+// ─── POSITION LEDGER (Other Credits Outstanding / Liabilities / extra Assets) ──
+// Generic running-balance ledger — same shape/convention as capital_ledger
+// (direction 'in' raises the balance, 'out' lowers it; balance as of any
+// date = sum of all rows up to that date). Feeds Stock Summary's "Other
+// Credits Outstanding", "Liabilities", and the two extra Asset lines that
+// don't have a dedicated module (Staff Loan Receivable, Damage Receivable).
+// NOTE: requires a new table — run once in Supabase:
+//   CREATE TABLE position_ledger (
+//     id bigint generated always as identity primary key,
+//     outlet_id text not null,
+//     date date not null,
+//     category_group text not null,   -- 'asset' | 'other_credit' | 'liability'
+//     category text not null,         -- one of POSITION_CATEGORIES[group][].key
+//     direction text not null,        -- 'in' | 'out'
+//     amount numeric not null default 0,
+//     notes text,
+//     created_at timestamptz default now()
+//   );
+export const POSITION_CATEGORIES = {
+  asset: [
+    { key: "staff_loan",        label: "Staff Loan Receivable" },
+    { key: "damage_receivable", label: "Damage Receivable" },
+  ],
+  other_credit: [
+    { key: "transfer_goods",    label: "Transfer Goods" },
+    { key: "due_deposit",       label: "Due Deposit / Extra Deposits" },
+    { key: "empty_credits",     label: "Empty Credits" },
+    { key: "other_credit_misc", label: "Others" },
+  ],
+  liability: [
+    { key: "bank_pending",      label: "Bank Pending" },
+    { key: "visa_pending",      label: "Visa Card Pending" },
+    { key: "unapproved_exp",    label: "Unapproved Expenses" },
+    { key: "damage_payable",    label: "Damage Payable" },
+    { key: "liability_misc",    label: "Others" },
+  ],
+};
+
+export const getPositionLedger = async (outlet) => {
+  const { data, error } = await supabase
+    .from("position_ledger").select("*").eq("outlet_id", outlet).order("date");
+  if (error) { console.error("getPositionLedger:", error); return []; }
+  return data;
+};
+
+export const addPositionEntry = async (outlet, entry) => {
+  const { error } = await supabase.from("position_ledger").insert({
+    outlet_id:      outlet,
+    date:           entry.date,
+    category_group: entry.categoryGroup, // 'asset' | 'other_credit' | 'liability'
+    category:       entry.category,      // POSITION_CATEGORIES[group][].key
+    direction:      entry.direction,     // 'in' | 'out'
+    amount:         entry.amount || 0,
+    notes:          entry.notes || "",
+  });
+  if (error) console.error("addPositionEntry:", error);
+};
+
+export const deletePositionEntry = async (id) => {
+  const { error } = await supabase.from("position_ledger").delete().eq("id", id);
+  if (error) console.error("deletePositionEntry:", error);
+};
+
 // ─── CRATE LEDGER (plastic & wood crates) ────────────────────────
 // Mirrors Excel's PLASTIC CRATES / WOOD CRATES blocks on the EMPTY PL
 // sheet. One row per (outlet, date, crate_type); balance is computed

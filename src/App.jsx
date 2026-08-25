@@ -16,6 +16,7 @@ import S_Expenses from "./components/staff/S_Expenses";
 import S_Bank from "./components/staff/S_Bank";
 import S_Card from "./components/staff/S_Card";
 import S_Capital from "./components/staff/S_Capital";
+import S_Position from "./components/staff/S_Position";
 import S_Crates from "./components/staff/S_Crates";
 import "../src/styles/global.css";
 import { supabase } from "./supabase";
@@ -429,6 +430,7 @@ function StaffPortal({ user, onLogout }) {
     { id:"bank",    label:"Bank",                 icon:I.bank },
     { id:"card",    label:"Card Settlement",      icon:I.bank },
     { id:"capital", label:"Capital Ledger",       icon:I.users },
+    { id:"position", label:"Other Credits / Liabilities", icon:I.users },
     { id:"crates",  label:"Crate Ledger",         icon:I.pkg },
     { id:"reports", label:"Reports",              icon:I.print},
     { id:"coa",     label:"Chart of Accounts",    icon:I.coa  },
@@ -525,6 +527,7 @@ function StaffPortal({ user, onLogout }) {
           {page==="bank" && <S_Bank outlet={outlet} toast_={toast_}/>}
           {page==="card" && <S_Card outlet={outlet} toast_={toast_}/>}
           {page==="capital" && <S_Capital outlet={outlet} toast_={toast_}/>}
+          {page==="position" && <S_Position outlet={outlet} toast_={toast_}/>}
           {page==="crates" && <S_Crates outlet={outlet} toast_={toast_}/>}
           {page==="coa"  && <ChartOfAccounts user={user}/>}
           {page==="reports" && <Reports user={user}/>}

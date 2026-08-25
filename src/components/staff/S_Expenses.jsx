@@ -181,12 +181,14 @@ export default function S_Expenses({ outlet, user, toast_ }) {
     const selectedBank = outletBanks.find(b => b.id === bankId);
   const selectedCard = cardAccounts.find(c => c.id === cardId);
 
-  // ── Other Cash Payments / Personal Drawings ──
-  // Excel's "CASH PAYEMENT" sheet — logged straight to cash_ledger with a
-  // distinct balance_type so Reports.jsx's Cash Flow Statement can break
-  // them out from ordinary expenses.
+ 
+  // PAYEMENT sheet categories. "CUSTOM" reveals a free-text field so
+  // staff can still type something not on the list.
+  const OCP_PRESETS = ["BB CASH", "BBB", "UBB", "DBB", "MR.KK LOAN", "UG DISCOUNT"];
+
   const [ocpDate, setOcpDate] = useState(today());
   const [ocpType, setOcpType] = useState("drawing"); // "drawing" | "other_cash"
+  const [ocpPreset, setOcpPreset] = useState(OCP_PRESETS[0]);
   const [ocpDesc, setOcpDesc] = useState("");
   const [ocpAmt,  setOcpAmt]  = useState("");
   const [ocpRecords, setOcpRecords] = useState([]);
@@ -200,18 +202,27 @@ export default function S_Expenses({ outlet, user, toast_ }) {
 
    const [ocpSaving, setOcpSaving] = useState(false);
 
-  async function submitOtherCashPayment() {
+    async function submitOtherCashPayment() {
     if (ocpSaving) return; // prevents a double-click (or double-fire) from inserting twice
     if (!ocpAmt || parseFloat(ocpAmt) <= 0) { toast_("Enter valid amount", "err"); return; }
+    // Other Cash Payment: use the preset unless "CUSTOM" is picked, in
+    // which case the free-text field is required. Personal Drawing keeps
+    // using the free-text field as before.
+    if (ocpType === "other_cash" && ocpPreset === "CUSTOM" && !ocpDesc.trim()) {
+      toast_("Enter a description for the custom entry", "err"); return;
+    }
     setOcpSaving(true);
     try {
       const amt = parseFloat(ocpAmt);
-      const label = ocpType === "drawing" ? "Personal Drawing" : "Other Cash Payment";
+      const label = ocpType === "drawing"
+        ? "Personal Drawing"
+        : (ocpPreset === "CUSTOM" ? ocpDesc.trim() : ocpPreset);
+      const finalDesc = ocpType === "drawing" ? (ocpDesc || label) : label;
       await addCashEntry(outlet, {
-        date: ocpDate, description: ocpDesc || label,
+        date: ocpDate, description: finalDesc,
         type: ocpType, debit: 0, credit: amt,
       });
-      setOcpRecords(prev => [{ date: ocpDate, description: ocpDesc || label, credit: amt, balance_type: ocpType, id: `tmp_${Date.now()}` }, ...prev]);
+      setOcpRecords(prev => [{ date: ocpDate, description: finalDesc, credit: amt, balance_type: ocpType, id: `tmp_${Date.now()}` }, ...prev]);
       toast_(`${label} saved ✓`);
       setOcpDesc(""); setOcpAmt("");
     } finally {
@@ -386,21 +397,35 @@ export default function S_Expenses({ outlet, user, toast_ }) {
               <label>Date</label>
               <input type="date" value={ocpDate} onChange={e => setOcpDate(e.target.value)} />
             </div>
-            <div className="ff">
+                      <div className="ff">
               <label>Type</label>
               <select value={ocpType} onChange={e => setOcpType(e.target.value)}>
                 <option value="drawing">Personal Drawing</option>
                 <option value="other_cash">Other Cash Payment</option>
               </select>
             </div>
+            {ocpType === "other_cash" && (
+              <div className="ff">
+                <label>Category *</label>
+                <select value={ocpPreset} onChange={e => setOcpPreset(e.target.value)}>
+                  {OCP_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
+                  <option value="CUSTOM">Other</option>
+                </select>
+              </div>
+            )}
             <div className="ff">
               <label>Amount (Rs.) *</label>
               <input type="number" placeholder="0.00" value={ocpAmt} onChange={e => setOcpAmt(e.target.value)} />
             </div>
-            <div className="ff full">
-              <label>Description</label>
-              <input placeholder="Details…" value={ocpDesc} onChange={e => setOcpDesc(e.target.value)} />
-            </div>
+            {/* Personal Drawing: free-text description as before.
+                Other Cash Payment: free-text only shown/required when
+                CUSTOM is selected in the Category dropdown above. */}
+            {(ocpType === "drawing" || ocpPreset === "CUSTOM") && (
+              <div className="ff full">
+                <label>Description{ocpType === "other_cash" ? " *" : ""}</label>
+                <input placeholder="Details…" value={ocpDesc} onChange={e => setOcpDesc(e.target.value)} />
+              </div>
+            )}
           </div>
           <div className="nbox nb-a" style={{ marginBottom: 10 }}>
             ⚠ Deducts from In Hand Cash and appears as its own line in the Cash Flow Statement.

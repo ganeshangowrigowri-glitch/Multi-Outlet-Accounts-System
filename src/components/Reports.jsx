@@ -28,7 +28,9 @@ import {
   getInventoryMaster,
   getOpeningStock,
   getSupplierBF,   
-  setSupplierBF,   
+  setSupplierBF,  
+   getPositionLedger,
+   POSITION_CATEGORIES, 
 } from "../db";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -146,7 +148,7 @@ for (const o of outlets) {
     getSales(o), getPurchases(o), getReturns(o), getTransfers(o),
     getExpenses(o), getCashLedger(o), getBankLedger(o),
     getARLedger(o), getAPInvoices(o), getAPPayments(o), getCapitalLedger(o),
-    getCardLedger(o),
+    getCardLedger(o), getPositionLedger(o),
   ]);
   arrayResults.push(result);
 }
@@ -170,12 +172,11 @@ const [inv, coa] = await Promise.all([
         return mStart ? arr.filter(r => r.date >= mStart && r.date <= mEnd) : arr;
       };
 
-      let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
+            let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
       let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[], crateLedgerAll=[];
-      let cardLedgerAll=[];
+      let cardLedgerAll=[], positionLedgerAll=[];
       let cashBF=0, bankBF=0, cashPettyCash=0, cashCoins=0, cashPendingBal=0, cashDiffSigned=0;
-
-        arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,crt]) => {
+        arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,crt,pos]) => {
         sales      = [...sales,      ...inMonth(sal)];
         purchases  = [...purchases,  ...inMonth(pur)];
         returns    = [...returns,    ...inMonth(ret)];
@@ -189,6 +190,10 @@ const [inv, coa] = await Promise.all([
         capitalLedger = [...capitalLedger, ...inMonth(cap)];
         crateLedgerAll = [...crateLedgerAll, ...(crt || [])];
         cardLedgerAll  = [...cardLedgerAll,  ...inMonth(crd)];
+        // Running balance (Other Credits Outstanding / Liabilities / extra
+        // Assets) — kept all-time like apInvoices/apPayments, not
+        // inMonth-filtered, so Stock Summary shows the as-of-today balance.
+        positionLedgerAll = [...positionLedgerAll, ...(pos || [])];
       });
         scalarResults.forEach(([cbf,bbf,petty,coins,pend,diff]) => {
         cashBF += Number(cbf)||0; bankBF += Number(bbf)||0;
@@ -601,7 +606,7 @@ Object.keys(cosByItem).forEach(code => {
       });
       const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-      setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, cashPettyCash, cashCoins, cashPendingBal, cashDiffSigned, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier });
+     setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -2287,9 +2292,22 @@ function UGBook({ d, outlet, month }) {
   wood_n:        "Wood — N",
 };
 
- function StockSummary({ d, outlet, month }) {
-  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {} } = d;
+  function StockSummary({ d, outlet, month }) {
+  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [] } = d;
 
+  // Running balance per category (all-time, as-of-today — same convention
+  // as the supplier credit balance below): 'in' raises it, 'out' lowers it.
+  const categoryBalance = key => positionLedgerAll
+    .filter(r => r.category === key)
+    .reduce((a, r) => a + (r.direction === "in" ? Number(r.amount)||0 : -(Number(r.amount)||0)), 0);
+
+  const assetRows = POSITION_CATEGORIES.asset.map(c => ({ ...c, balance: categoryBalance(c.key) }));
+  const otherCreditRows = POSITION_CATEGORIES.other_credit.map(c => ({ ...c, balance: categoryBalance(c.key) }));
+  const liabilityRows = POSITION_CATEGORIES.liability.map(c => ({ ...c, balance: categoryBalance(c.key) }));
+
+  const extraAssetsTotal   = assetRows.reduce((a, r) => a + r.balance, 0);
+  const otherCreditsTotal  = otherCreditRows.reduce((a, r) => a + r.balance, 0);
+  const liabilitiesTotal   = liabilityRows.reduce((a, r) => a + r.balance, 0);
   // Crate balances as of period-end — quantity only, no cost basis
   // exists for crates in the Excel model, so this is informational
   // and does NOT feed into the monetary Net Position total below.
@@ -2330,7 +2348,8 @@ function UGBook({ d, outlet, month }) {
     .sort((a, b) => b.balance - a.balance);
 
   const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
-  const totalPosition = d.endStockVal + d.emptyStockVal + d.cashBal + d.bankBal;
+  const totalPosition = d.endStockVal + d.emptyStockVal + d.cashBal + d.bankBal + extraAssetsTotal;
+  const netPosition = totalPosition - totalCredit - otherCreditsTotal + liabilitiesTotal;
 
   // Supplier Stock vs Credit — mirrors the Excel STOCK sheet's "CREDIT"
   // block: per supplier, compares stock value (at cost) currently held
@@ -2344,9 +2363,17 @@ function UGBook({ d, outlet, month }) {
     })
     .filter(r => Math.abs(r.stockVal) > 0.5 || Math.abs(r.creditVal) > 0.5);
 
-  const th = { padding: "8px 12px", fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
+    const th = { padding: "8px 12px", fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
   const td = { padding: "7px 12px", fontSize: 12.5, borderBottom: "1px solid rgba(63,63,70,.15)" };
   const sectionHead = { padding: "10px 12px", fontSize: 12, fontWeight: 700, background: "var(--s2)", borderBottom: "1px solid var(--bdr)" };
+  const subHead = { padding: "10px 16px 4px", fontSize: 11.5, fontWeight: 700, color: "var(--mut2,var(--mut))", textTransform: "uppercase", letterSpacing: ".03em" };
+  // Coloured highlight bar for each Overall Position category — just a
+  // flat background colour on the row, no border/box, matching the
+  // dark-theme palette (muted colour, light readable text).
+  const catHead = (bg, fg) => ({
+    padding: "9px 16px", fontSize: 12.5, fontWeight: 700, letterSpacing: ".02em",
+    textTransform: "uppercase", background: bg, color: fg,
+  });
 
   const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
 
@@ -2362,47 +2389,20 @@ function UGBook({ d, outlet, month }) {
           <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}</div>
         </div>
 
-        {/* Top summary tiles */}
+          {/* Top summary tiles */}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
           {[
             ["Item Stock (at cost)", d.endStockVal],
             ["Empty Bottle Stock", d.emptyStockVal],
             ["Cash in Hand", d.cashBal],
             ["Bank Balance", d.bankBal],
+            ...assetRows.map(r => [r.label, r.balance]),
           ].map(([label, val]) => (
             <div key={label} style={{ flex: "1 1 160px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "12px 14px" }}>
               <div style={{ fontSize: 10.5, color: "var(--mut)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
               <div style={{ fontSize: 17, fontWeight: 700, marginTop: 4 }}>Rs.{fmt(val || 0)}</div>
             </div>
           ))}
-        </div>
-
-        {/* Credit outstanding by supplier */}
-        <div style={sectionHead}>Credit Outstanding by Supplier</div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ ...th, textAlign: "left" }}>Supplier</th>
-                <th style={{ ...th, textAlign: "right" }}>Outstanding Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              {creditRows.length === 0 && (
-                <tr><td colSpan={2} style={{ ...td, textAlign: "center", color: "var(--mut)" }}>No outstanding supplier balances</td></tr>
-              )}
-              {creditRows.map(r => (
-                <tr key={r.id}>
-                  <td style={td}>{r.name}</td>
-                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
-                </tr>
-              ))}
-              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
-                <td style={{ ...td, fontWeight: 700 }}>Total Credit Outstanding</td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>{fmt(totalCredit)}</td>
-              </tr>
-            </tbody>
-          </table>
         </div>
 
        {/* Supplier stock value vs credit outstanding — mirrors Excel's CREDIT block */}
@@ -2463,25 +2463,91 @@ function UGBook({ d, outlet, month }) {
           </div>
         </div>
 
-        {/* Overall position */}
+                {/* Overall Position — Total Assets, Liabilities, Total Credit
+            Outstanding, Other Credit Outstanding, then Net Position, all
+            grouped under one heading in that exact order. Each category
+            gets its own coloured highlight bar (no bordered box) so the
+            sections read at a glance, same dark theme throughout. */}
         <div style={sectionHead}>Overall Position</div>
-        <div style={{ padding: "12px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
-          <span>Total Assets (Stock + Empty + Cash + Bank)</span>
-          <strong style={{ fontFamily: "'JetBrains Mono',monospace" }}>Rs.{fmt(totalPosition)}</strong>
+
+        <div style={catHead("#1d3f66", "#dce8f7")}>1. Total Assets</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {[
+                ["Stock",             d.endStockVal],
+                ["Empty",             d.emptyStockVal],
+                ["Cash",              d.cashBal],
+                ["Bank",              d.bankBal],
+                ...assetRows.map(r => [r.label, r.balance]),
+              ].map(([label, val]) => (
+                <tr key={label}>
+                  <td style={td}>{label}</td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val || 0)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                <td style={{ ...td, fontWeight: 700 }}>Total Assets</td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>+Rs.{fmt(totalPosition)}</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <div style={{ padding: "0 16px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
-          <span>Less: Total Credit Outstanding</span>
+
+        <div style={catHead("#9e693b", "#f6e4cf")}>2. Liabilities</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {liabilityRows.map(r => (
+                <tr key={r.key}>
+                  <td style={td}>{r.label}</td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                <td style={{ ...td, fontWeight: 700 }}>Total Liabilities</td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>+Rs.{fmt(liabilitiesTotal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style={catHead("#65438f", "#e6dcf5")}>3. Total Credit Outstanding</div>
+        <div style={{ padding: "8px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
+          <span>Total Credit Outstanding</span>
           <strong style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(totalCredit)}</strong>
         </div>
-        <div style={{ padding: "12px 16px", borderTop: "2px solid var(--bdr2,var(--bdr))", display: "flex", justifyContent: "space-between", fontSize: 15, fontWeight: 700 }}>
-          <span>Net Position</span>
-          <span style={{ fontFamily: "'JetBrains Mono',monospace" }}>Rs.{fmt(totalPosition - totalCredit)}</span>
+
+        <div style={catHead("#246457", "#d3ede6")}>4. Other Credit Outstanding</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {otherCreditRows.map(r => (
+                <tr key={r.key}>
+                  <td style={td}>{r.label}</td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                <td style={{ ...td, fontWeight: 700 }}>Total Other Credit Outstanding</td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(otherCreditsTotal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+          <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          padding: "14px 16px", margin: "4px 0 0", fontSize: 16, fontWeight: 700,
+          background: "#2b5483", color: "#dce8f7", borderTop: "2px solid var(--bdr2,var(--bdr))",
+        }}>
+          <span style={{ letterSpacing: ".02em", textTransform: "uppercase" }}>Net Position</span>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 17 }}>Rs.{fmt(netPosition)}</span>
         </div>
       </div>
     </div>
   );
 }
-
 
 function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, applyDiscount, setApplyDiscount }) {
   const { apInvoices, apPayments } = d;
