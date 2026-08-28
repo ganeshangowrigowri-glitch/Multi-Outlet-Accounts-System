@@ -7,7 +7,7 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
-import { getBankLedger, getBankBF, getBankBFDate, setBankBF, addBankEntry, getBankBFMonthly, getBankBFMonthlyDate, setBankBFMonthly, getBankPending, getBankPendingDate, setBankPending, getBankCD, getBankCDDate, setBankCD, getBankDifferent, setBankDifferent } from "../../db";
+import { getBankLedger, getBankBF, getBankBFDate, setBankBF, addBankEntry, addCashEntry, getBankBFMonthly, getBankBFMonthlyDate, setBankBFMonthly, getBankPending, getBankPendingDate, setBankPending, getBankCD, getBankCDDate, setBankCD, getBankDifferent, setBankDifferent } from "../../db";
 import { printLedger } from "../../utils/printLedger";
 
 const monthStr = (d) => (d || today()).slice(0, 7);
@@ -474,7 +474,7 @@ function BankDepositForm({ outlet, outletBanks, toast_ }) {
     if (outletBanks.length && !bankId) setBankId(outletBanks[0].id);
   }, [outletBanks]);
 
-  async function save() {
+   async function save() {
     if (!bankId) { toast_("Select a bank account", "err"); return; }
     const amt = parseFloat(amount);
     if (!amt || amt <= 0) { toast_("Enter a valid amount", "err"); return; }
@@ -485,6 +485,17 @@ function BankDepositForm({ outlet, outletBanks, toast_ }) {
       debit: amt,   // displays under Credit (Cash In) per BankLedgerView's convention
       credit: 0,
     });
+    if (ok) {
+      // Cash physically left the till and went into the bank —
+      // record it as a Cash Out entry on the In Hand Cash ledger.
+      await addCashEntry(outlet, {
+        date,
+        description: description || "Bank Deposit",
+        type: "out",
+        debit: 0,
+        credit: amt,
+      });
+    }
     setSaving(false);
     if (ok) {
       toast_("Deposit recorded ✓");

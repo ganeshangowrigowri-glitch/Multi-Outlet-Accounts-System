@@ -14,7 +14,7 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { supabase } from "../../supabase";
 import { I } from "../../utils/icons";
-import { getCardLedger, addCardEntry, getCardBF, getCardBFDate, setCardBF, addBankEntry, getCardPending, getCardPendingDate, setCardPending, getCardCD, getCardCDDate, setCardCD, getCardDifferent, setCardDifferent } from "../../db";
+import { getCardLedger, addCardEntry, getCardBF, getCardBFDate, setCardBF, addBankEntry, addCashEntry, getCardPending, getCardPendingDate, setCardPending, getCardCD, getCardCDDate, setCardCD, getCardDifferent, setCardDifferent } from "../../db";
 import { printLedger } from "../../utils/printLedger";
 
 // ════════════════════════════════════════════════════════════
@@ -242,6 +242,17 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
       interest,           // computed interest/commission
       net,                // net after interest (Excel "Bank Deposit" column)
     });
+    if (ok) {
+      // Daily Sale already booked this whole amount as cash-in (it can't
+      // tell cash sales from card sales) — back it out of In Hand Cash.
+      await addCashEntry(outlet, {
+        date,
+        description: description || "Card Settlement",
+        type: "out",
+        debit: 0,
+        credit: gross,
+      });
+    }
     setSaving(false);
     if (ok) {
       toast_(`Recorded ✓ Net Rs.${fmt(net)} (interest Rs.${fmt(interest)} deducted)`);
@@ -250,7 +261,6 @@ function RecordCollection({ outlet, cardAccounts, toast_ }) {
       toast_("Failed to save — check connection", "err");
     }
   }
-
   return (
     <div className="card">
       <div className="chd"><h3>Card Settlement — Record Collection</h3><p>{outlet}</p></div>

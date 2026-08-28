@@ -952,12 +952,15 @@ await openingWriteLockRef.current;
   await addSale(outlet, { date: empDate, items: empRowsWithDerived, total: 0, paymentMethod: "empty" });
   
   for (const e of empRows) {
-    const s    = parseFloat(e.sold)    || 0;
-    const rr   = parseFloat(e.return_) || 0;
-    const p    = parseFloat(e.purchase)|| 0;
-    const rate = parseFloat(e.rate)    || 0;
-    if (s > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Sold: ${e.name} (${e.supplier})`, debit: s * rate, credit: 0 });
-    if (rr > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Return: ${e.name} (${e.supplier})`, debit: 0, credit: rr * rate });
+    const s       = parseFloat(e.sold)    || 0;
+    const rr      = parseFloat(e.return_) || 0;
+    const p       = parseFloat(e.purchase)|| 0;
+    const rate    = parseFloat(e.rate)    || 0;
+    // Cash In/Out on In Hand Cash is for Quart empties only — Pints/Nips
+    // sold or returned are never posted here (empty codes end " Q"/" P"/" N").
+    const isQuart = (e.code || "").trim().endsWith(" Q");
+    if (isQuart && s  > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Sold: ${e.name} (${e.supplier})`, debit: s * rate, credit: 0 });
+    if (isQuart && rr > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Return: ${e.name} (${e.supplier})`, debit: 0, credit: rr * rate });
     if (p > 0) await addCashEntry(outlet, { date: empDate, description: `Empty Purchase: ${e.name} (${e.supplier})`, debit: 0, credit: p * rate });
   }
 
