@@ -881,8 +881,8 @@ export const POSITION_CATEGORIES = {
     { key: "damage_receivable", label: "Damage Receivable" },
   ],
   other_credit: [
-    { key: "transfer_goods",    label: "Transfer Goods" },
-    { key: "due_deposit",       label: "Due Deposit / Extra Deposits" },
+    { key: "transfer_goods",    label: "Damage" },
+    { key: "due_deposit",       label: "Due Deposit" },
     { key: "empty_credits",     label: "Empty Credits" },
     { key: "other_credit_misc", label: "Others" },
   ],

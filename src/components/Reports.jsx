@@ -176,7 +176,7 @@ const [inv, coa] = await Promise.all([
       let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[], crateLedgerAll=[];
       let cardLedgerAll=[], positionLedgerAll=[];
       let cashBF=0, bankBF=0, cashPettyCash=0, cashCoins=0, cashPendingBal=0, cashDiffSigned=0;
-        arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,crt,pos]) => {
+                arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,pos]) => {
         sales      = [...sales,      ...inMonth(sal)];
         purchases  = [...purchases,  ...inMonth(pur)];
         returns    = [...returns,    ...inMonth(ret)];
@@ -188,11 +188,15 @@ const [inv, coa] = await Promise.all([
         apInvoices = [...apInvoices, ...(apInv || [])];
         apPayments = [...apPayments, ...(apPay || [])];
         capitalLedger = [...capitalLedger, ...inMonth(cap)];
-        crateLedgerAll = [...crateLedgerAll, ...(crt || [])];
         cardLedgerAll  = [...cardLedgerAll,  ...inMonth(crd)];
         // Running balance (Other Credits Outstanding / Liabilities / extra
         // Assets) — kept all-time like apInvoices/apPayments, not
         // inMonth-filtered, so Stock Summary shows the as-of-today balance.
+        // FIX: this used to be the 14th name in a 13-value destructure
+        // (an off-by-one against getPositionLedger(o), the 13th promise in
+        // the Promise.all above), so it was always undefined and
+        // positionLedgerAll was permanently empty regardless of what was
+        // saved in Position Ledger.
         positionLedgerAll = [...positionLedgerAll, ...(pos || [])];
       });
         scalarResults.forEach(([cbf,bbf,petty,coins,pend,diff]) => {
@@ -417,14 +421,18 @@ const [inv, coa] = await Promise.all([
       const totalIncome=grossProfit+totalOtherInc;
       const netProfit=totalIncome-totalExp;
 
-      // ── Balance Sheet ──
-       // Petty Cash / Coins / Total Pending / Different are informational
-      // reconciliation entries (Cash Balance Detail), not real cash
-      // movements — same treatment as bank_ledger's bf/pending/cd_manual/
-      // different marker rows, so they must not double-count into cashBal.
-      const cashLedgerTxns = cashLedger.filter(r => !["petty_cash","coins","pending","different"].includes(r.balance_type));
+      
+       // "bf" must also be excluded here — cashBF (from getCashBF) already sums
+       // the Balance B/F row separately. Without this exclusion, any month whose
+      // selected period includes the B/F row's date double-counts it: once via
+      // cashBF, and again here via the debit/credit reduce below.
+      const cashLedgerTxns = cashLedger.filter(r => !["bf","petty_cash","coins","pending","different"].includes(r.balance_type));
       const cashBal=cashBF+cashLedgerTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-cashLedgerTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
-      const bankBal=bankBF+bankLedger.reduce((a,r)=>a+(Number(r.debit)||0),0)-bankLedger.reduce((a,r)=>a+(Number(r.credit)||0),0);
+      // marker row (bankBF already covers "bf" separately) so a B/F,
+      // monthly B/F, Pending, manual C/D, or Different row dated inside
+      // the selected month doesn't get summed twice into bankBal.
+      const bankLedgerTxns = bankLedger.filter(r => !["bf","bf_monthly","pending","cd_manual","different"].includes(r.balance_type));
+      const bankBal=bankBF+bankLedgerTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-bankLedgerTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
       const arBal=arLedger.reduce((a,r)=>a+(Number(r.debit)||0)-(Number(r.credit)||0),0);
       const apInvTotal=apInvoices.reduce((a,i)=>a+(Number(i.amount)||0),0);
       const apPaidTotal=apPayments.reduce((a,p)=>a+(Number(p.amount)||0)+(Number(p.discount)||0),0);
@@ -616,7 +624,7 @@ Object.keys(cosByItem).forEach(code => {
 
   useEffect(() => { load(); }, [load]);
 
-  return { data, loading };
+  return { data, loading, refresh: load };
 }
 
 // ══════════════════════════════════════════════════════
@@ -2292,18 +2300,43 @@ function UGBook({ d, outlet, month }) {
   wood_n:        "Wood — N",
 };
 
-  function StockSummary({ d, outlet, month }) {
-  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [] } = d;
+   function StockSummary({ d, outlet, month }) {
+  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [] } = d;
 
-  // Running balance per category (all-time, as-of-today — same convention
-  // as the supplier credit balance below): 'in' raises it, 'out' lowers it.
-  const categoryBalance = key => positionLedgerAll
+  // Position entries are loaded all-time (see useReportData). Apply the
+  // selected month-end cutoff HERE so every Position balance represents the
+  // as-of-month-end figure: include every entry dated on/before month-end,
+  // exclude anything dated after it. With no month selected, use all rows.
+  const mEndPos = monthEnd(month);
+  const positionUpToMonthEnd = mEndPos
+    ? positionLedgerAll.filter(r => (r.date || "") <= mEndPos)
+    : positionLedgerAll;
+
+  // Running balance per category as of month-end: 'in' raises it, 'out'
+  // lowers it. Reads from the month-end-scoped slice above.
+  const categoryBalance = key => positionUpToMonthEnd
     .filter(r => r.category === key)
     .reduce((a, r) => a + (r.direction === "in" ? Number(r.amount)||0 : -(Number(r.amount)||0)), 0);
 
-  const assetRows = POSITION_CATEGORIES.asset.map(c => ({ ...c, balance: categoryBalance(c.key) }));
-  const otherCreditRows = POSITION_CATEGORIES.other_credit.map(c => ({ ...c, balance: categoryBalance(c.key) }));
-  const liabilityRows = POSITION_CATEGORIES.liability.map(c => ({ ...c, balance: categoryBalance(c.key) }));
+  // Most recent note entered for this category (on/before month-end) — a
+  // category's balance is a running total across every entry, so there's no
+  // single "the" note; showing the latest one mirrors how B/F values work
+  // elsewhere in the app (most recent entry wins).
+  const categoryNote = key => {
+    const rows = positionUpToMonthEnd.filter(r => r.category === key && r.notes);
+    if (!rows.length) return "";
+    return [...rows].sort((a, b) => (a.date||"").localeCompare(b.date||"")).pop().notes;
+  
+  };
+
+    // Same 1000–1499 restriction as S_Position.jsx — keeps Fixed Assets
+  // (1500–1999) out of this manual Position category list.
+  const EXCLUDED_ASSET_IDS = ["1100", "1400"];
+  const coaAssetCats     = coa.filter(a => a.id >= "1000" && a.id <= "1499" && !EXCLUDED_ASSET_IDS.includes(a.id)).map(a => ({ key: a.id, label: a.name }));
+  const coaLiabilityCats = coa.filter(a => a.id >= "2000" && a.id <= "2999").map(a => ({ key: a.id, label: a.name }));
+  const assetRows       = coaAssetCats.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) })).filter(r => r.balance !== 0);
+  const otherCreditRows = POSITION_CATEGORIES.other_credit.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
+  const liabilityRows   = coaLiabilityCats.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
 
   const extraAssetsTotal   = assetRows.reduce((a, r) => a + r.balance, 0);
   const otherCreditsTotal  = otherCreditRows.reduce((a, r) => a + r.balance, 0);
@@ -2470,66 +2503,71 @@ function UGBook({ d, outlet, month }) {
             sections read at a glance, same dark theme throughout. */}
         <div style={sectionHead}>Overall Position</div>
 
-        <div style={catHead("#1d3f66", "#dce8f7")}>1. Total Assets</div>
+                <div style={catHead("#1d3f66", "#dce8f7")}>1. Total Assets</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
-              {[
-                ["Stock",             d.endStockVal],
-                ["Empty",             d.emptyStockVal],
-                ["Cash",              d.cashBal],
-                ["Bank",              d.bankBal],
-                ...assetRows.map(r => [r.label, r.balance]),
-              ].map(([label, val]) => (
+                            {[
+                ["Stock",             d.endStockVal, ""],
+                ["Empty",             d.emptyStockVal, ""],
+                ["Cash In Hand",      d.cashBal, ""],
+                ["Bank",              d.bankBal, ""],
+                ...assetRows.map(r => [r.label, r.balance, r.notes]),
+              ].map(([label, val, note]) => (
                 <tr key={label}>
                   <td style={td}>{label}</td>
+                  <td style={{ ...td, color: "var(--mut)", fontStyle: note ? "normal" : "italic" }}>{note || "—"}</td>
                   <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val || 0)}</td>
                 </tr>
               ))}
               <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
                 <td style={{ ...td, fontWeight: 700 }}>Total Assets</td>
+                <td style={td}></td>
                 <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>+Rs.{fmt(totalPosition)}</td>
               </tr>
             </tbody>
           </table>
         </div>
 
-        <div style={catHead("#9e693b", "#f6e4cf")}>2. Liabilities</div>
+              <div style={catHead("#9e693b", "#f6e4cf")}>2. Liabilities</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
               {liabilityRows.map(r => (
                 <tr key={r.key}>
                   <td style={td}>{r.label}</td>
+                  <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
                   <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
                 </tr>
               ))}
               <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
                 <td style={{ ...td, fontWeight: 700 }}>Total Liabilities</td>
+                <td style={td}></td>
                 <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>+Rs.{fmt(liabilitiesTotal)}</td>
               </tr>
             </tbody>
           </table>
         </div>
-
         <div style={catHead("#65438f", "#e6dcf5")}>3. Total Credit Outstanding</div>
         <div style={{ padding: "8px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
           <span>Total Credit Outstanding</span>
           <strong style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(totalCredit)}</strong>
         </div>
 
-        <div style={catHead("#246457", "#d3ede6")}>4. Other Credit Outstanding</div>
+         <div style={catHead("#246457", "#d3ede6")}>4. Other Credit Outstanding</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
               {otherCreditRows.map(r => (
                 <tr key={r.key}>
                   <td style={td}>{r.label}</td>
+                  <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
                   <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
                 </tr>
               ))}
               <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
                 <td style={{ ...td, fontWeight: 700 }}>Total Other Credit Outstanding</td>
+                <td style={td}></td>
                 <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(otherCreditsTotal)}</td>
               </tr>
             </tbody>
@@ -3032,8 +3070,8 @@ export default function Reports({ user }) {
   useEffect(() => {
     getOutlets(OUTLETS).then(list => { if (list?.length) setOutletList(list); });
   }, []);
-
-  const { data: d, loading } = useReportData(effectiveOutlet, month, outletList);
+  const { data: d, loading, refresh } = useReportData(effectiveOutlet, month, outletList);
+  
 
   const reportList = [
     { id: "income",    label: "Income Statement",      icon: "📊" },
@@ -3084,8 +3122,15 @@ export default function Reports({ user }) {
           {effectiveOutlet==="ALL"?"All Outlets":effectiveOutlet} · {month ? new Date(month+"-01").toLocaleString("en-LK",{month:"long",year:"numeric"}) : "All Periods"}
         </span>
 
+              {/* Refresh — reloads report data without changing outlet/month.
+            Needed because entries saved elsewhere (e.g. Position Ledger,
+            AP Payments) don't auto-refresh this page's cached data. */}
+        <button className="btn btnd btnsm" style={{ marginLeft:"auto" }} onClick={refresh} disabled={loading}>
+          {I.refresh || "↻"} Refresh
+        </button>
+
         {/* Print */}
-        <button className="btn btng btnsm" style={{ marginLeft:"auto" }} onClick={()=>window.print()}>{I.print} Print</button>
+        <button className="btn btng btnsm" onClick={()=>window.print()}>{I.print} Print</button>
       </div>
 
       {/* ── Report Content ── */}

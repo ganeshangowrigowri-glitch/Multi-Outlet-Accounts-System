@@ -7,8 +7,7 @@
 import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { I } from "../../utils/icons";
-import { getPositionLedger, addPositionEntry, deletePositionEntry, POSITION_CATEGORIES } from "../../db";
-
+import { getPositionLedger, addPositionEntry, deletePositionEntry, POSITION_CATEGORIES, getCOA } from "../../db";
 const GROUP_LABELS = { asset: "Asset", other_credit: "Other Credit Outstanding", liability: "Liability" };
 
 export default function S_Position({ outlet, toast_ }) {
@@ -16,12 +15,40 @@ export default function S_Position({ outlet, toast_ }) {
   const [loading, setLoading] = useState(true);
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
+  const [coa, setCoa] = useState([]);
 
   function reload() {
     setLoading(true);
     getPositionLedger(outlet).then(data => { setEntries(data || []); setLoading(false); });
   }
   useEffect(() => { reload(); }, [outlet]);
+  useEffect(() => { getCOA().then(list => setCoa(list || [])); }, []);
+
+  // Live Chart of Accounts categories for Asset / Liability groups — any
+  // account the admin adds in Chart of Accounts shows up here automatically.
+  // Ranges match Reports.jsx's Balance Sheet convention: Assets 1000–1999,
+  // Liabilities 2000–2999 (current + non-current).
+    // Restricted to 1000–1499 (Current Assets) only — 1500–1999 is Fixed
+  // Assets, a separate Balance Sheet category already listed on its own
+  // (coaNonCurrentAssets), so it must not appear in Position Entry.
+    // Restricted to 1000–1499 (Current Assets) only — 1500–1999 is Fixed
+  // Assets, a separate Balance Sheet category already listed on its own
+  // (coaNonCurrentAssets), so it must not appear in Position Entry.
+  // 1100 (Account Receivable) and 1400 (Empty) are also excluded — both
+  // already have dedicated, auto-computed values elsewhere.
+  const EXCLUDED_ASSET_IDS = ["1100", "1400"];
+  const coaAssetCats = coa
+    .filter(a => a.id >= "1000" && a.id <= "1499")
+    .filter(a => !EXCLUDED_ASSET_IDS.includes(a.id))
+    .map(a => ({ key: a.id, label: a.name }));
+  const coaLiabilityCats = coa
+    .filter(a => a.id >= "2000" && a.id <= "2999")
+    .map(a => ({ key: a.id, label: a.name }));
+
+  const categoryOptions = group =>
+    group === "asset" ? coaAssetCats
+    : group === "liability" ? coaLiabilityCats
+    : POSITION_CATEGORIES[group];
 
   const blank = {
     date: today(), categoryGroup: "other_credit",
@@ -30,15 +57,14 @@ export default function S_Position({ outlet, toast_ }) {
   };
   const [form, setForm] = useState(blank);
   const [saving, setSaving] = useState(false);
-  function set(k, v) {
+    function set(k, v) {
     setForm(f => {
       const next = { ...f, [k]: v };
       // Keep category in sync with whichever group is selected.
-      if (k === "categoryGroup") next.category = POSITION_CATEGORIES[v][0].key;
+      if (k === "categoryGroup") next.category = categoryOptions(v)[0]?.key || "";
       return next;
     });
   }
-
   async function save() {
     if (saving) return;
     if (!form.amount || parseFloat(form.amount) <= 0) { toast_?.("Enter valid amount", "err"); return; }
@@ -66,8 +92,10 @@ export default function S_Position({ outlet, toast_ }) {
     .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
     .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
-  const label = (group, key) => POSITION_CATEGORIES[group]?.find(c => c.key === key)?.label || key;
-
+    const label = (group, key) =>
+    categoryOptions(group)?.find(c => c.key === key)?.label
+    || POSITION_CATEGORIES[group]?.find(c => c.key === key)?.label
+    || key;
   const th = { padding: "6px 10px", fontSize: 10, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
   const td = { padding: "6px 10px", fontSize: 12 };
 
@@ -88,10 +116,10 @@ export default function S_Position({ outlet, toast_ }) {
                 {Object.keys(GROUP_LABELS).map(g => <option key={g} value={g}>{GROUP_LABELS[g]}</option>)}
               </select>
             </div>
-            <div className="ff">
+              <div className="ff">
               <label>Category *</label>
               <select value={form.category} onChange={e => set("category", e.target.value)}>
-                {POSITION_CATEGORIES[form.categoryGroup].map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+                {categoryOptions(form.categoryGroup).map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
               </select>
             </div>
             <div className="ff">
