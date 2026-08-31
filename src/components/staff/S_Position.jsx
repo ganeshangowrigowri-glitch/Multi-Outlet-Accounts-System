@@ -8,8 +8,7 @@ import { useState, useEffect } from "react";
 import { fmt, today } from "../../utils/helpers";
 import { I } from "../../utils/icons";
 import { getPositionLedger, addPositionEntry, deletePositionEntry, POSITION_CATEGORIES, getCOA } from "../../db";
-const GROUP_LABELS = { asset: "Asset", other_credit: "Other Credit Outstanding", liability: "Liability" };
-
+const GROUP_LABELS = { asset: "Asset", other_credit: "Other Credit Outstanding" };
 export default function S_Position({ outlet, toast_ }) {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -41,18 +40,19 @@ export default function S_Position({ outlet, toast_ }) {
     .filter(a => a.id >= "1000" && a.id <= "1499")
     .filter(a => !EXCLUDED_ASSET_IDS.includes(a.id))
     .map(a => ({ key: a.id, label: a.name }));
-  const coaLiabilityCats = coa
-    .filter(a => a.id >= "2000" && a.id <= "2999")
-    .map(a => ({ key: a.id, label: a.name }));
+    // "Damage" removed from Other Credit Outstanding — filtered here so
+  // POSITION_CATEGORIES itself is untouched for any other consumer.
+  const OTHER_CREDIT_CATS = POSITION_CATEGORIES.other_credit
+    .filter(c => c.key !== "damage" && !/damage/i.test(c.label));
 
   const categoryOptions = group =>
     group === "asset" ? coaAssetCats
-    : group === "liability" ? coaLiabilityCats
+    : group === "other_credit" ? OTHER_CREDIT_CATS
     : POSITION_CATEGORIES[group];
 
   const blank = {
     date: today(), categoryGroup: "other_credit",
-    category: POSITION_CATEGORIES.other_credit[0].key,
+    category: OTHER_CREDIT_CATS[0]?.key || "",
     direction: "in", amount: "", notes: "",
   };
   const [form, setForm] = useState(blank);

@@ -20,6 +20,7 @@ import {
   getCashBF,
   getBankBF,
   getCardBF,
+  getCardCD,
   getCashPettyCash,
   getCashCoins,
   getCashPending,
@@ -2301,7 +2302,87 @@ function UGBook({ d, outlet, month }) {
 };
 
    function StockSummary({ d, outlet, month }) {
-  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [] } = d;
+  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [],
+          bankLedger = [], cardLedgerAll = [] } = d;
+
+  // ── Per-account Bank & Card balances — mirrors BankStatement's and
+  // CardStatement's own balance calculation exactly (same B/F helper, same
+  // exclusion list, same net-of-interest logic for cards), just looped
+  // across every account instead of one selected one. Only meaningful for
+  // a single outlet since accounts are outlet-specific; for "ALL" outlets
+  // we fall back to the existing combined d.bankBal tile and skip the card
+  // breakdown, same as BankStatement/CardStatement already do. ──────────
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [cardAccounts, setCardAccounts] = useState([]);
+  const [bankBalances, setBankBalances] = useState({});
+  const [cardBalances, setCardBalances] = useState({});
+
+  useEffect(() => {
+    if (outlet === "ALL") { setBankAccounts([]); setCardAccounts([]); return; }
+    let cancelled = false;
+    (async () => {
+      const [{ data: bankRows }, { data: cardRows }] = await Promise.all([
+        supabase.from("bank_accounts").select("*")
+          .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+          .neq("account_type", "card").order("bank"),
+        supabase.from("bank_accounts").select("*")
+          .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+          .eq("account_type", "card").order("bank"),
+      ]);
+      if (cancelled) return;
+      setBankAccounts(bankRows || []);
+      setCardAccounts(cardRows || []);
+    })();
+    return () => { cancelled = true; };
+  }, [outlet]);
+
+  useEffect(() => {
+    if (outlet === "ALL" || !bankAccounts.length) { setBankBalances({}); return; }
+    let cancelled = false;
+    (async () => {
+      const excl = ["bf", "bf_monthly", "pending", "cd_manual", "different"];
+      const entries = {};
+      for (const acc of bankAccounts) {
+        const bf = await getBankBF(outlet, acc.id);
+        const txns = bankLedger.filter(r => r.bank_id === acc.id && !excl.includes(r.balance_type));
+        entries[acc.id] = (Number(bf) || 0) + txns.reduce((a, r) => a + (Number(r.debit) || 0) - (Number(r.credit) || 0), 0);
+      }
+      if (!cancelled) setBankBalances(entries);
+    })();
+    return () => { cancelled = true; };
+  }, [outlet, bankAccounts, bankLedger]);
+
+    useEffect(() => {
+    if (outlet === "ALL" || !cardAccounts.length) { setCardBalances({}); return; }
+    let cancelled = false;
+    (async () => {
+      const entries = {};
+      for (const acc of cardAccounts) {
+        // Use the manually-entered Balance C/D from the Card Settlement
+        // Ledger (same value getCardCD feeds elsewhere) instead of the
+        // computed running balance, per request.
+        entries[acc.id] = Number(await getCardCD(outlet, acc.id, month)) || 0;
+      }
+      if (!cancelled) setCardBalances(entries);
+    })();
+    return () => { cancelled = true; };
+  }, [outlet, cardAccounts, month]);
+
+  const bankAccountRows = outlet !== "ALL" && bankAccounts.length
+    ? bankAccounts.map(a => ({
+        key: a.id,
+        label: `${a.bank}${a.account_no || a.accountNo ? ` - ${a.account_no || a.accountNo}` : ""}`,
+        balance: bankBalances[a.id] ?? 0,
+      }))
+    : [{ key: "bank_combined", label: "Bank Balance", balance: d.bankBal }];
+
+  const cardAccountRows = outlet !== "ALL"
+    ? cardAccounts.map(a => ({
+        key: a.id,
+        label: `${a.bank}${a.account_no || a.accountNo ? ` - ${a.account_no || a.accountNo}` : ""}`,
+        balance: cardBalances[a.id] ?? 0,
+      }))
+    : [];
 
   // Position entries are loaded all-time (see useReportData). Apply the
   // selected month-end cutoff HERE so every Position balance represents the
@@ -2333,14 +2414,19 @@ function UGBook({ d, outlet, month }) {
   // (1500–1999) out of this manual Position category list.
   const EXCLUDED_ASSET_IDS = ["1100", "1400"];
   const coaAssetCats     = coa.filter(a => a.id >= "1000" && a.id <= "1499" && !EXCLUDED_ASSET_IDS.includes(a.id)).map(a => ({ key: a.id, label: a.name }));
-  const coaLiabilityCats = coa.filter(a => a.id >= "2000" && a.id <= "2999").map(a => ({ key: a.id, label: a.name }));
   const assetRows       = coaAssetCats.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) })).filter(r => r.balance !== 0);
-  const otherCreditRows = POSITION_CATEGORIES.other_credit.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
-  const liabilityRows   = coaLiabilityCats.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
+  // "Damage" removed from Other Credit Outstanding — filtered here so
+  // POSITION_CATEGORIES itself (and any other consumer of it) is untouched.
+  const otherCreditRows = POSITION_CATEGORIES.other_credit
+    .filter(c => c.key !== "damage" && !/damage/i.test(c.label))
+    .map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
 
-  const extraAssetsTotal   = assetRows.reduce((a, r) => a + r.balance, 0);
+    const extraAssetsTotal   = assetRows.reduce((a, r) => a + r.balance, 0);
   const otherCreditsTotal  = otherCreditRows.reduce((a, r) => a + r.balance, 0);
-  const liabilitiesTotal   = liabilityRows.reduce((a, r) => a + r.balance, 0);
+  // Card total for Total Assets — sum of per-terminal card balances.
+  // Empty for "All Outlets" (cardAccountRows is [] there, same limitation
+  // as the Bank fallback), so Card contributes 0 in that view.
+  const cardTotal = cardAccountRows.reduce((a, r) => a + r.balance, 0);
   // Crate balances as of period-end — quantity only, no cost basis
   // exists for crates in the Excel model, so this is informational
   // and does NOT feed into the monetary Net Position total below.
@@ -2381,9 +2467,8 @@ function UGBook({ d, outlet, month }) {
     .sort((a, b) => b.balance - a.balance);
 
   const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
-  const totalPosition = d.endStockVal + d.emptyStockVal + d.cashBal + d.bankBal + extraAssetsTotal;
-  const netPosition = totalPosition - totalCredit - otherCreditsTotal + liabilitiesTotal;
-
+  const totalPosition = d.endStockVal + d.emptyStockVal + d.cashBal + d.bankBal + cardTotal + extraAssetsTotal;
+  const netPosition = totalPosition - totalCredit - otherCreditsTotal;
   // Supplier Stock vs Credit — mirrors the Excel STOCK sheet's "CREDIT"
   // block: per supplier, compares stock value (at cost) currently held
   // from that supplier against the outstanding credit owed to them, and
@@ -2423,15 +2508,16 @@ function UGBook({ d, outlet, month }) {
         </div>
 
           {/* Top summary tiles */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
           {[
             ["Item Stock (at cost)", d.endStockVal],
             ["Empty Bottle Stock", d.emptyStockVal],
             ["Cash in Hand", d.cashBal],
-            ["Bank Balance", d.bankBal],
+            ...bankAccountRows.map(r => [r.label, r.balance]),
+            ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance]),
             ...assetRows.map(r => [r.label, r.balance]),
-          ].map(([label, val]) => (
-            <div key={label} style={{ flex: "1 1 160px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "12px 14px" }}>
+          ].map(([label, val], i) => (
+            <div key={`${label}-${i}`} style={{ flex: "1 1 160px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "12px 14px" }}>
               <div style={{ fontSize: 10.5, color: "var(--mut)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
               <div style={{ fontSize: 17, fontWeight: 700, marginTop: 4 }}>Rs.{fmt(val || 0)}</div>
             </div>
@@ -2491,7 +2577,7 @@ function UGBook({ d, outlet, month }) {
               ))}
             </tbody>
           </table>
-          <div style={{ padding: "6px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
+                    <div style={{ padding: "6px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
             Quantity only — no cost value is tracked for crates, so this is not included in Net Position below.
           </div>
         </div>
@@ -2511,10 +2597,11 @@ function UGBook({ d, outlet, month }) {
                 ["Stock",             d.endStockVal, ""],
                 ["Empty",             d.emptyStockVal, ""],
                 ["Cash In Hand",      d.cashBal, ""],
-                ["Bank",              d.bankBal, ""],
+                ...bankAccountRows.map(r => [r.label, r.balance, ""]),
+                ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance, ""]),
                 ...assetRows.map(r => [r.label, r.balance, r.notes]),
-              ].map(([label, val, note]) => (
-                <tr key={label}>
+              ].map(([label, val, note], i) => (
+                <tr key={`${label}-${i}`}>
                   <td style={td}>{label}</td>
                   <td style={{ ...td, color: "var(--mut)", fontStyle: note ? "normal" : "italic" }}>{note || "—"}</td>
                   <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val || 0)}</td>
@@ -2529,32 +2616,13 @@ function UGBook({ d, outlet, month }) {
           </table>
         </div>
 
-              <div style={catHead("#9e693b", "#f6e4cf")}>2. Liabilities</div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <tbody>
-              {liabilityRows.map(r => (
-                <tr key={r.key}>
-                  <td style={td}>{r.label}</td>
-                  <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
-                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
-                </tr>
-              ))}
-              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
-                <td style={{ ...td, fontWeight: 700 }}>Total Liabilities</td>
-                <td style={td}></td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>+Rs.{fmt(liabilitiesTotal)}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div style={catHead("#65438f", "#e6dcf5")}>3. Total Credit Outstanding</div>
+                     <div style={catHead("#65438f", "#e6dcf5")}>2. Total Credit Outstanding</div>
         <div style={{ padding: "8px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
           <span>Total Credit Outstanding</span>
           <strong style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(totalCredit)}</strong>
         </div>
 
-         <div style={catHead("#246457", "#d3ede6")}>4. Other Credit Outstanding</div>
+         <div style={catHead("#246457", "#d3ede6")}>3. Other Credit Outstanding</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
