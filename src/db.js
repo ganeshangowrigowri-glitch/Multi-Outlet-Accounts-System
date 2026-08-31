@@ -490,7 +490,7 @@ export const addCashEntry = async (outlet, entry) => {
   });
   if (error) console.error("addCashEntry:", error);
 };
- export const deleteCashEntryForDate = async (outlet, date, description) => {
+export const deleteCashEntryForDate = async (outlet, date, description) => {
   const { error } = await supabase
     .from("cash_ledger")
     .delete()
@@ -498,6 +498,20 @@ export const addCashEntry = async (outlet, entry) => {
     .eq("date", date)
     .eq("description", description);
   if (error) console.error("deleteCashEntryForDate:", error);
+};
+
+// Deletes all "Empty Sold / Empty Return / Empty Purchase" cash rows
+// for a given outlet+date, so re-saving the Empty tab clears stale
+// entries (e.g. from before the Quarts-only fix) instead of just
+// stacking correct ones on top of incorrect leftovers.
+export const deleteEmptyCashEntriesForDate = async (outlet, date) => {
+  const { error } = await supabase
+    .from("cash_ledger")
+    .delete()
+    .eq("outlet_id", outlet)
+    .eq("date", date)
+    .like("description", "Empty %");
+  if (error) console.error("deleteEmptyCashEntriesForDate:", error);
 };
 export const getCashBF = async (outlet) => {
   const { data } = await supabase
