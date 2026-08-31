@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
-import { addSale, deleteSaleForDate, addCashEntry,deleteCashEntryForDate, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
+import { addSale, deleteSaleForDate, addCashEntry,deleteCashEntryForDate, deleteEmptyCashEntriesForDate, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
 import { outletInvKey, outletEmptyInvKey } from "../admin/InventoryAdmin";
@@ -326,6 +326,8 @@ useEffect(() => {
   const csTableRef = useRef(null);
   const skipNextReloadRef = useRef(false);
   const skipNextEmpReloadRef = useRef(false);
+  const skipNextReloadDateRef = useRef(null);
+  const skipNextEmpReloadDateRef = useRef(null);
   const openingWriteLockRef = useRef(Promise.resolve());
   const savingMainRef = useRef(false);
   const mainScrollBy = useCallback(d => mainTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
@@ -412,10 +414,16 @@ const [empRows, setER] = useState(() =>
   useEffect(() => {
   if (skipNextReloadRef.current) {
     skipNextReloadRef.current = false;
-    return;
+    if (skipNextReloadDateRef.current === mainDate) {
+      skipNextReloadDateRef.current = null;
+      return;
+    }
+    // mainDate changed since this skip was requested (e.g. user switched
+    // dates right after saving) — do NOT skip; always reload for the newly
+    // selected date so stale data never carries forward.
+    skipNextReloadDateRef.current = null;
   }
  const lsMain = getOutletInventory(outlet, masterInv);
-
 const baseMaster = masterInv || ls("inv_main", SEED_INVENTORY);
 const baseQtyByCode = {};
 baseMaster.forEach(i => { baseQtyByCode[i.code] = Number(i.qty) || 0; });
@@ -567,7 +575,13 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
 useEffect(() => {
   if (skipNextEmpReloadRef.current) {
     skipNextEmpReloadRef.current = false;
-    return;
+    if (skipNextEmpReloadDateRef.current === empDate) {
+      skipNextEmpReloadDateRef.current = null;
+      return;
+    }
+    // empDate changed since this skip was requested — always reload for
+    // the newly selected date so stale data never carries forward.
+    skipNextEmpReloadDateRef.current = null;
   }
   const lsEmp = getOutletEmptyInventory(outlet, masterInv, emptyMaster);
 
@@ -840,13 +854,13 @@ return { ...r, [field]: val };
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
   // ─────────────────────────────────────────────────────────
- async function saveMainSale() {
+   async function saveMainSale() {
   if (savingMainRef.current) return;
   savingMainRef.current = true;
   try {
   skipNextReloadRef.current = true;
+  skipNextReloadDateRef.current = mainDate;
   const totalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
-
   const mainRowsWithDerived = mainRows.map(r => {
     const { stkSE, endStock } = deriveMain(r);
     return { 
@@ -917,6 +931,7 @@ await openingWriteLockRef.current;
   // ── Update sales ref AFTER setMR ──
   const freshSales = await getSales(outlet);
 skipNextReloadRef.current = true;
+skipNextReloadDateRef.current = mainDate;
 dbSalesRef.current = freshSales;
 setDbSales(freshSales);
  setJustSaved(true);
@@ -929,8 +944,9 @@ toast_("Main stock daily sale saved ✓");
   //  SAVE EMPTY DAILY SALE
   // ─────────────────────────────────────────────────────────
 
-  async function saveEmpSale() {
-  skipNextEmpReloadRef.current = true; 
+   async function saveEmpSale() {
+  skipNextEmpReloadRef.current = true;
+  skipNextEmpReloadDateRef.current = empDate;
   const nd = new Date(empDate);
   nd.setDate(nd.getDate() + 1);
   const nextDay = nd.toISOString().slice(0, 10);
@@ -948,9 +964,15 @@ await openingWriteLockRef.current;
     const d = deriveEmp(r);
     return { ...r, ...d, isEmptyItem: true };
   });
-  await deleteSaleForDate(outlet, empDate, true);
+    await deleteSaleForDate(outlet, empDate, true);
   await addSale(outlet, { date: empDate, items: empRowsWithDerived, total: 0, paymentMethod: "empty" });
-  
+
+  // Clear any Empty Sold/Return/Purchase cash rows already saved for
+  // this date — including stale ones from before the Quarts-only fix —
+  // so resaving doesn't leave old incorrect entries sitting alongside
+  // the new correct ones.
+  await deleteEmptyCashEntriesForDate(outlet, empDate);
+
   for (const e of empRows) {
     const s       = parseFloat(e.sold)    || 0;
     const rr      = parseFloat(e.return_) || 0;
