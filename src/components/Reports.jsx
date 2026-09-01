@@ -32,6 +32,10 @@ import {
   setSupplierBF,  
    getPositionLedger,
    POSITION_CATEGORIES, 
+   getCrateLedger,
+   getEmptyInventoryMaster,
+   getEmptyLoanRegister,
+   upsertEmptyLoanEntry,
 } from "../db";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -40,6 +44,14 @@ const fmtN = n => Number(n || 0).toLocaleString("en-LK", { minimumFractionDigits
 const today    = () => new Date().toISOString().split("T")[0];
 const monthOf  = d  => (d || "").slice(0, 7);
 const dayOf    = d  => parseInt((d || "").slice(8, 10)) || 0;
+
+// Crate types tracked in S_Crates.jsx — duplicated here (keys only) so the
+// Empty Loan Register can build a "CRATE::type" row for each one without
+// importing the whole S_Crates component.
+const LOAN_CRATE_TYPES = [
+  "plastic_wh", "plastic_ug", "plastic_toddy", "plastic_beer",
+  "wood_ugn", "wood_q", "wood_p", "wood_n",
+];
 
 // First day of a given YYYY-MM string
 const monthStart = m => m ? `${m}-01` : null;
@@ -149,9 +161,18 @@ for (const o of outlets) {
     getSales(o), getPurchases(o), getReturns(o), getTransfers(o),
     getExpenses(o), getCashLedger(o), getBankLedger(o),
     getARLedger(o), getAPInvoices(o), getAPPayments(o), getCapitalLedger(o),
-    getCardLedger(o), getPositionLedger(o),
+    getCardLedger(o), getPositionLedger(o), getCrateLedger(o),
   ]);
   arrayResults.push(result);
+}
+
+// Empty/Crate Loan Register — B/F loan + rate are stored per outlet per
+// period, so fetch one outlet at a time (same shape as the arrays above)
+// and merge below. Summed across outlets for "ALL"; rate uses the last
+// non-null value found.
+const loanRegResults = [];
+for (const o of outlets) {
+  loanRegResults.push(await getEmptyLoanRegister(o, month));
 }
 
 const scalarResults = [];
@@ -164,8 +185,8 @@ for (const o of outlets) {
   scalarResults.push(result);
 }
 
-const [inv, coa] = await Promise.all([
-  getInventoryMaster(), getCOA(),
+const [inv, coa, emptyInvMaster] = await Promise.all([
+  getInventoryMaster(), getCOA(), getEmptyInventoryMaster(),
 ]);
 
       const inMonth = arr => {
@@ -177,7 +198,7 @@ const [inv, coa] = await Promise.all([
       let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[], crateLedgerAll=[];
       let cardLedgerAll=[], positionLedgerAll=[];
       let cashBF=0, bankBF=0, cashPettyCash=0, cashCoins=0, cashPendingBal=0, cashDiffSigned=0;
-                arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,pos]) => {
+                arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,pos,crt]) => {
         sales      = [...sales,      ...inMonth(sal)];
         purchases  = [...purchases,  ...inMonth(pur)];
         returns    = [...returns,    ...inMonth(ret)];
@@ -199,6 +220,22 @@ const [inv, coa] = await Promise.all([
         // positionLedgerAll was permanently empty regardless of what was
         // saved in Position Ledger.
         positionLedgerAll = [...positionLedgerAll, ...(pos || [])];
+        // All-time (not inMonth-filtered) — the Empty Loan Register and
+        // Stock Summary both need the cumulative balance as of period-end,
+        // computed by filtering on date themselves.
+        crateLedgerAll = [...crateLedgerAll, ...(crt || [])];
+      });
+
+      // Merge per-outlet loan-register maps: bf_loan sums across outlets
+      // (each outlet carries its own loan balance for the same item type),
+      // rate takes the last non-null value seen.
+      const emptyLoanBF = {};
+      loanRegResults.forEach(reg => {
+        Object.entries(reg || {}).forEach(([key, v]) => {
+          if (!emptyLoanBF[key]) emptyLoanBF[key] = { bfLoan: 0, rate: null };
+          emptyLoanBF[key].bfLoan += v.bfLoan || 0;
+          if (v.rate !== null && v.rate !== undefined) emptyLoanBF[key].rate = v.rate;
+        });
       });
         scalarResults.forEach(([cbf,bbf,petty,coins,pend,diff]) => {
         cashBF += Number(cbf)||0; bankBF += Number(bbf)||0;
@@ -439,19 +476,24 @@ const [inv, coa] = await Promise.all([
       const apPaidTotal=apPayments.reduce((a,p)=>a+(Number(p.amount)||0)+(Number(p.discount)||0),0);
       const apBal=apInvTotal-apPaidTotal;
 
-      let emptyStockVal=0;
+      // Legacy approximation (last empty-item sale's endStock × rate) —
+      // kept only as a fallback figure; the real Empty Stock valuation is
+      // now emptyLoanStockVal (Physical + Loan, computed further below from
+      // the Empty Loan Register) and is applied to emptyStockVal after that.
+      let emptyStockValLegacy=0;
       const latestEmpSale=salesSorted.find(s=>(s.items||[]).some(r=>r.isEmptyItem));
       if(latestEmpSale)(latestEmpSale.items||[]).filter(r=>r.isEmptyItem&&r.supplier!=="EMPTY PURCHASE")
-        .forEach(r=>{ const es=parseFloat(r.endStock); if(!isNaN(es)) emptyStockVal+=es*(parseFloat(r.rate)||0); });
+        .forEach(r=>{ const es=parseFloat(r.endStock); if(!isNaN(es)) emptyStockValLegacy+=es*(parseFloat(r.rate)||0); });
+      let emptyStockVal=emptyStockValLegacy; // reassigned once emptyLoanStockVal is computed below
 
       const coaNonCurrentAssets=(coa||[]).filter(a=>a.id>="1500"&&a.id<="1999");
       const coaCurrentLiab=(coa||[]).filter(a=>a.id>="2000"&&a.id<="2499");
       const coaNonCurrentLiab=(coa||[]).filter(a=>a.id>="2500"&&a.id<="2999");
       const coaCapital=(coa||[]).filter(a=>a.id>="3000"&&a.id<="3999");
-      const totalCurrentAssets=endStockVal+emptyStockVal+cashBal+bankBal+arBal;
+      let totalCurrentAssets=endStockVal+emptyStockVal+cashBal+bankBal+arBal;
       const totalCurrentLiab=apBal;
-      const totalAssets=totalCurrentAssets;
-      const ownerEquity=totalAssets-totalCurrentLiab;
+      let totalAssets=totalCurrentAssets;
+      let ownerEquity=totalAssets-totalCurrentLiab;
 
       // ── Sales by day ──
       const salesByDay={};
@@ -600,6 +642,85 @@ Object.keys(cosByItem).forEach(code => {
           empOpeningByItem[key] = (empOpeningByItem[key] || 0) + q;
         });
       });
+      // ── Empty Loan Register — mirrors the Excel STOCK sheet's "EMPTIES
+      // STOCK / P/L LOAN DETAILS" box: TYPE | PHYSICAL | LOAN | ACTUAL |
+      // RATE | AMOUNT, for every bottle item and every crate type.
+      //   PHYSICAL = the item's own running stock balance (same formula as
+      //              EmptyBottles' totalBal / the crate ledger's balance)
+      //   LOAN     = bf_loan (carried forward, entered by the user) +
+      //              this period's Received − Issued movement
+      //   ACTUAL   = PHYSICAL + LOAN
+      //   AMOUNT   = ACTUAL × RATE (rate: user override, else the item's
+      //              unit cost from the Empty Inventory Master, else 0)
+      const emptyInvByCode = {};
+      (emptyInvMaster || []).forEach(i => { emptyInvByCode[i.code] = i; });
+
+      const emptyLoanRows = [];
+
+      // Bottles — one row per Supplier::Code item.
+      Object.keys(empItemMeta).forEach(key => {
+        const meta = empItemMeta[key];
+        let physical = empOpeningByItem[key] || 0;
+        let received = 0, issue = 0;
+        Object.values(empDailyData[key] || {}).forEach(dd => {
+          physical += (dd.purchase||0) + (dd.invPurchase||0) + (dd.received||0) + (dd.return_||0)
+                    - (dd.invIssue||0) - (dd.issue||0) - (dd.sold||0);
+          received += dd.received || 0;
+          issue    += dd.issue    || 0;
+        });
+        const movement = received - issue;
+        const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null };
+        const loan = bfEntry.bfLoan + movement;
+        const actual = physical + loan;
+        const rate = bfEntry.rate !== null && bfEntry.rate !== undefined
+          ? bfEntry.rate
+          : Number(emptyInvByCode[meta.code]?.unit_cost ?? emptyInvByCode[meta.code]?.unitCost) || 0;
+        emptyLoanRows.push({
+          key, kind: "bottle", label: `${meta.supplier} — ${meta.label}`,
+          physical, bfLoan: bfEntry.bfLoan, movement, loan, actual, rate, amount: actual * rate,
+        });
+      });
+
+      // Crates — one row per crate type, using the raw crate_ledger rows
+      // (crateLedgerAll, populated above) filtered to period-end.
+      const mEndLoan = monthEnd(month);
+      LOAN_CRATE_TYPES.forEach(t => {
+        const key = `CRATE::${t}`;
+        const bfRow = crateLedgerAll.find(e => e.crate_type === t && e.balance_type === "bf");
+        let physical = Number(bfRow?.bf || 0);
+        let received = 0, issue = 0;
+        crateLedgerAll
+          .filter(e => e.crate_type === t && e.balance_type !== "bf" && (!mEndLoan || e.date <= mEndLoan))
+          .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+          .forEach(e => {
+            physical += Number(e.purchase||0) + Number(e.received||0) - Number(e.returned||0)
+                      - Number(e.ex||0) - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0);
+            if (!mStart || (e.date >= mStart && e.date <= mEnd)) {
+              received += Number(e.received || 0);
+              issue    += Number(e.issued   || 0);
+            }
+          });
+        const movement = received - issue;
+        const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null };
+        const loan = bfEntry.bfLoan + movement;
+        const actual = physical + loan;
+        const rate = bfEntry.rate || 0;
+        emptyLoanRows.push({
+          key, kind: "crate", label: t,
+          physical, bfLoan: bfEntry.bfLoan, movement, loan, actual, rate, amount: actual * rate,
+        });
+      });
+
+      const emptyLoanStockVal = emptyLoanRows.reduce((a, r) => a + r.amount, 0);
+
+      // Now that the real Empty Stock valuation is known, fold it into the
+      // Balance Sheet totals computed earlier (they started out using the
+      // cruder emptyStockValLegacy figure as a placeholder).
+      emptyStockVal = emptyLoanStockVal;
+      totalCurrentAssets = endStockVal + emptyStockVal + cashBal + bankBal + arBal;
+      totalAssets = totalCurrentAssets;
+      ownerEquity = totalAssets - totalCurrentLiab;
+
       // crateLedgerAll is already accumulated above (all-time, not month-filtered,
       // since we need the cumulative balance as of period-end for the crate
       // section in Stock Summary — no cost/rate data exists for crates, so
@@ -615,7 +736,7 @@ Object.keys(cosByItem).forEach(code => {
       });
       const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-     setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll });
+     setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -1748,6 +1869,143 @@ function EmptyBottles({ d, outlet, month }) {
           ))}
         </div>
       ))}
+    </div>
+  );
+}
+// ══════════════════════════════════════════════════════════════════════════
+// EMPTY LOAN REGISTER — mirrors the Excel STOCK sheet's "EMPTIES STOCK /
+// P/L LOAN DETAILS" box: TYPE | PHYSICAL | B/F LOAN | MOVEMENT | LOAN |
+// ACTUAL | RATE | AMOUNT for every bottle item and every crate type.
+// B/F Loan and Rate are editable per outlet/period — everything else is
+// computed live from the existing Empty Bottles / Crate ledgers, so it can
+// never drift out of sync with them. The AMOUNT total feeds emptyStockVal
+// used on the Balance Sheet and Stock Summary.
+// ══════════════════════════════════════════════════════════════════════════
+function EmptyLoanRegister({ d, outlet, month, refresh }) {
+  const { emptyLoanRows = [] } = d;
+  const editable = outlet !== "ALL";
+
+  // Local, instantly-updated copy of the rows. Editing a cell updates this
+  // state immediately (so the input never blanks out or gets remounted)
+  // while the save happens quietly in the background — no full-page
+  // refresh/spinner on every blur. Re-syncs whenever the parent reloads
+  // data (month/outlet change, or the top "Refresh" button).
+  const [rows, setRows] = useState(emptyLoanRows);
+  useEffect(() => { setRows(emptyLoanRows); }, [emptyLoanRows]);
+  const [savingKey, setSavingKey] = useState(null);
+
+  function saveField(row, field, rawValue) {
+    const value = rawValue === "" ? 0 : (parseFloat(rawValue) || 0);
+    setRows(prev => prev.map(r => {
+      if (r.key !== row.key) return r;
+      const bfLoan = field === "bfLoan" ? value : r.bfLoan;
+      const rate   = field === "rate"   ? value : r.rate;
+      const loan   = bfLoan + r.movement;
+      const actual = r.physical + loan;
+      return { ...r, bfLoan, rate, loan, actual, amount: actual * rate };
+    }));
+    setSavingKey(row.key + field);
+    upsertEmptyLoanEntry(outlet, row.key, month, { [field]: value })
+      .catch(err => console.error("EmptyLoanRegister save failed:", err))
+      .finally(() => setSavingKey(null));
+  }
+
+  const th = { padding: "6px 9px", fontSize: 9.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
+  const td = (bold, color) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, color: color || "var(--txt)", whiteSpace: "nowrap" });
+  const inputSt = { width: 84, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" };
+
+  const totalAmount = rows.reduce((a, r) => a + r.amount, 0);
+  const bottleRows = rows.filter(r => r.kind === "bottle");
+  const crateRows  = rows.filter(r => r.kind === "crate");
+
+ const Row = ({ r }) => {
+  // Local text state per field so typing never gets clobbered by a
+  // parent re-render — committed (parsed + saved) on blur, and re-synced
+  // from r.bfLoan/r.rate only after that save actually lands.
+  const [bfText, setBfText]     = useState(String(r.bfLoan ?? 0));
+  const [rateText, setRateText] = useState(r.rate ? String(r.rate) : "");
+  useEffect(() => { setBfText(String(r.bfLoan ?? 0)); }, [r.bfLoan]);
+  useEffect(() => { setRateText(r.rate ? String(r.rate) : ""); }, [r.rate]);
+
+  return (
+    <tr>
+      <td style={{ ...td(false), textAlign: "left" }}>{r.label}</td>
+      <td style={td(false)}>{fmtN(r.physical)}</td>
+      <td style={td(false)}>
+        {editable ? (
+          <input type="number" step="1" value={bfText} style={inputSt}
+            onChange={e => setBfText(e.target.value)}
+            onBlur={e => saveField(r, "bfLoan", e.target.value)} />
+        ) : fmtN(r.bfLoan)}
+      </td>
+      <td style={td(false, r.movement >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.movement)}</td>
+      <td style={td(true, r.loan >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.loan)}</td>
+      <td style={td(true, "var(--gld2)")}>{fmtN(r.actual)}</td>
+      <td style={td(false)}>
+        {editable ? (
+          <input type="number" step="0.01" value={rateText} style={inputSt}
+            onChange={e => setRateText(e.target.value)}
+            onBlur={e => saveField(r, "rate", e.target.value)} />
+        ) : fmt(r.rate)}
+      </td>
+      <td style={td(true)}>{fmt(r.amount)}</td>
+    </tr>
+  );
+};
+
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>Empty Loan Register</div>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+      {!editable && (
+        <div style={{ marginBottom: 10, fontSize: 11.5, color: "var(--mut)" }}>
+          Select a single outlet to edit B/F Loan and Rate — showing combined totals across all outlets.
+        </div>
+      )}
+      {savingKey && <div style={{ marginBottom: 10, fontSize: 11, color: "var(--mut)" }}>Saving…</div>}
+
+      <div style={{ overflowX: "auto", border: "1px solid var(--bdr)", borderRadius: "var(--rl)" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+          <thead>
+            <tr>
+              <th style={{ ...th, textAlign: "left" }}>Type</th>
+              <th style={th}>Physical</th>
+              <th style={th}>B/F Loan</th>
+              <th style={th}>Movement</th>
+              <th style={th}>Loan</th>
+              <th style={th}>Actual</th>
+              <th style={th}>Rate</th>
+              <th style={th}>Amount</th>
+            </tr>
+          </thead>
+          <tbody>
+            {bottleRows.length > 0 && (
+              <tr style={{ background: "var(--s2)" }}>
+                <td colSpan={8} style={{ padding: "6px 9px", fontWeight: 700, fontSize: 11, color: "var(--gld2)" }}>Bottles</td>
+              </tr>
+            )}
+            {bottleRows.map(r => <Row key={r.key} r={r} />)}
+
+            {crateRows.length > 0 && (
+              <tr style={{ background: "var(--s2)" }}>
+                <td colSpan={8} style={{ padding: "6px 9px", fontWeight: 700, fontSize: 11, color: "var(--gld2)" }}>Crates</td>
+              </tr>
+            )}
+            {crateRows.map(r => <Row key={r.key} r={r} />)}
+
+            {rows.length === 0 && (
+              <tr><td colSpan={8} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No empty bottle or crate data for this period.</td></tr>
+            )}
+
+            <tr style={{ borderTop: "2px solid var(--bdr2)", background: "var(--s3)" }}>
+              <td colSpan={7} style={{ ...td(true), textAlign: "left" }}>Total Empty Stock Value</td>
+              <td style={td(true, "var(--gld2)")}>{fmt(totalAmount)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
@@ -3151,6 +3409,7 @@ export default function Reports({ user }) {
     { id: "purchase",  label: "Purchase Summary",      icon: "🛒" },
     { id: "cos",       label: "Cost of Sales Summary", icon: "📦" },
     { id: "emptybott", label: "Empty Bottles",         icon: "🍾" },
+    { id: "emptyloan", label: "Empty Loan Register",   icon: "🔁" },
     { id: "ugbook",    label: "UG Book",               icon: "📒" },
     { id: "supledger", label: "Supplier Credit Ledger", icon: "🧾" },
     { id: "stocksum",  label: "Stock Summary",          icon: "📦" },
@@ -3216,6 +3475,7 @@ export default function Reports({ user }) {
             {report==="purchase"  && <PurchaseSummary    d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="cos"       && <CostOfSalesSummary d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="emptyloan" && <EmptyLoanRegister  d={d} outlet={effectiveOutlet} month={month} refresh={refresh}/>}
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={handleSupplierChange} applyDiscount={applyDiscount} setApplyDiscount={val => { setApplyDiscount(val); setDiscountTouched(true); }}/>}
             {report==="stocksum"  && <StockSummary d={d} outlet={effectiveOutlet} month={month}/>}

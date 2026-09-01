@@ -24,6 +24,7 @@ import { supabase } from "./supabase";
 import {
   getCOA,
   getCashLedger, addCashEntry, getCashBF, getCashBFDate, setCashBF,
+  getCashDaySheetBalance, setCashDaySheetBalance,
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
   getUsernameOutlets, verifyClerkLogin, signInClerkAuth, getClerkProfile,
@@ -326,13 +327,14 @@ function S_GL({ outlet }) {
     setMDesc(""); setMA("");
   }
 
-  const dedupedLedger = (() => {
+    const dedupedLedger = (() => {
     const lastAutoIndexForDate = {};
     ledger.forEach((e, idx) => {
       if (e.description === "Daily Sale") lastAutoIndexForDate[e.date] = idx;
     });
     return ledger.filter((e, idx) =>
       e.balance_type !== "bf" &&
+      e.balance_type !== "daysheet" &&
       (e.description !== "Daily Sale" || lastAutoIndexForDate[e.date] === idx)
     );
   })();
@@ -349,6 +351,36 @@ function S_GL({ outlet }) {
         .filter(e => e.date < filterFrom)
         .reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0)
     : bfBal;
+
+  // ── Cash In / Cash Out totals for the currently filtered period ──
+  const cashInTotal  = rangedLedger.reduce((a, e) => a + (Number(e.debit)  || 0), 0);
+  const cashOutTotal = rangedLedger.reduce((a, e) => a + (Number(e.credit) || 0), 0);
+  const periodBalanceCD = displayBF + cashInTotal - cashOutTotal;
+
+  // ── Day Sheet Balance: staff-entered actual cash count for one date ──
+  const [daySheetDate, setDaySheetDate] = useState(today());
+  const [daySheetAmt,  setDaySheetAmt]  = useState("");
+  const [daySheetSaved, setDaySheetSaved] = useState(null); // null = not entered yet
+
+  useEffect(() => {
+    getCashDaySheetBalance(outlet, daySheetDate).then(v => {
+      setDaySheetSaved(v);
+      setDaySheetAmt(v !== null ? String(v) : "");
+    });
+  }, [outlet, daySheetDate]);
+
+  async function saveDaySheet() {
+    const amt = parseFloat(daySheetAmt) || 0;
+    const ok = await setCashDaySheetBalance(outlet, amt, daySheetDate);
+    if (ok) { setDaySheetSaved(amt); toast_("Day Sheet Balance saved ✓"); }
+    else toast_("Failed to save — check connection", "err");
+  }
+
+  // Running Balance C/D as of the Day Sheet date specifically (not the
+  // From/To filter range) — this is what "Different" compares against.
+  const balanceAsOfDaySheetDate = bfBal + dedupedLedger
+    .filter(e => e.date <= daySheetDate)
+    .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
 
   return (<>
     <div className="sg3">
@@ -384,24 +416,65 @@ function S_GL({ outlet }) {
         </div>
       </div>
     </div>
-    <div className="card">
+        <div className="card">
       <div className="chd">
         <div><h3>In Hand Cash Ledger (1001)</h3><p>Auto-linked from Sales, Expenses, Returns</p></div>
         <button className="btn btnd btnsm no-print" onClick={()=>window.print()}>{I.print} Print</button>
       </div>
-      <div className="no-print" style={{padding:"10px 14px 0",display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
-        <div className="ff" style={{marginBottom:0}}>
+      <div className="no-print" style={{ padding:"10px 14px 0", display:"flex", gap:8, alignItems:"flex-end", flexWrap:"wrap" }}>
+        <div className="ff" style={{ marginBottom:0 }}>
           <label>From Date</label>
           <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}/>
         </div>
-        <div className="ff" style={{marginBottom:0}}>
+        <div className="ff" style={{ marginBottom:0 }}>
           <label>To Date</label>
           <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}/>
         </div>
         {(filterFrom || filterTo) &&
           <button className="btn btnd btnsm" onClick={()=>{setFilterFrom("");setFilterTo("");}}>Clear</button>}
       </div>
-      <div style={{padding:12}}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate}/></div>
+      <div style={{ padding:12 }}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate}/></div>
+
+      {/* ── Totals + Day Sheet Balance / Different ── */}
+      <div style={{ padding:"0 14px 14px" }}>
+        <div className="sg3" style={{ marginBottom:14 }}>
+          <div className="sc"><div className="sl">Cash In Total</div><div className="sa cg">Rs.{fmt(cashInTotal)}</div></div>
+          <div className="sc"><div className="sl">Cash Out Total</div><div className="sa cr">Rs.{fmt(cashOutTotal)}</div></div>
+          <div className="sc"><div className="sl">Balance C/D</div><div className="sa">Rs.{fmt(periodBalanceCD)}</div></div>
+        </div>
+
+        <div className="no-print" style={{ display:"flex", gap:8, alignItems:"flex-end", flexWrap:"wrap", borderTop:"1px solid var(--bdr)", paddingTop:14 }}>
+          <div className="ff" style={{ marginBottom:0 }}>
+            <label>Day Sheet Date</label>
+            <input type="date" value={daySheetDate} onChange={e=>setDaySheetDate(e.target.value)} />
+          </div>
+          <div className="ff" style={{ marginBottom:0 }}>
+            <label>Day Sheet Balance (Rs.)</label>
+            <input type="number" placeholder="Enter actual cash counted" value={daySheetAmt} onChange={e=>setDaySheetAmt(e.target.value)} />
+          </div>
+          <button className="btn btnd btnsm" onClick={saveDaySheet}>{I.check} Set</button>
+
+          {daySheetSaved !== null && (
+            <div style={{ marginLeft:"auto", display:"flex", gap:24 }}>
+              <div>
+                <div style={{ fontSize:9, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--mut)" }}>Balance C/D (as of date)</div>
+                <div style={{ fontSize:15, fontWeight:700 }}>Rs.{fmt(balanceAsOfDaySheetDate)}</div>
+              </div>
+              <div>
+                <div style={{ fontSize:9, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--mut)" }}>Different</div>
+                <div style={{
+                  fontSize:15, fontWeight:700,
+                  color: (daySheetSaved - balanceAsOfDaySheetDate) < 0 ? "var(--red)"
+                       : (daySheetSaved - balanceAsOfDaySheetDate) > 0 ? "var(--grn)"
+                       : "var(--txt)"
+                }}>
+                  Rs.{fmt(daySheetSaved - balanceAsOfDaySheetDate)}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   </>);
 }

@@ -641,6 +641,29 @@ export const setCashDifferent = async (outlet, amount, sign, period) => {
   if (error) { console.error("setCashDifferent:", error); return false; }
   return true;
 };
+// ─── Cash Ledger — Day Sheet Balance: the actual cash staff counted
+// and entered for a specific date. Stored separately from the
+// computed Balance C/D so "Different" (Day Sheet Balance − Balance
+// C/D) can flag a cash-count mismatch for that date.
+export const getCashDaySheetBalance = async (outlet, date) => {
+  const { data } = await supabase
+    .from("cash_ledger").select("debit")
+    .eq("outlet_id", outlet).eq("balance_type", "daysheet").eq("date", date);
+  if (!data || !data.length) return null; // null = not yet entered for this date
+  return Number(data[0].debit) || 0;
+};
+
+export const setCashDaySheetBalance = async (outlet, amount, date) => {
+  await supabase.from("cash_ledger")
+    .delete().eq("outlet_id", outlet).eq("balance_type", "daysheet").eq("date", date);
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id: outlet, date,
+    description: "Day Sheet Balance", debit: Number(amount) || 0, credit: 0,
+    balance_type: "daysheet",
+  });
+  if (error) { console.error("setCashDaySheetBalance:", error); return false; }
+  return true;
+};
 
 // ─── BANK LEDGER ─────────────────────────────────────────────
 export const getBankLedger = async (outlet) => {
@@ -1347,6 +1370,56 @@ export async function getEmptyInventoryMaster() {
     qty:          Number(i.qty)           || 0,
   }));
 }
+// ─── EMPTY / CRATE LOAN REGISTER ────────────────────────────────────────
+// Table: empty_loan_bf
+//   columns: outlet_id (text), item_key (text), period (text 'YYYY-MM'),
+//            bf_loan (numeric, default 0), rate (numeric, nullable),
+//            updated_at (timestamptz), unique (outlet_id, item_key, period)
+//
+// Mirrors the Excel STOCK sheet's "EMPTIES STOCK / P/L LOAN DETAILS" box:
+//   LOAN   = bf_loan (carried forward from last period) + this period's
+//            movement (Received − Issued, computed elsewhere from the
+//            existing Empty Bottles / Crate ledgers — never stored here)
+//   ACTUAL = PHYSICAL (the item's already-computed running stock balance)
+//            + LOAN
+//   AMOUNT = ACTUAL × RATE
+//
+// item_key is "Supplier::Code" for bottles (matches empItemMeta keys built
+// in Reports.jsx) or "CRATE::type" for crates (matches S_Crates.jsx's
+// CRATE_TYPES values, e.g. "CRATE::plastic_wh").
+export const getEmptyLoanRegister = async (outlet, period) => {
+  const { data, error } = await supabase
+    .from("empty_loan_bf").select("item_key,bf_loan,rate")
+    .eq("outlet_id", outlet).eq("period", period);
+  if (error) { console.error("getEmptyLoanRegister:", error); return {}; }
+  const map = {};
+  (data || []).forEach(r => {
+    map[r.item_key] = {
+      bfLoan: Number(r.bf_loan) || 0,
+      rate: r.rate === null || r.rate === undefined ? null : Number(r.rate),
+    };
+  });
+  return map;
+};
+
+// Upserts bf_loan and/or rate for one item/period. Merges with whatever is
+// already stored so saving just one field never clobbers the other.
+export const upsertEmptyLoanEntry = async (outlet, itemKey, period, { bfLoan, rate } = {}) => {
+  const { data: existing } = await supabase
+    .from("empty_loan_bf").select("bf_loan,rate")
+    .eq("outlet_id", outlet).eq("item_key", itemKey).eq("period", period)
+    .maybeSingle();
+  const row = {
+    outlet_id: outlet, item_key: itemKey, period,
+    bf_loan: bfLoan !== undefined ? (Number(bfLoan) || 0) : (existing?.bf_loan ?? 0),
+    rate: rate !== undefined ? (rate === "" || rate === null ? null : Number(rate)) : (existing?.rate ?? null),
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await supabase.from("empty_loan_bf")
+    .upsert(row, { onConflict: "outlet_id,item_key,period" });
+  if (error) console.error("upsertEmptyLoanEntry:", error);
+};
+
 // ─── Manual Supplier B/F ───────────────────────────────────────────────
 // Table: supplier_bf
 //   columns: supplier_id (text, PK part), outlet (text, PK part, or 'ALL'),
