@@ -1152,19 +1152,25 @@ function SalesSummary({ d, outlet, month }) {
     if (month && monthOf(s.date) !== month) return;
     const day = dayOf(s.date);
 
-    (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
-      const bk   = brandOf(r.supplier);
-      if (!bk) return; // skip unmapped suppliers
-
+  (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
       const qty = parseFloat(r.sold) || 0;  // direct daily qty ✅
       const amt = qty * (parseFloat(r.rate) || 0);
+
+      // Daily Sale / Sold totals must include EVERY item regardless of
+      // supplier-brand mapping, so this always matches the real Total Sale
+      // shown on the Stock/Inventory Daily Sale screen. Only the per-brand
+      // columns (IDL/RL/DCSL/UG/etc.) are limited to recognized brands —
+      // unmapped suppliers (e.g. KASTHURI W/S) simply don't get a brand
+      // column, but their sales still count in the totals.
+      dailySale[day] = (dailySale[day] || 0) + amt;
+      dailySold[day] = (dailySold[day] || 0) + qty;
+
+      const bk = brandOf(r.supplier);
+      if (!bk) return; // no matching brand column — totals above already counted it
 
       if (!brandDay[bk][day]) brandDay[bk][day] = { amt: 0, qty: 0 };
       brandDay[bk][day].amt += amt;
       brandDay[bk][day].qty += qty;
-
-      dailySale[day] = (dailySale[day] || 0) + amt;
-      dailySold[day] = (dailySold[day] || 0) + qty;
     });
   });
 
