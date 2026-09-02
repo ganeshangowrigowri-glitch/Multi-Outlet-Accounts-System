@@ -229,14 +229,19 @@ const [inv, coa, emptyInvMaster] = await Promise.all([
       // Merge per-outlet loan-register maps: bf_loan sums across outlets
       // (each outlet carries its own loan balance for the same item type),
       // rate takes the last non-null value seen.
-      const emptyLoanBF = {};
+        const emptyLoanBF = {};
       loanRegResults.forEach(reg => {
-        Object.entries(reg || {}).forEach(([key, v]) => {
-          if (!emptyLoanBF[key]) emptyLoanBF[key] = { bfLoan: 0, rate: null };
-          emptyLoanBF[key].bfLoan += v.bfLoan || 0;
-          if (v.rate !== null && v.rate !== undefined) emptyLoanBF[key].rate = v.rate;
-        });
+      Object.entries(reg || {}).forEach(([key, v]) => {
+      if (!emptyLoanBF[key]) emptyLoanBF[key] = { bfLoan: 0, rate: null, details: "", actualOverride: null };
+      emptyLoanBF[key].bfLoan += v.bfLoan || 0;
+      if (v.rate !== null && v.rate !== undefined) emptyLoanBF[key].rate = v.rate;
+      if (v.details) emptyLoanBF[key].details = emptyLoanBF[key].details
+       ? `${emptyLoanBF[key].details} / ${v.details}` : v.details;
+      if (v.actualOverride !== null && v.actualOverride !== undefined) {
+      emptyLoanBF[key].actualOverride = (emptyLoanBF[key].actualOverride || 0) + v.actualOverride;
+       }
       });
+     });
         scalarResults.forEach(([cbf,bbf,petty,coins,pend,diff]) => {
         cashBF += Number(cbf)||0; bankBF += Number(bbf)||0;
         cashPettyCash += Number(petty)||0; cashCoins += Number(coins)||0;
@@ -668,17 +673,18 @@ Object.keys(cosByItem).forEach(code => {
           received += dd.received || 0;
           issue    += dd.issue    || 0;
         });
-        const movement = received - issue;
-        const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null };
+         const movement = received - issue;
+        const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null, details: "" };
         const loan = bfEntry.bfLoan + movement;
         const actual = physical + loan;
         const rate = bfEntry.rate !== null && bfEntry.rate !== undefined
-          ? bfEntry.rate
-          : Number(emptyInvByCode[meta.code]?.unit_cost ?? emptyInvByCode[meta.code]?.unitCost) || 0;
-        emptyLoanRows.push({
-          key, kind: "bottle", label: `${meta.supplier} — ${meta.label}`,
-          physical, bfLoan: bfEntry.bfLoan, movement, loan, actual, rate, amount: actual * rate,
-        });
+       ? bfEntry.rate
+       : Number(emptyInvByCode[meta.code]?.unit_cost ?? emptyInvByCode[meta.code]?.unitCost) || 0;
+             emptyLoanRows.push({
+       key, kind: "bottle", label: `${meta.supplier} — ${meta.label}`,
+       details: bfEntry.details || "",
+       physical, bfLoan: bfEntry.bfLoan, movement, loan, actual, rate, amount: actual * rate,
+      });
       });
 
       // Crates — one row per crate type, using the raw crate_ledger rows
@@ -700,13 +706,20 @@ Object.keys(cosByItem).forEach(code => {
               issue    += Number(e.issued   || 0);
             }
           });
-        const movement = received - issue;
-        const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null };
-        const loan = bfEntry.bfLoan + movement;
-        const actual = physical + loan;
+         const movement = received - issue;
+         const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null, details: "", actualOverride: null };
+         const loan = bfEntry.bfLoan + movement;
+// Crates: staff can type the counted Actual directly, overriding
+// the computed Physical+Loan figure. Everything else (Physical,
+// Movement, Loan, Rate, Amount) keeps the same logic as before.
+          const actual = bfEntry.actualOverride !== null && bfEntry.actualOverride !== undefined
+         ? bfEntry.actualOverride
+        : physical + loan;
         const rate = bfEntry.rate || 0;
-        emptyLoanRows.push({
-          key, kind: "crate", label: t,
+           emptyLoanRows.push({
+           key, kind: "crate", label: t,
+          details: bfEntry.details || "",
+          actualOverride: bfEntry.actualOverride,
           physical, bfLoan: bfEntry.bfLoan, movement, loan, actual, rate, amount: actual * rate,
         });
       });
@@ -1885,27 +1898,29 @@ function EmptyLoanRegister({ d, outlet, month, refresh }) {
   const { emptyLoanRows = [] } = d;
   const editable = outlet !== "ALL";
 
-  // Local, instantly-updated copy of the rows. Editing a cell updates this
-  // state immediately (so the input never blanks out or gets remounted)
-  // while the save happens quietly in the background — no full-page
-  // refresh/spinner on every blur. Re-syncs whenever the parent reloads
-  // data (month/outlet change, or the top "Refresh" button).
   const [rows, setRows] = useState(emptyLoanRows);
   useEffect(() => { setRows(emptyLoanRows); }, [emptyLoanRows]);
   const [savingKey, setSavingKey] = useState(null);
 
   function saveField(row, field, rawValue) {
-    const value = rawValue === "" ? 0 : (parseFloat(rawValue) || 0);
+    const isText = field === "details";
+    const value = isText ? rawValue : (rawValue === "" ? 0 : (parseFloat(rawValue) || 0));
     setRows(prev => prev.map(r => {
       if (r.key !== row.key) return r;
+      if (isText) return { ...r, details: value };
+      if (field === "actualOverride") {
+        const actual = rawValue === "" ? r.physical - r.loan : value;
+        return { ...r, actualOverride: rawValue === "" ? null : value, actual, amount: actual * r.rate };
+      }
       const bfLoan = field === "bfLoan" ? value : r.bfLoan;
       const rate   = field === "rate"   ? value : r.rate;
       const loan   = bfLoan + r.movement;
-      const actual = r.physical + loan;
+      const actual = (r.kind === "crate" && r.actualOverride !== null && r.actualOverride !== undefined)
+        ? r.actualOverride : r.physical + loan;
       return { ...r, bfLoan, rate, loan, actual, amount: actual * rate };
     }));
     setSavingKey(row.key + field);
-    upsertEmptyLoanEntry(outlet, row.key, month, { [field]: value })
+    upsertEmptyLoanEntry(outlet, row.key, month, { [field]: isText ? value : (rawValue === "" ? "" : value) })
       .catch(err => console.error("EmptyLoanRegister save failed:", err))
       .finally(() => setSavingKey(null));
   }
@@ -1918,40 +1933,72 @@ function EmptyLoanRegister({ d, outlet, month, refresh }) {
   const bottleRows = rows.filter(r => r.kind === "bottle");
   const crateRows  = rows.filter(r => r.kind === "crate");
 
- const Row = ({ r }) => {
-  // Local text state per field so typing never gets clobbered by a
-  // parent re-render — committed (parsed + saved) on blur, and re-synced
-  // from r.bfLoan/r.rate only after that save actually lands.
-  const [bfText, setBfText]     = useState(String(r.bfLoan ?? 0));
-  const [rateText, setRateText] = useState(r.rate ? String(r.rate) : "");
-  useEffect(() => { setBfText(String(r.bfLoan ?? 0)); }, [r.bfLoan]);
-  useEffect(() => { setRateText(r.rate ? String(r.rate) : ""); }, [r.rate]);
+  const Row = ({ r }) => {
+    const [bfText, setBfText]         = useState(String(r.bfLoan ?? 0));
+    const [rateText, setRateText]     = useState(r.rate ? String(r.rate) : "");
+    const [detailsText, setDetailsText] = useState(r.details || "");
+    const [actualText, setActualText] = useState(
+      r.actualOverride !== null && r.actualOverride !== undefined ? String(r.actualOverride) : ""
+    );
+    useEffect(() => { setBfText(String(r.bfLoan ?? 0)); }, [r.bfLoan]);
+    useEffect(() => { setRateText(r.rate ? String(r.rate) : ""); }, [r.rate]);
+    useEffect(() => { setDetailsText(r.details || ""); }, [r.details]);
+    useEffect(() => {
+      setActualText(r.actualOverride !== null && r.actualOverride !== undefined ? String(r.actualOverride) : "");
+    }, [r.actualOverride]);
 
-  return (
-    <tr>
-      <td style={{ ...td(false), textAlign: "left" }}>{r.label}</td>
-      <td style={td(false)}>{fmtN(r.physical)}</td>
-      <td style={td(false)}>
-        {editable ? (
-          <input type="number" step="1" value={bfText} style={inputSt}
-            onChange={e => setBfText(e.target.value)}
-            onBlur={e => saveField(r, "bfLoan", e.target.value)} />
-        ) : fmtN(r.bfLoan)}
-      </td>
-      <td style={td(false, r.movement >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.movement)}</td>
-      <td style={td(true, r.loan >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.loan)}</td>
-      <td style={td(true, "var(--gld2)")}>{fmtN(r.actual)}</td>
-      <td style={td(false)}>
-        {editable ? (
-          <input type="number" step="0.01" value={rateText} style={inputSt}
-            onChange={e => setRateText(e.target.value)}
-            onBlur={e => saveField(r, "rate", e.target.value)} />
-        ) : fmt(r.rate)}
-      </td>
-      <td style={td(true)}>{fmt(r.amount)}</td>
-    </tr>
-  );
-};
+    const bfStatus = r.bfLoan > 0
+      ? { label: "Over Paid", color: "var(--grn)" }
+      : r.bfLoan < 0
+        ? { label: "Loan", color: "var(--red)" }
+        : { label: "-", color: "var(--mut)" };
+
+    return (
+      <tr>
+        <td style={{ ...td(false), textAlign: "left" }}>{r.label}</td>
+
+        <td style={{ ...td(false), textAlign: "left" }}>
+          {editable ? (
+            <input type="text" placeholder="short / excess note" value={detailsText} style={{ ...inputSt, width: 150, textAlign: "left" }}
+              onChange={e => setDetailsText(e.target.value)}
+              onBlur={e => saveField(r, "details", e.target.value)} />
+          ) : (r.details || "—")}
+        </td>
+
+        <td style={td(false, "var(--mut)")}>{fmtN(r.physical)}</td>
+
+        <td style={td(false)}>
+          {editable ? (
+            <input type="number" step="1" value={bfText} style={inputSt}
+              onChange={e => setBfText(e.target.value)}
+              onBlur={e => saveField(r, "bfLoan", e.target.value)} />
+          ) : fmtN(r.bfLoan)}
+        </td>
+
+        <td style={td(false, bfStatus.color)}>{bfStatus.label}</td>
+        <td style={td(false, r.movement >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.movement)}</td>
+        <td style={td(true, r.loan >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.loan)}</td>
+
+        <td style={td(true, "var(--gld2)")}>
+          {editable && r.kind === "crate" ? (
+            <input type="number" step="1" placeholder={fmtN(r.physical + r.loan)} value={actualText} style={{ ...inputSt, color: "var(--gld2)" }}
+              onChange={e => setActualText(e.target.value)}
+              onBlur={e => saveField(r, "actualOverride", e.target.value)} />
+          ) : fmtN(r.actual)}
+        </td>
+
+        <td style={td(false)}>
+          {editable ? (
+            <input type="number" step="0.01" value={rateText} style={inputSt}
+              onChange={e => setRateText(e.target.value)}
+              onBlur={e => saveField(r, "rate", e.target.value)} />
+          ) : fmt(r.rate)}
+        </td>
+
+        <td style={td(true)}>{fmt(r.amount)}</td>
+      </tr>
+    );
+  };
 
   return (
     <div>
@@ -1967,13 +2014,15 @@ function EmptyLoanRegister({ d, outlet, month, refresh }) {
       {savingKey && <div style={{ marginBottom: 10, fontSize: 11, color: "var(--mut)" }}>Saving…</div>}
 
       <div style={{ overflowX: "auto", border: "1px solid var(--bdr)", borderRadius: "var(--rl)" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
           <thead>
             <tr>
               <th style={{ ...th, textAlign: "left" }}>Type</th>
+              <th style={{ ...th, textAlign: "left" }}>Details</th>
               <th style={th}>Physical</th>
-              <th style={th}>B/F Loan</th>
-              <th style={th}>Movement</th>
+              <th style={th}>B/F</th>
+              <th style={th}>Loan / Over Paid</th>
+              <th style={th}>Current</th>
               <th style={th}>Loan</th>
               <th style={th}>Actual</th>
               <th style={th}>Rate</th>
@@ -1983,24 +2032,24 @@ function EmptyLoanRegister({ d, outlet, month, refresh }) {
           <tbody>
             {bottleRows.length > 0 && (
               <tr style={{ background: "var(--s2)" }}>
-                <td colSpan={8} style={{ padding: "6px 9px", fontWeight: 700, fontSize: 11, color: "var(--gld2)" }}>Bottles</td>
+                <td colSpan={10} style={{ padding: "6px 9px", fontWeight: 700, fontSize: 11, color: "var(--gld2)" }}>Bottles</td>
               </tr>
             )}
             {bottleRows.map(r => <Row key={r.key} r={r} />)}
 
             {crateRows.length > 0 && (
               <tr style={{ background: "var(--s2)" }}>
-                <td colSpan={8} style={{ padding: "6px 9px", fontWeight: 700, fontSize: 11, color: "var(--gld2)" }}>Crates</td>
+                <td colSpan={10} style={{ padding: "6px 9px", fontWeight: 700, fontSize: 11, color: "var(--gld2)" }}>Crates</td>
               </tr>
             )}
             {crateRows.map(r => <Row key={r.key} r={r} />)}
 
             {rows.length === 0 && (
-              <tr><td colSpan={8} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No empty bottle or crate data for this period.</td></tr>
+              <tr><td colSpan={10} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No empty bottle or crate data for this period.</td></tr>
             )}
 
             <tr style={{ borderTop: "2px solid var(--bdr2)", background: "var(--s3)" }}>
-              <td colSpan={7} style={{ ...td(true), textAlign: "left" }}>Total Empty Stock Value</td>
+              <td colSpan={9} style={{ ...td(true), textAlign: "left" }}>Total Empty Stock Value</td>
               <td style={td(true, "var(--gld2)")}>{fmt(totalAmount)}</td>
             </tr>
           </tbody>

@@ -539,6 +539,34 @@ export const setCashBF = async (outlet, amount, date) => {
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
   });
 };
+// ─── Cash Ledger — Day Sheet Balance (staff-entered actual cash count for
+// one specific date). Same delete-then-insert pattern as setCashBF, but
+// scoped per date instead of a single running B/F, so each day's physical
+// count is stored independently. Excluded from the ledger display and
+// balance totals via balance_type "daysheet" (see App.jsx's dedupedLedger).
+export const getCashDaySheetBalance = async (outlet, date) => {
+  const { data, error } = await supabase
+    .from("cash_ledger").select("debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "daysheet").eq("date", date);
+  if (error) { console.error("getCashDaySheetBalance:", error); return null; }
+  if (!data || !data.length) return null; // null = nothing entered for this date yet
+  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
+};
+
+export const setCashDaySheetBalance = async (outlet, amount, date) => {
+  await supabase.from("cash_ledger")
+    .delete().eq("outlet_id", outlet).eq("balance_type", "daysheet").eq("date", date);
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id: outlet,
+    date,
+    description: "Day Sheet Balance",
+    debit:  amount > 0 ? amount : 0,
+    credit: amount < 0 ? Math.abs(amount) : 0,
+    balance_type: "daysheet",
+  });
+  if (error) { console.error("setCashDaySheetBalance:", error); return false; }
+  return true;
+};
 
 // ─── Cash Ledger — Month-wise Petty Cash, Coins, Total Pending, and
 // Different — mirrors the Bank Ledger's period-scoped reconciliation
@@ -639,29 +667,6 @@ export const setCashDifferent = async (outlet, amount, sign, period) => {
     balance_type: "different",
   });
   if (error) { console.error("setCashDifferent:", error); return false; }
-  return true;
-};
-// ─── Cash Ledger — Day Sheet Balance: the actual cash staff counted
-// and entered for a specific date. Stored separately from the
-// computed Balance C/D so "Different" (Day Sheet Balance − Balance
-// C/D) can flag a cash-count mismatch for that date.
-export const getCashDaySheetBalance = async (outlet, date) => {
-  const { data } = await supabase
-    .from("cash_ledger").select("debit")
-    .eq("outlet_id", outlet).eq("balance_type", "daysheet").eq("date", date);
-  if (!data || !data.length) return null; // null = not yet entered for this date
-  return Number(data[0].debit) || 0;
-};
-
-export const setCashDaySheetBalance = async (outlet, amount, date) => {
-  await supabase.from("cash_ledger")
-    .delete().eq("outlet_id", outlet).eq("balance_type", "daysheet").eq("date", date);
-  const { error } = await supabase.from("cash_ledger").insert({
-    outlet_id: outlet, date,
-    description: "Day Sheet Balance", debit: Number(amount) || 0, credit: 0,
-    balance_type: "daysheet",
-  });
-  if (error) { console.error("setCashDaySheetBalance:", error); return false; }
   return true;
 };
 

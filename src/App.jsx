@@ -416,24 +416,24 @@ function S_GL({ outlet }) {
         </div>
       </div>
     </div>
-        <div className="card">
+    <div className="card">
       <div className="chd">
         <div><h3>In Hand Cash Ledger (1001)</h3><p>Auto-linked from Sales, Expenses, Returns</p></div>
         <button className="btn btnd btnsm no-print" onClick={()=>window.print()}>{I.print} Print</button>
       </div>
-      <div className="no-print" style={{ padding:"10px 14px 0", display:"flex", gap:8, alignItems:"flex-end", flexWrap:"wrap" }}>
-        <div className="ff" style={{ marginBottom:0 }}>
+      <div className="no-print" style={{padding:"10px 14px 0",display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <div className="ff" style={{marginBottom:0}}>
           <label>From Date</label>
           <input type="date" value={filterFrom} onChange={e=>setFilterFrom(e.target.value)}/>
         </div>
-        <div className="ff" style={{ marginBottom:0 }}>
+        <div className="ff" style={{marginBottom:0}}>
           <label>To Date</label>
           <input type="date" value={filterTo} onChange={e=>setFilterTo(e.target.value)}/>
         </div>
         {(filterFrom || filterTo) &&
           <button className="btn btnd btnsm" onClick={()=>{setFilterFrom("");setFilterTo("");}}>Clear</button>}
       </div>
-      <div style={{ padding:12 }}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate}/></div>
+          <div style={{padding:12}}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate}/></div>
 
       {/* ── Totals + Day Sheet Balance / Different ── */}
       <div style={{ padding:"0 14px 14px" }}>
