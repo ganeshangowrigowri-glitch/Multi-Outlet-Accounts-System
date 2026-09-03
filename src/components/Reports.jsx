@@ -194,9 +194,13 @@ const [inv, coa, emptyInvMaster] = await Promise.all([
         return mStart ? arr.filter(r => r.date >= mStart && r.date <= mEnd) : arr;
       };
 
-            let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
+      let sales=[], purchases=[], returns=[], transfers=[], expenses=[];
       let cashLedger=[], bankLedger=[], arLedger=[], apInvoices=[], apPayments=[], capitalLedger=[], crateLedgerAll=[];
       let cardLedgerAll=[], positionLedgerAll=[];
+      // FULL, unfiltered cash/bank ledgers (all dates) — needed for a
+      // correct as-of-month-end running balance below. cashLedger/bankLedger
+      // stay in-month only, unchanged, for Cash Flow Statement's per-day use.
+      let cashLedgerAllTime=[], bankLedgerAllTime=[];
       let cashBF=0, bankBF=0, cashPettyCash=0, cashCoins=0, cashPendingBal=0, cashDiffSigned=0;
                 arrayResults.forEach(([sal,pur,ret,trn,exp,csh,bnk,ar,apInv,apPay,cap,crd,pos,crt]) => {
         sales      = [...sales,      ...inMonth(sal)];
@@ -204,8 +208,24 @@ const [inv, coa, emptyInvMaster] = await Promise.all([
         returns    = [...returns,    ...inMonth(ret)];
         transfers  = [...transfers,  ...inMonth(trn)];
         expenses   = [...expenses,   ...inMonth(exp)];
-        cashLedger = [...cashLedger, ...inMonth(csh)];
+                cashLedger = [...cashLedger, ...inMonth(csh)];
         bankLedger = [...bankLedger, ...inMonth(bnk)];
+        // Dedupe duplicate "Daily Sale" cash rows per date (keep only the
+
+        // last one saved) — same rule S_Cash.jsx's In Hand Cash page
+        // already applies. Without this, re-saving Daily Sale for a date
+        // that was already saved adds another row instead of replacing
+        // it, and every duplicate got summed here, wildly inflating
+        // Stock Summary's Cash In Hand figure.
+        const lastDailySaleIdx = {};
+        (csh || []).forEach((e, idx) => {
+          if (e.description === "Daily Sale") lastDailySaleIdx[e.date] = idx;
+        });
+        const cshDeduped = (csh || []).filter((e, idx) =>
+          e.description !== "Daily Sale" || lastDailySaleIdx[e.date] === idx
+        );
+        cashLedgerAllTime = [...cashLedgerAllTime, ...cshDeduped];
+        bankLedgerAllTime = [...bankLedgerAllTime, ...(bnk || [])];
         arLedger   = [...arLedger,   ...(ar    || [])];
         apInvoices = [...apInvoices, ...(apInv || [])];
         apPayments = [...apPayments, ...(apPay || [])];
@@ -465,17 +485,30 @@ const [inv, coa, emptyInvMaster] = await Promise.all([
       const netProfit=totalIncome-totalExp;
 
       
-       // "bf" must also be excluded here — cashBF (from getCashBF) already sums
-       // the Balance B/F row separately. Without this exclusion, any month whose
-      // selected period includes the B/F row's date double-counts it: once via
-      // cashBF, and again here via the debit/credit reduce below.
-      const cashLedgerTxns = cashLedger.filter(r => !["bf","petty_cash","coins","pending","different"].includes(r.balance_type));
-      const cashBal=cashBF+cashLedgerTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-cashLedgerTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
+ 
+       // "daysheet" rows (from S_Cash.jsx's "Day Sheet Balance" field) are
+      // a manually-entered physical cash count for one date — informational
+      // only, same as bf/petty_cash/coins/pending/different — and must be
+      // excluded here exactly like S_Cash.jsx's own dedupedLedger already
+      // does. Missing this was the real cause of the huge Cash In Hand
+      // figure: every daysheet entry was being summed as if it were a real
+      // debit transaction, on top of the actual cash ledger.
+      const CASH_NON_TXN_TYPES = ["bf","petty_cash","coins","pending","different","daysheet"];
+      const cashLedgerTxns = cashLedger.filter(r => !CASH_NON_TXN_TYPES.includes(r.balance_type));
+      // FIX: cashBal must be the running balance as of month-END (every
+      // txn from the start through mEnd), not just txns dated inside the
+      // selected month — otherwise months after the first show a wrong
+      // total (e.g. Rs.30,767,158 instead of the real Rs.566,206).
+      const cashUpToMonthEnd = mEnd ? cashLedgerAllTime.filter(r => r.date <= mEnd) : cashLedgerAllTime;
+      const cashUpToMonthEndTxns = cashUpToMonthEnd.filter(r => !CASH_NON_TXN_TYPES.includes(r.balance_type));
+      const cashBal=cashBF+cashUpToMonthEndTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-cashUpToMonthEndTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
       // marker row (bankBF already covers "bf" separately) so a B/F,
       // monthly B/F, Pending, manual C/D, or Different row dated inside
       // the selected month doesn't get summed twice into bankBal.
       const bankLedgerTxns = bankLedger.filter(r => !["bf","bf_monthly","pending","cd_manual","different"].includes(r.balance_type));
-      const bankBal=bankBF+bankLedgerTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-bankLedgerTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
+      const bankUpToMonthEnd = mEnd ? bankLedgerAllTime.filter(r => r.date <= mEnd) : bankLedgerAllTime;
+      const bankUpToMonthEndTxns = bankUpToMonthEnd.filter(r => !["bf","bf_monthly","pending","cd_manual","different"].includes(r.balance_type));
+      const bankBal=bankBF+bankUpToMonthEndTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-bankUpToMonthEndTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
       const arBal=arLedger.reduce((a,r)=>a+(Number(r.debit)||0)-(Number(r.credit)||0),0);
       const apInvTotal=apInvoices.reduce((a,i)=>a+(Number(i.amount)||0),0);
       const apPaidTotal=apPayments.reduce((a,p)=>a+(Number(p.amount)||0)+(Number(p.discount)||0),0);
@@ -2822,10 +2855,10 @@ function UGBook({ d, outlet, month }) {
 
           {/* Top summary tiles */}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
-          {[
+             {[
             ["Item Stock (at cost)", d.endStockVal],
             ["Empty Bottle Stock", d.emptyStockVal],
-            ["Cash in Hand", d.cashBal],
+            ["In Hand Cash", d.cashBal],
             ...bankAccountRows.map(r => [r.label, r.balance]),
             ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance]),
             ...assetRows.map(r => [r.label, r.balance]),
@@ -2906,10 +2939,10 @@ function UGBook({ d, outlet, month }) {
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
-                            {[
+               {[
                 ["Stock",             d.endStockVal, ""],
                 ["Empty",             d.emptyStockVal, ""],
-                ["Cash In Hand",      d.cashBal, ""],
+                ["In Hand Cash",      d.cashBal, ""],
                 ...bankAccountRows.map(r => [r.label, r.balance, ""]),
                 ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance, ""]),
                 ...assetRows.map(r => [r.label, r.balance, r.notes]),
