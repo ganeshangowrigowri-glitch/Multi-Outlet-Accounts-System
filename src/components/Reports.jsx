@@ -3010,13 +3010,21 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   const [bfDateInput, setBfDateInput]     = useState(today());
   const [bfAmountInput, setBfAmountInput] = useState("");
   const [bfSaving, setBfSaving]           = useState(false);
+  
+  const normBFDate = v => {
+    if (!v) return "";
+    if (v instanceof Date) return v.toISOString().slice(0, 10);
+    return String(v).slice(0, 10);
+  };
+
   useEffect(() => {
     let cancelled = false;
     getSupplierBF(supplierId, outlet).then(entry => {
       if (cancelled) return;
-      setManualBFState(entry);
-      setBfDateInput(entry?.date || today());
-      setBfAmountInput(entry?.amount ?? "");
+      const normEntry = entry ? { ...entry, date: normBFDate(entry.date) } : entry;
+      setManualBFState(normEntry);
+      setBfDateInput(normEntry?.date || today());
+      setBfAmountInput(normEntry?.amount ?? "");
     });
     return () => { cancelled = true; };
   }, [supplierId, outlet]);

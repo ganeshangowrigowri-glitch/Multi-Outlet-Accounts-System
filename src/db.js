@@ -1430,24 +1430,50 @@ export const upsertEmptyLoanEntry = async (outlet, itemKey, period, { bfLoan, ra
 //   columns: supplier_id (text, PK part), outlet (text, PK part, or 'ALL'),
 //            bf_date (date), bf_amount (numeric), updated_at (timestamptz)
 export async function getSupplierBF(supplierId, outlet = "ALL") {
+  // Was .maybeSingle() — if more than one row exists for this
+  // supplier_id+outlet (see setSupplierBF below for why that could
+  // happen), .maybeSingle() throws a "multiple rows returned" error.
+  // That error was only logged to console; the function then returned
+  // null, so the ledger silently showed "-" even though the row was
+  // sitting right there in the table. Ordering by updated_at and taking
+  // the latest row makes this resilient to any duplicates that already
+  // exist, instead of erroring out.
   const { data, error } = await supabase
     .from("supplier_bf")
     .select("bf_date, bf_amount")
     .eq("supplier_id", supplierId)
     .eq("outlet", outlet)
-    .maybeSingle();
+    .order("updated_at", { ascending: false })
+    .limit(1);
   if (error) { console.error("getSupplierBF error:", error); return null; }
-  if (!data) return null;
-  return { date: data.bf_date, amount: Number(data.bf_amount) || 0 };
+  if (!data || !data.length) return null;
+  return { date: data[0].bf_date, amount: Number(data[0].bf_amount) || 0 };
 }
 
 export async function setSupplierBF(supplierId, outlet = "ALL", date, amount) {
+  // Switched from .upsert(..., { onConflict: "supplier_id,outlet" }) to
+  // the same delete-then-insert pattern every other B/F setter in this
+  // file already uses (setCashBF, setBankBF, setCardBF). The upsert
+  // relied on a unique constraint on (supplier_id, outlet) that was
+  // never actually created for this table, so instead of updating the
+  // existing row, every "Set B/F" click just inserted a new one —
+  // producing duplicate rows for the same supplier+outlet, which is
+  // exactly what broke getSupplierBF above.
+  await supabase
+    .from("supplier_bf")
+    .delete()
+    .eq("supplier_id", supplierId)
+    .eq("outlet", outlet);
+
   const { data, error } = await supabase
     .from("supplier_bf")
-    .upsert(
-      { supplier_id: supplierId, outlet, bf_date: date, bf_amount: Number(amount) || 0, updated_at: new Date().toISOString() },
-      { onConflict: "supplier_id,outlet" }
-    )
+    .insert({
+      supplier_id: supplierId,
+      outlet,
+      bf_date: date,
+      bf_amount: Number(amount) || 0,
+      updated_at: new Date().toISOString(),
+    })
     .select()
     .maybeSingle();
   if (error) { console.error("setSupplierBF error:", error); return null; }
