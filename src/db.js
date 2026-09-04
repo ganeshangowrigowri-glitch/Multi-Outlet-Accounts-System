@@ -1425,51 +1425,39 @@ export const upsertEmptyLoanEntry = async (outlet, itemKey, period, { bfLoan, ra
   if (error) console.error("upsertEmptyLoanEntry:", error);
 };
 
-// ─── Manual Supplier B/F ───────────────────────────────────────────────
-// Table: supplier_bf
-//   columns: supplier_id (text, PK part), outlet (text, PK part, or 'ALL'),
-//            bf_date (date), bf_amount (numeric), updated_at (timestamptz)
-export async function getSupplierBF(supplierId, outlet = "ALL") {
-  // Was .maybeSingle() — if more than one row exists for this
-  // supplier_id+outlet (see setSupplierBF below for why that could
-  // happen), .maybeSingle() throws a "multiple rows returned" error.
-  // That error was only logged to console; the function then returned
-  // null, so the ledger silently showed "-" even though the row was
-  // sitting right there in the table. Ordering by updated_at and taking
-  // the latest row makes this resilient to any duplicates that already
-  // exist, instead of erroring out.
-  const { data, error } = await supabase
+export async function getSupplierBF(supplierId, outlet = "ALL", period = null) {
+  // Scoped to the exact month (period) it was entered for — a B/F set for
+  // June must NOT be returned when viewing July or any later month. Rows
+  // with no period (pre-migration legacy) are matched only when no period
+  // is requested, so nothing changes for callers that don't pass one.
+  let q = supabase
     .from("supplier_bf")
-    .select("bf_date, bf_amount")
+    .select("bf_date, bf_amount, period")
     .eq("supplier_id", supplierId)
-    .eq("outlet", outlet)
-    .order("updated_at", { ascending: false })
-    .limit(1);
+    .eq("outlet", outlet);
+  q = period ? q.eq("period", period) : q.is("period", null);
+
+  const { data, error } = await q.order("updated_at", { ascending: false }).limit(1);
   if (error) { console.error("getSupplierBF error:", error); return null; }
   if (!data || !data.length) return null;
-  return { date: data[0].bf_date, amount: Number(data[0].bf_amount) || 0 };
+  return { date: data[0].bf_date, amount: Number(data[0].bf_amount) || 0, period: data[0].period };
 }
 
-export async function setSupplierBF(supplierId, outlet = "ALL", date, amount) {
-  // Switched from .upsert(..., { onConflict: "supplier_id,outlet" }) to
-  // the same delete-then-insert pattern every other B/F setter in this
-  // file already uses (setCashBF, setBankBF, setCardBF). The upsert
-  // relied on a unique constraint on (supplier_id, outlet) that was
-  // never actually created for this table, so instead of updating the
-  // existing row, every "Set B/F" click just inserted a new one —
-  // producing duplicate rows for the same supplier+outlet, which is
-  // exactly what broke getSupplierBF above.
-  await supabase
+export async function setSupplierBF(supplierId, outlet = "ALL", date, amount, period = null) {
+  let del = supabase
     .from("supplier_bf")
     .delete()
     .eq("supplier_id", supplierId)
     .eq("outlet", outlet);
+  del = period ? del.eq("period", period) : del.is("period", null);
+  await del;
 
   const { data, error } = await supabase
     .from("supplier_bf")
     .insert({
       supplier_id: supplierId,
       outlet,
+      period: period || null,
       bf_date: date,
       bf_amount: Number(amount) || 0,
       updated_at: new Date().toISOString(),
@@ -1477,5 +1465,5 @@ export async function setSupplierBF(supplierId, outlet = "ALL", date, amount) {
     .select()
     .maybeSingle();
   if (error) { console.error("setSupplierBF error:", error); return null; }
-  return { date: data.bf_date, amount: Number(data.bf_amount) || 0 };
+  return { date: data.bf_date, amount: Number(data.bf_amount) || 0, period: data.period };
 }

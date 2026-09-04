@@ -3019,7 +3019,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
 
   useEffect(() => {
     let cancelled = false;
-    getSupplierBF(supplierId, outlet).then(entry => {
+    getSupplierBF(supplierId, outlet, month).then(entry => {
       if (cancelled) return;
       const normEntry = entry ? { ...entry, date: normBFDate(entry.date) } : entry;
       setManualBFState(normEntry);
@@ -3027,15 +3027,14 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
       setBfAmountInput(normEntry?.amount ?? "");
     });
     return () => { cancelled = true; };
-  }, [supplierId, outlet]);
+  }, [supplierId, outlet, month]);
 
   async function handleSetBF() {
     setBfSaving(true);
-    const entry = await setSupplierBF(supplierId, outlet, bfDateInput, bfAmountInput);
+    const entry = await setSupplierBF(supplierId, outlet, bfDateInput, bfAmountInput, month);
     setBfSaving(false);
     if (entry) setManualBFState(entry);
   }
-
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
 
@@ -3062,14 +3061,19 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   // viewed, it replaces the computed opening balance. Invoices dated
   // before the manual B/F date are excluded from the rows below so they
   // aren't double-counted (they're already folded into the manual figure).
-  const useManualBF     = !!manualBF && (!mEnd || manualBF.date <= mEnd);
+    // manualBF is now fetched already scoped to this exact `month`, so no
+  // date-range check is needed here — its mere presence means it was set
+  // for this specific period, and it will correctly be absent (falling
+  // back to computedBfBalance) for every other month.
+  const useManualBF     = !!manualBF;
   const bfBalance        = useManualBF ? manualBF.amount : computedBfBalance;
   const bfEffectiveDate  = useManualBF ? manualBF.date : mStart;
-
   // Normalises an invoice-reference string for matching — trims whitespace
   // and ignores case, so a payment saved from Account Payable still matches
   // its invoice even if Supabase round-trips introduced stray spacing.
   const normInvRef = v => (v || "").toString().trim().toUpperCase();
+
+   const matchedPaymentIds = new Set();
 
   const rows = invThisMonth
     .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
@@ -3082,6 +3086,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
       const matchedPayments = payThisMonth.filter(
         p => normInvRef(p.invoiceId || p.notes) === normInvRef(invNo)
       );
+      matchedPayments.forEach(p => matchedPaymentIds.add(p.id));
       const paid      = matchedPayments.reduce((a, p) => a + (Number(p.amount) || 0), 0);
       const discount  = matchedPayments.reduce((a, p) => a + (Number(p.discount) || 0), 0);
       const chq       = matchedPayments.map(p => p.ref).filter(Boolean).join(", ");
@@ -3093,10 +3098,36 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
       const vatDis    = applyDiscount ? (amount * 0.06) - sixPctDis : 0;
       // Outstanding = Amount − 6% Dis − VAT Dis
       const outstanding = amount - sixPctDis - vatDis;
-      return { invNo, date: inv.date, amount, payDate, paid, chq, sixPctDis, vatDis, outstanding, discount };
-    })
-    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-  const totalAmount      = rows.reduce((a, r) => a + r.amount, 0);
+      return { invNo, date: inv.date, amount, payDate, paid, chq, sixPctDis, vatDis, outstanding, discount, isOrphanPayment: false };
+    });
+
+  // Payments made this month that don't match any invoice shown above —
+  // either the invoice belongs to an earlier period already folded into
+  // B/F Balance (this Rockland case), or no invoice exists for it at all.
+  // These still reduce the running balance, same as your paper ledger's
+  // "PAYMENT" column against a B/F-only balance — so show them as their
+  // own row (blank Invoice No / Amount) instead of the money silently
+  // disappearing from the period.
+  const orphanPaymentRows = payThisMonth
+    .filter(p => !matchedPaymentIds.has(p.id))
+    .map(p => ({
+      invNo: p.invoiceId || p.notes || "—",
+      date: p.date, // sort key only — rendered blank, see below
+      amount: 0,
+      payDate: p.date,
+      paid: Number(p.amount) || 0,
+      chq: p.ref || "",
+      sixPctDis: 0,
+      vatDis: 0,
+      outstanding: 0,
+      discount: Number(p.discount) || 0,
+      isOrphanPayment: true,
+    }));
+
+  const allRows = [...rows, ...orphanPaymentRows]
+    .sort((a, b) => (a.date || a.payDate || "").localeCompare(b.date || b.payDate || ""));
+
+ const totalAmount      = rows.reduce((a, r) => a + r.amount, 0);
   const totalPaid        = rows.reduce((a, r) => a + r.paid, 0);
   const totalSixPctDis   = rows.reduce((a, r) => a + r.sixPctDis, 0);
   const totalVatDis      = rows.reduce((a, r) => a + r.vatDis, 0);
@@ -3173,28 +3204,29 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
                 <td style={td(true)} colSpan={9}>B/F Balance</td>
                 <td style={td(true)}>{bfBalance !== 0 ? fmt(bfBalance) : "—"}</td>
               </tr>
-              {rows.length === 0 && (
+                                {allRows.length === 0 && (
                 <tr><td colSpan={10} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No invoices this period</td></tr>
               )}
-              {rows.map((r, i) => {
-                // Balance = Amount Total − Payment Total
+              {allRows.map((r, i) => {
+                // Balance = Amount Total − Payment Total (orphan payment
+                // rows have amount 0, so they only ever reduce the balance)
                 runBal += r.amount - r.paid;
                 return (
                   <tr key={i}>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.invNo}</td>
-                    <td style={td(false)}>{fmt(r.amount)}</td>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.isOrphanPayment ? "—" : r.date}</td>
+                    <td style={{ ...td(false), textAlign: "left" }}>{r.isOrphanPayment ? `${r.invNo} (prior period)` : r.invNo}</td>
+                    <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.amount)}</td>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.payDate || "—"}</td>
                     <td style={td(false)}>{r.paid > 0 ? fmt(r.paid) : "-"}</td>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.chq || "—"}</td>
-                    <td style={td(false)}>{fmt(r.sixPctDis)}</td>
-                    <td style={td(false)}>{fmt(r.vatDis)}</td>
-                    <td style={td(false)}>{fmt(r.outstanding)}</td>
+                    <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.sixPctDis)}</td>
+                    <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.vatDis)}</td>
+                    <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.outstanding)}</td>
                     <td style={td(true)}>{fmt(runBal)}</td>
                   </tr>
                 );
               })}
-              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+                           <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
                 <td style={td(true)} colSpan={2}>TOTAL</td>
                 <td style={td(true)}>{fmt(totalAmount)}</td>
                 <td style={td(true)}></td>

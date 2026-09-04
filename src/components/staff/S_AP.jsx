@@ -3,7 +3,8 @@ import { useState,useEffect, useMemo } from "react";
 import { fmt, today } from "../../utils/helpers";
 import {supabase} from "../../supabase";
 import { I } from "../../utils/icons";
-import { addAPPayment, addCashEntry, addBankEntry, addCardEntry, addGLEntry } from "../../db";
+import { addAPInvoice, addAPPayment, addCashEntry, addBankEntry, addCardEntry, addGLEntry } from "../../db";
+
 
 export default function S_AP({ outlet, user, toast_ }) {
 
@@ -40,13 +41,27 @@ export default function S_AP({ outlet, user, toast_ }) {
     lateCharge:  "",
   });
 
-  const [manualInv, setManualInv] = useState(false); // toggle: dropdown vs typed invoice no
+    const [manualInv, setManualInv] = useState(false); // toggle: dropdown vs typed invoice no
    
   const [aged, setAged] = useState("");
 
 useEffect(() => {
   if (suppliers.length > 0 && !aged) setAged(suppliers[0].id);
 }, [suppliers]);
+
+// The Pay Invoice "Supplier" <select> has no blank/placeholder option, so
+// the browser shows the first supplier as visually selected the instant
+// the list renders — but pf.supId (React state) stays "" until staff
+// actually interact with the dropdown. If a payment is saved without ever
+// touching that field, supplier_id gets written blank, and the payment
+// becomes invisible to the Supplier Credit Ledger (and anything else
+// keyed off supplier_id) even though a supplier appeared selected on
+// screen. Mirrors the "aged" default-selection fix directly above.
+useEffect(() => {
+  if (suppliers.length > 0 && !pf.supId) {
+    setPf(p => ({ ...p, supId: suppliers[0].id }));
+  }
+}, [suppliers]); // eslint-disable-line react-hooks/exhaustive-deps
 
  const [outletBanks, setOutletBanks] = useState([]);
   useEffect(() => {
@@ -96,6 +111,29 @@ async function savePayment() {
   const pa   = parseFloat(pf.payAmt)   || 0;
   const disc = parseFloat(pf.discount) || 0;
   const bankAcc = outletBanks.find(b => b.id === pf.bankId);
+
+  // Manually-typed invoices (manualInv toggle) never existed in ap_invoices,
+  // so the Supplier Credit Ledger (and Suppliers/Aged Analysis, which are
+  // both driven off ap_invoices) had nothing to attach the payment to.
+  // Create the missing invoice row here — guarded against duplicates so
+  // repeat/partial payments to the same manual invoice don't re-insert it.
+  if (manualInv) {
+    const alreadyExists = invoices.some(
+      inv => inv.supplier_id === pf.supId && inv.ref === pf.invNo && inv.date === pf.invDate
+    );
+    if (!alreadyExists) {
+      await addAPInvoice(outlet, {
+        date:       pf.invDate,
+        supplierId: pf.supId,
+        ref:        pf.invNo,
+        amount:     parseFloat(pf.invAmt) || 0,
+        grandTotal: parseFloat(pf.invAmt) || 0,
+      });
+      const { data: invData } = await supabase.from("ap_invoices").select("*")
+        .eq("outlet_id", outlet).order("date", { ascending: false });
+      if (invData) setInvR(invData);
+    }
+  }
 
 await addAPPayment(outlet, {
   date:        pf.date,
