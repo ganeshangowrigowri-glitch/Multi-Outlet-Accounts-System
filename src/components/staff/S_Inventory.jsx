@@ -1,4 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
 import { addSale, deleteSaleForDate, addCashEntry,deleteCashEntryForDate, deleteEmptyCashEntriesForDate, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
@@ -294,8 +296,10 @@ useEffect(() => {
   const mainDateRef = useRef(mainDate);
   mainDateRef.current = mainDate;
   const [mainSupFilter, setMainSupFilter] = useState("ALL");
+  const [mainSearch,    setMainSearch]    = useState("");
   const [empDate,       setEmpDate]       = useState(today());
   const [empSupFilter,  setEmpSupFilter]  = useState("ALL");
+  const [empSearch,     setEmpSearch]     = useState("");
   const [justSaved,     setJustSaved]     = useState(false);
   const [justSavedEmp,  setJustSavedEmp]  = useState(false);
   const [csFrom,        setCsFrom]        = useState(() => today().slice(0, 7) + "-01");
@@ -1032,26 +1036,24 @@ toast_("Empty stock daily sale saved ✓");
   //  Margin            = Selling Price − Unit Cost
   // ─────────────────────────────────────────────────────────
   
-  const inv = useMemo(
-  () => getOutletInventory(outlet, masterInv, outletOverridesMain, csTo),
-  [outlet, masterInv, outletOverridesMain, csTo]
-);
-  const csData = useMemo(() => inv.map(item => {
+   const computeCsData = useCallback((fromDate, toDate) => {
+  const inv = getOutletInventory(outlet, masterInv, outletOverridesMain, toDate);
+  return inv.map(item => {
   const uc = Number(item.unitCost)     || 0;
   const sp = Number(item.sellingPrice) || 0;
   const mg = sp - uc;
 
   // ── All daily sales for this item in the date range, sorted by date ──
   const salesInRange = dbSales
-  .filter(s => s.date >= csFrom && s.date <= csTo && 
+  .filter(s => s.date >= fromDate && s.date <= toDate && 
     (s.items || []).some(r => !r.isEmptyItem))
   .sort((a, b) => a.date.localeCompare(b.date));
   
   // ── Last known end stock (= in-hand stock) ──
 let lastEndStock = null;
 
-// Collect ALL matching rows from csTo date across all sale records
-const csToSales = salesInRange.filter(s => s.date === csTo);
+// Collect ALL matching rows from toDate across all sale records
+const csToSales = salesInRange.filter(s => s.date === toDate);
 const csToRows = [];
 for (const sale of csToSales) {
   const row = (sale.items || []).find(
@@ -1126,7 +1128,7 @@ if (salesInRange.length > 0) {
    // ── Purchases ──
   let totalPurchase = 0;
   dbPurchases
-    .filter(p => p.date >= csFrom && p.date <= csTo)
+    .filter(p => p.date >= fromDate && p.date <= toDate)
     .filter(p => (p.supplier || p.supplier_id) === item.supplier)
     .forEach(p => (p.items || []).forEach(l => {
       if (l.itemCode === item.code && !l.isEmptyItem)
@@ -1136,7 +1138,7 @@ if (salesInRange.length > 0) {
   // ── Transfers In ──
   let transferIn = 0;
   dbTransfers
-    .filter(t => txnDate(t) >= csFrom && txnDate(t) <= csTo && isTransferIn(t, outlet))
+    .filter(t => txnDate(t) >= fromDate && txnDate(t) <= toDate && isTransferIn(t, outlet))
     .forEach(t => txnItems(t).forEach(l => {
       if (l.itemCode === item.code) transferIn += parseFloat(l.qty) || 0;
     }));
@@ -1144,7 +1146,7 @@ if (salesInRange.length > 0) {
   // ── Transfers Out ──
   let transferOut = 0;
   dbTransfers
-    .filter(t => txnDate(t) >= csFrom && txnDate(t) <= csTo && isTransferOut(t, outlet))
+    .filter(t => txnDate(t) >= fromDate && txnDate(t) <= toDate && isTransferOut(t, outlet))
     .forEach(t => txnItems(t).forEach(l => {
       if (l.itemCode === item.code) transferOut += parseFloat(l.qty) || 0;
     }));
@@ -1152,11 +1154,10 @@ if (salesInRange.length > 0) {
   // ── Returns ──
   let totalReturn = 0;
   dbReturns
-    .filter(r => r.date >= csFrom && r.date <= csTo)
+    .filter(r => r.date >= fromDate && r.date <= toDate)
     .forEach(r => (r.items || []).forEach(l => {
       if (l.itemCode === item.code) totalReturn += parseFloat(l.qty) || 0;
     }));
-
   const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
   const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
 
@@ -1176,7 +1177,7 @@ if (salesInRange.length > 0) {
     if (lastRow?.stkSE !== undefined) adjStock = lastRow.stkSE || 0;
   }
 
-  const pk = `${item.id}_${csFrom}_${csTo}`;
+   const pk = `${item.id}_${fromDate}_${toDate}`;
 
   return {
     ...item,
@@ -1206,8 +1207,99 @@ if (salesInRange.length > 0) {
     r.transferIn > 0 || r.transferOut > 0 || r.totalReturn > 0 ||
     r.hasSavedRecord === true
   )
+);
+}, [outlet, masterInv, outletOverridesMain, physStock, dbSales, dbPurchases, dbTransfers, dbReturns]);
+   async function downloadCsExcel() {
+    const data = computeCsData(csFrom, csTo); // mirrors exactly what's on screen right now
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Current Status");
 
-), [inv, outlet, csFrom, csTo, physStock, dbSales, dbPurchases, dbTransfers, dbReturns]);
+    ws.columns = [
+      { key: "code",            width: 14 },
+      { key: "name",            width: 32 },
+      { key: "type",            width: 12 },
+      { key: "opening",         width: 12 },
+      { key: "totalPurchase",   width: 14 },
+      { key: "inHandStock",     width: 13 },
+      { key: "totalBottleSale", width: 16 },
+      { key: "physicalStock",  width: 16 },
+      { key: "totalSaleAmt",   width: 16 },
+      { key: "profit",          width: 14 },
+      { key: "margin",          width: 12 },
+      { key: "transferIn",     width: 11 },
+      { key: "transferOut",    width: 11 },
+      { key: "totalReturn",    width: 10 },
+      { key: "adjStock",       width: 12 },
+    ];
+
+    ws.mergeCells("A1:O1");
+    ws.getCell("A1").value = `Current Status Report  |  ${outlet}  |  ${csFrom} to ${csTo}`;
+    ws.getCell("A1").font = { bold: true, size: 13 };
+    ws.addRow([]);
+
+    const headerRow = ws.addRow([
+      "Item Code","Description","Item Type","Opening Stk","Total Purchase",
+      "In Hand Stk","Total Bottle Sale","Phy Stock (Rs.)","Total Sale (Rs.)",
+      "Profit (Rs.)","Margin (Rs.)","Trans.In","Trans.Out","Return","Adj to Stock",
+    ]);
+    headerRow.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2B2B4A" } };
+      cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      cell.border = { top:{style:"thin"}, left:{style:"thin"}, bottom:{style:"thin"}, right:{style:"thin"} };
+    });
+
+    data.forEach(row => {
+      const phys = row.physicalStockOverride !== "" ? Number(row.physicalStockOverride) : row.physicalStock;
+      const r = ws.addRow([
+        row.code, row.name, row.type,
+        Number(row.opening) || 0, Number(row.totalPurchase) || 0, Number(row.inHandStock) || 0,
+        Number(row.totalBottleSale) || 0, phys, row.totalSaleAmt, row.profit, row.margin,
+        Number(row.transferIn) || 0, Number(row.transferOut) || 0, Number(row.totalReturn) || 0,
+        Number(row.adjStock) || 0,
+      ]);
+      r.eachCell((cell, col) => {
+        cell.border = {
+          top:{style:"thin",color:{argb:"FFCCCCCC"}}, left:{style:"thin",color:{argb:"FFCCCCCC"}},
+          bottom:{style:"thin",color:{argb:"FFCCCCCC"}}, right:{style:"thin",color:{argb:"FFCCCCCC"}},
+        };
+        if (col === 2) cell.alignment = { horizontal: "left", wrapText: true };
+        else if (col === 1 || col === 3) cell.alignment = { horizontal: "center" };
+        else {
+          cell.alignment = { horizontal: "right" };
+          cell.numFmt = (col === 8 || col === 9 || col === 10 || col === 11) ? "#,##0.00" : "#,##0";
+        }
+      });
+    });
+
+    const sum = f => data.reduce((a, r) => a + (f(r) || 0), 0);
+    const totalsRow = ws.addRow([
+      "", "TOTALS", "",
+      sum(r => r.opening), sum(r => r.totalPurchase), sum(r => r.inHandStock),
+      sum(r => r.totalBottleSale),
+      sum(r => Number(r.physicalStockOverride !== "" ? r.physicalStockOverride : r.physicalStock)),
+      sum(r => r.totalSaleAmt), sum(r => r.profit), "",
+      sum(r => r.transferIn), sum(r => r.transferOut), sum(r => r.totalReturn), "",
+    ]);
+    totalsRow.eachCell(cell => {
+      cell.font = { bold: true };
+      cell.border = { top: { style: "double" } };
+    });
+    totalsRow.getCell(2).alignment = { horizontal: "left" };
+    for (let c = 4; c <= 15; c++) {
+      if (c !== 11 && c !== 15) totalsRow.getCell(c).alignment = { horizontal: "right" };
+    }
+
+    ws.views = [{ state: "frozen", ySplit: 3 }];
+
+    const buf = await wb.xlsx.writeBuffer();
+    saveAs(new Blob([buf]), `Current_Status_${csFrom}_to_${csTo}.xlsx`);
+  }
+
+  const csData = useMemo(
+    () => computeCsData(csFrom, csTo),
+    [computeCsData, csFrom, csTo]
+  );
   // ─────────────────────────────────────────────────────────
   //  FILTERED VIEWS
   // ─────────────────────────────────────────────────────────
@@ -1215,26 +1307,46 @@ if (salesInRange.length > 0) {
   const iS       = { padding:"4px 8px", background:"var(--s2)", border:"1px solid var(--bdr)", borderRadius:6, fontSize:12, color:"var(--txt)", outline:"none" };
   const lbl      = { fontSize:9, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--mut)", display:"block", marginBottom:2 };
   const tblWrap  = { flex:1, minHeight:0, overflowX:"auto", overflowY:"auto", maxHeight:"calc(100vh - 180px)" };
-  const filteredMain = useMemo(() => {
-    if (mainSupFilter === "ALL") return mainRows;
-    return mainRows.filter(r => {
-      const sup = (r.supplier || "").replace(/^\d{4}-/, "").trim();
-      return sup === mainSupFilter.trim();
-    });
-  }, [mainRows, mainSupFilter]);
+    const filteredMain = useMemo(() => {
+    let rows = mainRows;
+    if (mainSupFilter !== "ALL") {
+      rows = rows.filter(r => {
+        const sup = (r.supplier || "").replace(/^\d{4}-/, "").trim();
+        return sup === mainSupFilter.trim();
+      });
+    }
+    const q = mainSearch.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter(r =>
+        (r.name || "").toLowerCase().includes(q) ||
+        (r.code || "").toLowerCase().includes(q)
+      );
+    }
+    return rows;
+  }, [mainRows, mainSupFilter, mainSearch]);
 
   const filteredEmp = useMemo(() => {
-    if (empSupFilter === "ALL") return empRows;
-    return empRows.filter(r => {
-      const key = (r.supplier || "").trim() || "EMP";
-      return key === empSupFilter.trim();
-    });
-  }, [empRows, empSupFilter]);
+    let rows = empRows;
+    if (empSupFilter !== "ALL") {
+      rows = rows.filter(r => {
+        const key = (r.supplier || "").trim() || "EMP";
+        return key === empSupFilter.trim();
+      });
+    }
+    const q = empSearch.trim().toLowerCase();
+    if (q) {
+      rows = rows.filter(r =>
+        (r.name || "").toLowerCase().includes(q) ||
+        (r.code || "").toLowerCase().includes(q)
+      );
+    }
+    return rows;
+  }, [empRows, empSupFilter, empSearch]);
 
   // ─────────────────────────────────────────────────────────
   //  CONTROL BAR (shared by main and empty tabs)
   // ─────────────────────────────────────────────────────────
-  function CtrlBar({ date, setDate, supFilter, setSupFilter, suppliers, onSave, saveLabel, count, supLabel }) {
+    function CtrlBar({ date, setDate, supFilter, setSupFilter, suppliers, onSave, saveLabel, count, supLabel, search, setSearch }) {
     return (
       <div style={{ display:"flex", alignItems:"flex-end", gap:8, flexWrap:"wrap", padding:"6px 0" }}>
         <div>
@@ -1246,6 +1358,16 @@ if (salesInRange.length > 0) {
           <select value={supFilter} onChange={e => setSupFilter(e.target.value)} style={{ ...iS, minWidth:130 }}>
             {suppliers.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
+        </div>
+        <div className="no-print">
+          <label style={lbl}>Search</label>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Name, code or description…"
+            style={{ ...iS, width:180 }}
+          />
         </div>
         <button className="btn btng" style={{ marginBottom:0 }} onClick={onSave}>
           {I.check} {saveLabel}
@@ -1290,7 +1412,7 @@ if (salesInRange.length > 0) {
           {/* ── MAIN STOCK TAB ── */}
           {dailyTab === "main" && (
           <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
-             <CtrlBar
+                          <CtrlBar
              date={mainDate} setDate={d => {
              setMainDate(d);
              getSales(outlet).then(data => {
@@ -1302,6 +1424,7 @@ if (salesInRange.length > 0) {
                 suppliers={mainSuppliers}
                 onSave={saveMainSale} saveLabel="Save Daily Sale"
                 count={filteredMain.length} supLabel="Supplier"
+                search={mainSearch} setSearch={setMainSearch}
               />
               <ScrollArrows scrollBy={mainScrollBy} />
               <div data-inv-tbl ref={mainTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
@@ -1396,7 +1519,7 @@ if (salesInRange.length > 0) {
           {/* ── EMPTY STOCK TAB ── */}
            {dailyTab === "empty" && (
            <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
-              <CtrlBar
+                            <CtrlBar
               date={empDate} setDate={d => {
               setEmpDate(d);
               getSales(outlet).then(data => {
@@ -1408,6 +1531,7 @@ if (salesInRange.length > 0) {
                 suppliers={empSuppliers}
                 onSave={saveEmpSale} saveLabel="Save Empty Sale"
                 count={filteredEmp.length} supLabel="Supplier / Type"
+                search={empSearch} setSearch={setEmpSearch}
               />
               <ScrollArrows scrollBy={empScrollBy} />
                <div data-inv-tbl ref={empTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
@@ -1656,12 +1780,20 @@ if (salesInRange.length > 0) {
         <label style={lbl}>To Date</label>
         <input type="date" value={csTo} onChange={e => setCsTo(e.target.value)} style={iS} />
       </div>
-      <button
+            <button
         className="btn btnd btnsm no-print"
         style={{ marginBottom:0 }}
         onClick={() => window.print()}
       >
         {I.print} Print
+      </button>
+          <button
+        className="btn btng btnsm no-print"
+        style={{ marginBottom:0 }}
+        onClick={downloadCsExcel}
+        title={`Download Current Status for ${csFrom} to ${csTo}`}
+      >
+        Download Excel
       </button>
       <span style={{ marginLeft:"auto", fontSize:11, color:"var(--mut)", alignSelf:"center" }}>
         {csData.length} items with activity
