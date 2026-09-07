@@ -3,8 +3,10 @@ import { I } from "../utils/icons";
 import { supabase } from "../supabase";
 import { OUTLETS, SUPPLIERS_LIST } from "../data/seeds";
 import { getOutletInventory } from "./staff/S_Inventory";
+import { loadOutletOverridesFromDB } from "./admin/InventoryAdmin";
 import {
   getOutlets,
+  getSuppliers,
   getSales,
   getPurchases,
   getReturns,
@@ -39,6 +41,18 @@ import {
 } from "../db";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+// Mirrors S_Inventory.jsx's default supOrder — used ONLY to sort items for
+// display so Income Statement's item order matches Current Status exactly.
+// Overridden live below by getSuppliers() when the DB has a saved order,
+// same as S_Inventory does.
+const DEFAULT_SUP_ORDER = [
+  "2001-DCSL","2003-UG","2005-ROCKLAND","2004-IDL","2006-DCSL BEER",
+  "2002-LION BREWERY","2007-TODDY","2008-ROYAL CASK","2009-LUXURY BRAND",
+  "2010-B LANKA","2011-USW","2012-PREMERA","2013-JSP","2014-SIGNATURE",
+  "2015-VA","2016-VICTORY","2017-FAVOURITE","2018-FREE LANKA",
+  "2019-BAG","2020-SODA","2021-GOLD LEAF","2022-BITE","2023-KASTHURI W/S",
+];
+
 const fmt  = n => Number(n || 0).toLocaleString("en-LK", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmtN = n => Number(n || 0).toLocaleString("en-LK", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 const today    = () => new Date().toISOString().split("T")[0];
@@ -185,10 +199,29 @@ for (const o of outlets) {
   scalarResults.push(result);
 }
 
-const [inv, coa, emptyInvMaster] = await Promise.all([
+ const [inv, coa, emptyInvMaster] = await Promise.all([
   getInventoryMaster(), getCOA(), getEmptyInventoryMaster(),
 ]);
 
+// ── Display-order sort — mirrors S_Inventory.jsx's Current Status sort
+// EXACTLY (supplier order, then numeric part of code). `inv` itself is
+// left untouched for lookups (invMap etc.); this sorted COPY is used
+// only to drive item display order below, so Income Statement's item
+// sequence matches Current Status: grouped by supplier, in the same
+// per-supplier order, with no other sort key mixed in.
+const supOrderRaw = await getSuppliers().catch(() => null);
+const supOrderList = (supOrderRaw && supOrderRaw.length)
+  ? supOrderRaw.map(s => s.id)
+  : DEFAULT_SUP_ORDER;
+const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
+  const oi = supOrderList.indexOf(a.supplier);
+  const oj = supOrderList.indexOf(b.supplier);
+  const supCmp = (oi === -1 ? 999 : oi) - (oj === -1 ? 999 : oj);
+  if (supCmp !== 0) return supCmp;
+  const numA = parseInt((a.code || "").replace(/\D/g, "")) || 0;
+  const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
+  return numA - numB;
+});
       const inMonth = arr => {
         if (!Array.isArray(arr)) return [];
         return mStart ? arr.filter(r => r.date >= mStart && r.date <= mEnd) : arr;
@@ -272,19 +305,41 @@ const [inv, coa, emptyInvMaster] = await Promise.all([
            const invMap = {};
       (inv||[]).forEach(i => { invMap[i.code]=i; if(i.id) invMap[i.id]=i; });
 
-      // ── Sales Revenue ──
-      // Mirrors Current Status "Total Sale (Rs.)" exactly (per outlet):
-      // totalBottleSale = opening + purchase − inHandStock (end stock),
-      // totalSaleAmt = totalBottleSale × current selling price.
-      let totalSalesAmt = 0;
+            const overridesByOutlet = {};
+      for (const o of outlets) {
+        overridesByOutlet[o] = await loadOutletOverridesFromDB(o, false);
+      }
+
+            // ── Opening / Purchase / End Stock (Income Statement only) ──
+      // Per requirement: these three values, and Cost of Sales derived from
+      // them, must come from the SAME Current Status figures shown in
+      // Stock/Inventory → Current Status (opening qty, total purchase qty,
+      // in-hand stock qty), valued at each item's outlet unit cost — NOT
+      // from Daily Sale's first/last saved date. Kept in separate ISxxx
+      // variables so the shared openingStockVal/totalPurchase/endStockVal
+      // used by Balance Sheet, Purchase Summary, UG Book, Stock Summary,
+      // and Cost of Sales Summary are completely untouched.
+           let openingStockValIS = 0;
+      let totalPurchaseIS   = 0;
+      let endStockValIS     = 0;
+      const openingStockByCodeIS = {};
+      const endStockByCodeIS     = {};
+      // Insertion-order arrays — kept separate from the objects above
+      const openingStockOrderIS = [];
+      const endStockOrderIS     = [];
+            let totalSalesAmt = 0;
       outlets.forEach((o, oi) => {
         const [oSal, oPur] = arrayResults[oi];
         const oSales     = inMonth(oSal);
         const oPurchases = inMonth(oPur);
-        const oInv       = getOutletInventory(o, inv);
-
+        // Use the Current-Status-ordered copy so oInv.forEach below (which
+        // drives openingStockOrderIS / endStockOrderIS push order) iterates
+        // items in the exact same supplier-grouped sequence Current Status
+        // shows — getOutletInventory's filter/map preserves input order.
+        const oInv       = getOutletInventory(o, invOrderedForDisplay, overridesByOutlet[o], mEnd);
         oInv.forEach(item => {
           const sp = Number(item.sellingPrice) || 0;
+          const uc = Number(item.unitCost) || 0;
 
           const salesInRange = oSales
             .filter(s => (s.items || []).some(r => !r.isEmptyItem))
@@ -338,14 +393,33 @@ const [inv, coa, emptyInvMaster] = await Promise.all([
             .forEach(p => (p.items || []).forEach(l => {
               if (l.itemCode === item.code && !l.isEmptyItem) totalPurchase += parseFloat(l.qty) || 0;
             }));
-
-          const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+                      const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
           const inHandStock = lastEndStock !== null ? lastEndStock : opening;
           const totalBottleSale = opening + totalPurchase - inHandStock;
 
           totalSalesAmt += totalBottleSale * sp;
+
+          // Income Statement — Current Status-based Opening/Purchase/End Stock
+          openingStockValIS += opening * uc;
+          totalPurchaseIS   += totalPurchase * uc;
+          endStockValIS     += inHandStock * uc;
+                   if (opening > 0) {
+            if (!openingStockByCodeIS[item.code]) {
+              openingStockByCodeIS[item.code] = { name: item.name || item.code, qty: 0, unitCost: uc };
+              openingStockOrderIS.push(item.code); // Current Status (oInv) order, recorded once
+            }
+            openingStockByCodeIS[item.code].qty += opening;
+          }
+          if (inHandStock > 0) {
+            if (!endStockByCodeIS[item.code]) {
+              endStockByCodeIS[item.code] = { name: item.name || item.code, qty: 0, unitCost: uc };
+              endStockOrderIS.push(item.code); // Current Status (oInv) order, recorded once
+            }
+            endStockByCodeIS[item.code].qty += inHandStock;
+          }
         });
       });
+
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
       const netSalesAmt  = totalSalesAmt - totalReturns;
 
@@ -782,7 +856,7 @@ Object.keys(cosByItem).forEach(code => {
       });
       const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-     setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
+     setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS, endStockByCodeIS,endStockOrderIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -803,15 +877,31 @@ Object.keys(cosByItem).forEach(code => {
     function IncomeStatement({ d, outlet, month }) {
   const {
     totalSalesAmt, totalReturns, netSalesAmt,
-    openingStockVal, openingStockByCode,
-    totalPurchase, purBySup,
+    purBySup,
     transInAmt, transOutAmt,
-    endStockVal, endStockByCode,
-    costOfSales, grossProfit,
     discBySup, emptyDiscBySup,
-    totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome,
-    expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp, netProfit,
+    totalDiscPayment, totalDiscEmpty, totalOtherInc,
+    expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp,
+    // Opening Stock / Purchases / End Stock now come from Current Status
+    // (opening qty, total purchase qty, in-hand stock qty × each item's
+    // outlet unit cost) instead of Daily Sale's first/last saved date.
+    // Kept local to this component so Balance Sheet, Purchase Summary,
+    // UG Book, Stock Summary, and Cost of Sales Summary are unaffected.
+    openingStockValIS: openingStockVal,
+    openingStockByCodeIS: openingStockByCode,
+    openingStockOrderIS: openingStockOrder,
+    totalPurchaseIS: totalPurchase,
+    endStockValIS: endStockVal,
+    endStockByCodeIS: endStockByCode,
+    endStockOrderIS: endStockOrder,
   } = d;
+
+  // Cost of Sales = Opening Stock + Purchases − End Stock (Current
+  // Status-based figures only — no transfer in/out term, per spec).
+  const costOfSales = openingStockVal + totalPurchase - endStockVal;
+  const grossProfit  = netSalesAmt - costOfSales;
+  const totalIncome  = grossProfit + totalOtherInc;
+  const netProfit     = totalIncome - totalExp;
 
   // Show More / Show Less — Cost of Sales item-level detail rows only.
   // Default OFF (Show Less) so both screen and print default to the
@@ -835,11 +925,15 @@ Object.keys(cosByItem).forEach(code => {
           </button>
         </td>
       </tr>
-      <TR label="Opening Stock" col2={openingStockVal} indent={1} />
-      {showCosDetails && Object.entries(openingStockByCode).filter(([, v]) => v.qty > 0).map(([code, v]) => (
-        <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
-      ))}
-
+     <TR label="Opening Stock" col2={openingStockVal} indent={1} />
+      {showCosDetails && (openingStockOrder || Object.keys(openingStockByCode))
+        .filter(code => openingStockByCode[code]?.qty > 0)
+        .map(code => {
+          const v = openingStockByCode[code];
+          return (
+            <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
+          );
+        })}
       <TR label="(+) Purchases" col2={totalPurchase} indent={1} />
       {showCosDetails && Object.entries(purBySup).map(([supId, sup]) => (
         <TR key={`pur-${supId}`} label={supId.replace(/^\d{4}-/, "")} col2={sup.total} indent={2} />
@@ -848,10 +942,15 @@ Object.keys(cosByItem).forEach(code => {
       {transInAmt > 0  && <TR label="(+) Transfer In"  col2={transInAmt}  indent={1} />}
       {transOutAmt > 0 && <TR label="(-) Transfer Out" col2={transOutAmt} neg indent={1} />}
 
-      <TR label="(-) End Stock" col2={endStockVal} neg indent={1} />
-      {showCosDetails && Object.entries(endStockByCode).filter(([, v]) => v.qty > 0).map(([code, v]) => (
-        <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
-      ))}
+     <TR label="(-) End Stock" col2={endStockVal} neg indent={1} />
+      {showCosDetails && (endStockOrder || Object.keys(endStockByCode))
+        .filter(code => endStockByCode[code]?.qty > 0)
+        .map(code => {
+          const v = endStockByCode[code];
+          return (
+            <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
+          );
+        })}
 
       <TR label="Cost of Sales" val={costOfSales} neg total />
       <TR label="Gross Profit / (Loss)" val={grossProfit} bold total />
