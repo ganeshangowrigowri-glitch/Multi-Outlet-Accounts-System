@@ -291,6 +291,62 @@ export const updateOutletInventoryQty = async (outlet, itemId, qty) => {
              { onConflict: "outlet_id,item_id" });
   if (error) console.error("updateOutletInventoryQty:", error);
 };
+// ─── OUTLET PRICE OVERRIDES (Tab 3 / Tab 4 — hide flag + date-effective pricing) ──
+// item_key = "code__supplier", identical to the composite key already used
+// throughout InventoryAdmin.jsx / S_Inventory.jsx, so nothing downstream changes.
+export const getOutletItemFlags = async (outlet, isEmpty = false) => {
+  const { data, error } = await supabase
+    .from("outlet_item_flags").select("item_key,hidden")
+    .eq("outlet_id", outlet).eq("is_empty", isEmpty);
+  if (error) { console.error("getOutletItemFlags:", error); return {}; }
+  const map = {};
+  (data || []).forEach(r => { map[r.item_key] = { hidden: r.hidden }; });
+  return map;
+};
+
+export const setOutletItemHidden = async (outlet, itemKey, isEmpty, hidden) => {
+  const { error } = await supabase.from("outlet_item_flags").upsert({
+    outlet_id: outlet, item_key: itemKey, is_empty: isEmpty,
+    hidden, updated_at: new Date().toISOString(),
+  }, { onConflict: "outlet_id,item_key,is_empty" });
+  if (error) console.error("setOutletItemHidden:", error);
+};
+
+export const getOutletPriceHistory = async (outlet, isEmpty = false) => {
+  const { data, error } = await supabase
+    .from("outlet_price_history").select("item_key,effective_date,unit_cost,selling_price")
+    .eq("outlet_id", outlet).eq("is_empty", isEmpty)
+    .order("effective_date", { ascending: true });
+  if (error) { console.error("getOutletPriceHistory:", error); return {}; }
+  const map = {};
+  (data || []).forEach(r => {
+    if (!map[r.item_key]) map[r.item_key] = [];
+    map[r.item_key].push({
+      date: r.effective_date,
+      unitCost: Number(r.unit_cost),
+      sellingPrice: Number(r.selling_price),
+    });
+  });
+  return map;
+};
+
+export const upsertOutletPrice = async (outlet, itemKey, isEmpty, effectiveDate, unitCost, sellingPrice) => {
+  const { error } = await supabase.from("outlet_price_history").upsert({
+    outlet_id: outlet, item_key: itemKey, is_empty: isEmpty,
+    effective_date: effectiveDate, unit_cost: unitCost, selling_price: sellingPrice,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "outlet_id,item_key,is_empty,effective_date" });
+  if (error) console.error("upsertOutletPrice:", error);
+};
+
+export const deleteOutletPriceOverride = async (outlet, itemKey, isEmpty) => {
+  const { error: e1 } = await supabase.from("outlet_price_history").delete()
+    .eq("outlet_id", outlet).eq("item_key", itemKey).eq("is_empty", isEmpty);
+  if (e1) console.error("deleteOutletPriceOverride (history):", e1);
+  const { error: e2 } = await supabase.from("outlet_item_flags").delete()
+    .eq("outlet_id", outlet).eq("item_key", itemKey).eq("is_empty", isEmpty);
+  if (e2) console.error("deleteOutletPriceOverride (flags):", e2);
+};
  
 // ─── SALES ──────────────────────────────────────────────────
 export const getSales = async (outlet) => {

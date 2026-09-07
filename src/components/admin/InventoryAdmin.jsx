@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect,  useRef} from "react";
 import { ls, lss } from "../../utils/helpers";
-import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns,saveEmptyInventoryMaster} from "../../db";
+import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride } from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SEED_EMPTY, SUPPLIERS_LIST, SUP_COLOR, ITEM_TYPES, OUTLETS, OUTLET_INV_SEEDS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -14,6 +14,46 @@ export const outletInvKey = (outlet) => `outlet_inv_${outlet}`;
 
 // Key for per-outlet EMPTY inventory overrides
 export const outletEmptyInvKey = (outlet) => `outlet_empty_inv_${outlet}`;
+
+// Resolves the correct price for a given outlet override + date.
+// ov.priceHistory = [{date:'YYYY-MM-DD', unitCost, sellingPrice}, ...]
+// Picks the latest entry whose date <= dateStr; falls back to ov's flat
+// unitCost/sellingPrice, then to the main item's price. Used by Tab 3,
+// Tab 4, and the staff-side screen (import this fn there).
+export function resolveOutletPrice(ov, dateStr, fallbackCost, fallbackPrice) {
+  if (!ov) return { unitCost: fallbackCost, sellingPrice: fallbackPrice };
+  const hist = (ov.priceHistory || []).filter(h => h.date <= dateStr);
+  if (hist.length) {
+    const latest = hist.reduce((a, b) => (a.date > b.date ? a : b));
+    return { unitCost: latest.unitCost, sellingPrice: latest.sellingPrice };
+  }
+  return {
+    unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : fallbackCost,
+    sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : fallbackPrice,
+  };
+}
+// Combines Supabase flags + price history into the SAME shape the rest of
+// this file (and S_Inventory.jsx) already expects:
+// { [itemKey]: { unitCost, sellingPrice, hidden, priceHistory } }
+export async function loadOutletOverridesFromDB(outlet, isEmpty = false) {
+  const [flags, history] = await Promise.all([
+    getOutletItemFlags(outlet, isEmpty),
+    getOutletPriceHistory(outlet, isEmpty),
+  ]);
+  const keys = new Set([...Object.keys(flags), ...Object.keys(history)]);
+  const overrides = {};
+  keys.forEach(key => {
+    const hist = (history[key] || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+    const latest = hist[hist.length - 1];
+    overrides[key] = {
+      unitCost:     latest ? latest.unitCost     : undefined,
+      sellingPrice: latest ? latest.sellingPrice : undefined,
+      hidden:       flags[key]?.hidden || false,
+      priceHistory: hist,
+    };
+  });
+  return overrides;
+}
 
 // Initialise outlet overrides from seeds (only if not already set)
 export function initOutletSeeds() {
@@ -97,23 +137,19 @@ function OutletInventoryPanel({ inv, toast_, allSupColors, adminOutlets }) {
   const [openingDate, setOpeningDate] = useState(today()); 
   const [showOnly,  setShowOnly]  = useState("all");
 
-// AFTER — no inv reference needed
-const [overrides, setOverridesState] = useState(() => {
-  initOutletSeeds();
-  return ls(outletInvKey(outletList[0]), {});
-});
-// 2. useEffect — no pruning, just read directly
+const [overrides, setOverridesState] = useState({});
 useEffect(() => {
   if (!outletList.includes(selOutlet)) setSelOutlet(outletList[0] || "");
 }, [outletList, selOutlet]);
 useEffect(() => {
-  setOverridesState(ls(outletInvKey(selOutlet), {}));
+  let cancelled = false;
+  loadOutletOverridesFromDB(selOutlet, false).then(ov => { if (!cancelled) setOverridesState(ov); });
+  return () => { cancelled = true; };
 }, [selOutlet]);
 
-// 3. loadOutlet — no pruning, just read directly
 function loadOutlet(o) {
   setSelOutlet(o);
-  setOverridesState(ls(outletInvKey(o), {}));
+  loadOutletOverridesFromDB(o, false).then(setOverridesState);
   setSupF("ALL"); setSearch(""); setShowOnly("all");
 }
 
@@ -134,41 +170,50 @@ async function openEdit(item) {
   const existing = await getOpeningStock(selOutlet, openingDate);
   const savedQty = existing?.main?.[ovKey] || "";
   
-  setEf({
+    setEf({
     sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
     unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
     hidden:       ov.hidden || false,
     qty:          savedQty,
+    priceDate:    today(),
   });
   setOpeningDate(openingDate);     
   setEditItem(item);
 }
 
-   async function saveOverrides(newOv) {
-  try {
-    setOverridesState(newOv);
-    lss(outletInvKey(selOutlet), newOv);
-  } catch (err) {
-    console.error("saveOverrides error:", err);
-    toast_("Save failed — check console", "err");
+   async function resetOverride(itemKey) {
+    try {
+      await deleteOutletPriceOverride(selOutlet, itemKey, false);
+      setOverridesState(prev => {
+        const n = { ...prev };
+        delete n[itemKey];
+        return n;
+      });
+      toast_("Reset to main inventory price ✓");
+    } catch (err) {
+      console.error("resetOverride error:", err);
+      toast_("Reset failed — check console", "err");
+    }
   }
-}
-
-async function saveEdit() {
+  async function saveEdit() {
   try {
-    const ovEntry = {
-      unitCost:     Number(ef.unitCost)     || 0,
-      sellingPrice: Number(ef.sellingPrice) || 0,
-      hidden:       ef.hidden,
-      // NOTE: qty is intentionally NOT stored here anymore —
-      // it must only apply to the chosen date, not every date.
-    };
-    const newOv = {
+    const ovKey  = `${editItem.code}__${editItem.supplier}`;
+    const prevOv = overrides[ovKey] || {};
+    const pDate  = ef.priceDate || today();
+    const unitCost     = Number(ef.unitCost)     || 0;
+    const sellingPrice = Number(ef.sellingPrice) || 0;
+
+    await upsertOutletPrice(selOutlet, ovKey, false, pDate, unitCost, sellingPrice);
+    await setOutletItemHidden(selOutlet, ovKey, false, ef.hidden);
+
+    const priceHistory = [
+      ...(prevOv.priceHistory || []).filter(h => h.date !== pDate),
+      { date: pDate, unitCost, sellingPrice },
+    ].sort((a, b) => a.date.localeCompare(b.date));
+    setOverridesState({
       ...overrides,
-      [`${editItem.code}__${editItem.supplier}`]: ovEntry,
-    };
-    setOverridesState(newOv);
-    lss(outletInvKey(selOutlet), newOv);
+      [ovKey]: { unitCost, sellingPrice, hidden: ef.hidden, priceHistory },
+    });
 
     if (ef.qty !== "" && ef.qty != null) {
       await saveOpeningQtyForDate(editItem, ef.qty, openingDate, selOutlet);
@@ -382,10 +427,18 @@ async function saveEdit() {
               <input type="number" value={ef.unitCost}
                 onChange={e=>setEf({...ef,unitCost:e.target.value})} placeholder="0.00"/>
             </div>
-            <div className="ff">
+              <div className="ff">
               <label>Outlet Selling Price (Rs.)</label>
               <input type="number" value={ef.sellingPrice}
                 onChange={e=>setEf({...ef,sellingPrice:e.target.value})} placeholder="0.00"/>
+            </div>
+          </div>
+          <div className="ff" style={{marginBottom:10}}>
+            <label>Price Change Date</label>
+            <input type="date" value={ef.priceDate || today()}
+              onChange={e=>setEf({...ef,priceDate:e.target.value})}/>
+            <div style={{fontSize:11,color:"var(--mut)",marginTop:3}}>
+              New cost/price apply from this date onward, until the next change.
             </div>
           </div>
                      {ef.unitCost && ef.sellingPrice && Number(ef.unitCost)>0 && (
@@ -485,18 +538,17 @@ useEffect(() => {
   const [openingDate, setOpeningDate] = useState(today()); 
   const [showOnly,  setShowOnly]  = useState("all");
 
-  // AFTER
-const [overrides, setOverridesState] = useState(() => {
-  return ls(outletEmptyInvKey(OUTLETS[0]), {});
-});
+  const [overrides, setOverridesState] = useState({});
 
 useEffect(() => {
-  setOverridesState(ls(outletEmptyInvKey(selOutlet), {}));
+  let cancelled = false;
+  loadOutletOverridesFromDB(selOutlet, true).then(ov => { if (!cancelled) setOverridesState(ov); });
+  return () => { cancelled = true; };
 }, [selOutlet]);
 
 function loadOutlet(o) {
   setSelOutlet(o);
-  setOverridesState(ls(outletEmptyInvKey(o), {}));
+  loadOutletOverridesFromDB(o, true).then(setOverridesState);
   setSupF("ALL"); setSearch(""); setShowOnly("all");
 }
   async function saveOpeningQtyForDate(item, qty, dateStr, outlet) {
@@ -508,11 +560,7 @@ function loadOutlet(o) {
   };
   await saveOpeningStock(outlet, dateStr, existing?.main || null, empMap);
 }
-  function saveOverrides(newOv) {
-    setOverridesState(newOv);
-    lss(outletEmptyInvKey(selOutlet), newOv);
-  }
-
+  
   
 async function openEdit(item) {
   const ov = overrides[`${item.code}__${item.supplier}`] || {};
@@ -522,31 +570,37 @@ async function openEdit(item) {
                    existing?.emp?.[item.code] || 
                    existing?.emp?.[item.id] || "";
   
-  setEf({
+     setEf({
     sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
     unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
     hidden:       ov.hidden || false,
     qty:          savedQty,
+    priceDate:    today(),
   });
   setOpeningDate(openingDate);  // Keep current selected date
   setEditItem(item);
 }
 
 
- // AFTER
 async function saveEdit() {
   try {
-    const ovEntry = {
-      unitCost:     Number(ef.unitCost)     || 0,
-      sellingPrice: Number(ef.sellingPrice) || 0,
-      hidden:       ef.hidden,
-      // qty NOT stored permanently — only saved to specific date below
-    };
-    const newOv = {
+    const ovKey  = `${editItem.code}__${editItem.supplier}`;
+    const prevOv = overrides[ovKey] || {};
+    const pDate  = ef.priceDate || today();
+    const unitCost     = Number(ef.unitCost)     || 0;
+    const sellingPrice = Number(ef.sellingPrice) || 0;
+
+    await upsertOutletPrice(selOutlet, ovKey, true, pDate, unitCost, sellingPrice);
+    await setOutletItemHidden(selOutlet, ovKey, true, ef.hidden);
+
+    const priceHistory = [
+      ...(prevOv.priceHistory || []).filter(h => h.date !== pDate),
+      { date: pDate, unitCost, sellingPrice },
+    ].sort((a, b) => a.date.localeCompare(b.date));
+    setOverridesState({
       ...overrides,
-      [`${editItem.code}__${editItem.supplier}`]: ovEntry,
-    };
-    saveOverrides(newOv);
+      [ovKey]: { unitCost, sellingPrice, hidden: ef.hidden, priceHistory },
+    });
 
     if (ef.qty !== "" && ef.qty != null) {
       await saveOpeningQtyForDate(editItem, ef.qty, openingDate, selOutlet);
@@ -560,11 +614,19 @@ async function saveEdit() {
   }
 }
 
-  function resetOverride(code) {
-    const newOv = { ...overrides };
-    delete newOv[code];
-    saveOverrides(newOv);
-    toast_("Reset to main empty price ✓");
+  async function resetOverride(code) {
+    try {
+      await deleteOutletPriceOverride(selOutlet, code, true);
+      setOverridesState(prev => {
+        const n = { ...prev };
+        delete n[code];
+        return n;
+      });
+      toast_("Reset to main empty price ✓");
+    } catch (err) {
+      console.error("resetOverride error:", err);
+      toast_("Reset failed — check console", "err");
+    }
   }
 
   const BASE_SUP_COLORS = {
@@ -765,10 +827,18 @@ async function saveEdit() {
               <input type="number" value={ef.unitCost}
                 onChange={e=>setEf({...ef,unitCost:e.target.value})} placeholder="0.00"/>
             </div>
-            <div className="ff">
+             <div className="ff">
               <label>Outlet Selling Price (Rs.)</label>
               <input type="number" value={ef.sellingPrice}
                 onChange={e=>setEf({...ef,sellingPrice:e.target.value})} placeholder="0.00"/>
+            </div>
+          </div>
+          <div className="ff" style={{marginBottom:10}}>
+            <label>Price Change Date</label>
+            <input type="date" value={ef.priceDate || today()}
+              onChange={e=>setEf({...ef,priceDate:e.target.value})}/>
+            <div style={{fontSize:11,color:"var(--mut)",marginTop:3}}>
+              New cost/price apply from this date onward, until the next change.
             </div>
           </div>
           {ef.unitCost && ef.sellingPrice && Number(ef.unitCost)>0 && (
@@ -1274,6 +1344,7 @@ useEffect(() => {
   const [csOutlet, setCsOutlet]= useState("ALL");
   const [physStock,setPhysStock]= useState({});
   const [statusDb, setStatusDb]   = useState({ sales: {}, purchases: {}, transfers: {}, returns: {} });
+  const [csOutletOverrides, setCsOutletOverrides] = useState({});
   const csWrapRef = useRef(null);
   // OutletEmptyPanel (Tab 4) loads its own data via loadEmptyFromStorage() on mount.
   // handleEmptyInventoryChange is kept so EmptyStockPanel's onInventoryChange prop works.
@@ -1336,25 +1407,22 @@ useEffect(() => {
       }));
       setStatusDb({ sales, purchases, transfers, returns });
     })();
+    if (csOutlet !== "ALL") {
+      loadOutletOverridesFromDB(csOutlet, false).then(setCsOutletOverrides);
+    } else {
+      setCsOutletOverrides({});
+    }
   }, [invTab, csOutlet, outletNames]);
-
  const csData = useMemo(() => {
   const outlets = csOutlet === "ALL" ? outletNames : [csOutlet];
 
   return inv.map(item => {
-    const sp = (() => {
+        const { unitCost: uc, sellingPrice: sp } = (() => {
       if (csOutlet !== "ALL") {
-        const ov = ls(outletInvKey(csOutlet), {})[`${item.code}__${item.supplier}`];
-        return ov?.sellingPrice !== undefined ? Number(ov.sellingPrice) : Number(item.sellingPrice) || 0;
+        const ov = csOutletOverrides[`${item.code}__${item.supplier}`];
+        return resolveOutletPrice(ov, csTo, Number(item.unitCost) || 0, Number(item.sellingPrice) || 0);
       }
-      return Number(item.sellingPrice) || 0;
-    })();
-    const uc = (() => {
-      if (csOutlet !== "ALL") {
-        const ov = ls(outletInvKey(csOutlet), {})[`${item.code}__${item.supplier}`];
-        return ov?.unitCost !== undefined ? Number(ov.unitCost) : Number(item.unitCost) || 0;
-      }
-      return Number(item.unitCost) || 0;
+      return { unitCost: Number(item.unitCost) || 0, sellingPrice: Number(item.sellingPrice) || 0 };
     })();
     const mg = sp - uc;
 
@@ -1532,7 +1600,7 @@ useEffect(() => {
       r.hasSavedRecord === true
     )
   );
-}, [inv, csFrom, csTo, csOutlet, physStock, statusDb, outletNames]);
+}, [inv, csFrom, csTo, csOutlet, physStock, statusDb, outletNames, csOutletOverrides]);
 
   function saveItem() {
     if (!iForm.code||!iForm.name){toast_("Fill code and name","err");return;}

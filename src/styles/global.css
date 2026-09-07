@@ -442,14 +442,12 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
   body.printing-ledger .ledger-print-zone * {
     visibility: visible !important;
   }
-  body.printing-ledger .ledger-print-zone {
-    position: fixed !important;
-    top: 0 !important;
-    left: 0 !important;
-    width: 100% !important;
-    background: #fff !important;
-    padding: 0 !important;
-    z-index: 99999 !important;
+   body.printing-ledger .ledger-print-zone {
+  position: static !important;
+  width: 100% !important;
+  background: #fff !important;
+  padding: 0 !important;
+}
   }
   body.printing-ledger .ledger-print-header {
     display: block !important;
@@ -523,9 +521,16 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
     font-weight: 700 !important;
     border-top: 2px solid #666 !important;
   }
-}
+
 
 /* Screen: hide print-only ledger header */
 .ledger-print-header {
   display: none;
+}
+body.printing-ledger .ledger-print-header {
+  page-break-after: avoid !important;
+}
+body.printing-ledger .ledger-print-tbl tfoot,
+body.printing-ledger .ledger-print-tbl .ledger-total-row {
+  page-break-inside: avoid !important;
 }

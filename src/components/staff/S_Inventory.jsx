@@ -3,7 +3,7 @@ import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
 import { addSale, deleteSaleForDate, addCashEntry,deleteCashEntryForDate, deleteEmptyCashEntriesForDate, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
-import { outletInvKey, outletEmptyInvKey } from "../admin/InventoryAdmin";
+import { resolveOutletPrice, loadOutletOverridesFromDB } from "../admin/InventoryAdmin";
 const EMPTY_PURCHASE_SUP_ID = "EMPTY_PURCHASE"; // adjust to match your actual Supabase ID
 
 const MAIN_EMPTY_SUP_IDS = new Set([
@@ -32,9 +32,10 @@ const EMPTY_RECEIVED_AUTO_MAP = [
 //  code to exist under different suppliers (e.g. LION BREWERY
 //  and KASTHURI W/S sharing the same item codes).
 // ─────────────────────────────────────────────────────────────
-   export function getOutletInventory(outlet, masterOverride) {
+   export function getOutletInventory(outlet, masterOverride, overridesMap, dateStr) {
   const master    = masterOverride || ls("inv_main", SEED_INVENTORY);
-  const overrides = ls(outletInvKey(outlet), {});
+  const overrides = overridesMap || {};
+  const d = dateStr || today();
   return master
     .filter(item => {
       const ovKey = `${item.code}__${item.supplier}`;
@@ -44,11 +45,12 @@ const EMPTY_RECEIVED_AUTO_MAP = [
 .map(item => {
   const ovKey = `${item.code}__${item.supplier}`;
   const ov    = overrides[ovKey];
+  const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, item.unitCost, item.sellingPrice);
   return {
     ...item,
-    unitCost:     ov?.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
-    sellingPrice: ov?.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
-    qty:          ov?.qty          !== undefined ? ov.qty          : 0,
+    unitCost,
+    sellingPrice,
+    qty: ov?.qty !== undefined ? ov.qty : 0,
   };
 });
 }
@@ -87,8 +89,8 @@ const EMPTY_SEED_STAFF = [
 //  Override key is item.id (unique) NOT item.code, because the
 //  same code can exist under different empty suppliers.
 // ─────────────────────────────────────────────────────────────
-function getOutletEmptyInventory(outlet, masterOverride, emptyMasterData) {
-  const master = 
+function getOutletEmptyInventory(outlet, masterOverride, emptyMasterData, overridesMap, dateStr) {
+const master = 
     (emptyMasterData && emptyMasterData.length > 0)
       ? emptyMasterData.filter(i => i.supplier !== "EMPTY PURCHASE")
       : (masterOverride
@@ -98,22 +100,23 @@ function getOutletEmptyInventory(outlet, masterOverride, emptyMasterData) {
           ? masterOverride.filter(i => i.type === "EMP" && i.supplier !== "EMPTY PURCHASE")
           : EMPTY_SEED_STAFF.filter(i => i.supplier !== "EMPTY PURCHASE");
 
-  const overrides = ls(outletEmptyInvKey(outlet), {});
+    const overrides = overridesMap || {};
+    const d = dateStr || today()
 
-  const result = master
+      const result = master
     .filter(item => item.supplier !== "EMPTY PURCHASE" && !overrides[`${item.code}__${item.supplier}`]?.hidden)
     .map(item => {
       const ovKey = `${item.code}__${item.supplier}`;
       const ov = overrides[ovKey];
+      const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, item.unitCost, item.sellingPrice);
       return {
         ...item,
         id:           item.id || `${item.supplier}__${item.code}`.replace(/\s/g, "_"),
-        unitCost:     ov?.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
-        sellingPrice: ov?.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
-        qty:          ov?.qty          !== undefined ? ov.qty          : 0,
+        unitCost,
+        sellingPrice,
+        qty: ov?.qty !== undefined ? ov.qty : 0,
       };
     });
-
   // Deduplicate by code__supplier
   const seen = new Set();
   return result.filter(item => {
@@ -333,8 +336,30 @@ useEffect(() => {
   const mainScrollBy = useCallback(d => mainTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
   const empScrollBy  = useCallback(d => empTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
 
-  const [masterInv, setMasterInv] = useState(() => ls("inv_main", SEED_INVENTORY));
+const [masterInv, setMasterInv] = useState(() => ls("inv_main", SEED_INVENTORY));
 const [emptyMaster, setEmptyMaster] = useState([]);
+const [outletOverridesMain, setOutletOverridesMain] = useState({});
+const [outletOverridesEmp,  setOutletOverridesEmp]  = useState({});
+
+const refreshOutletOverrides = useCallback(() => {
+  Promise.all([
+    loadOutletOverridesFromDB(outlet, false),
+    loadOutletOverridesFromDB(outlet, true),
+  ]).then(([mainOv, empOv]) => {
+    setOutletOverridesMain(mainOv);
+    setOutletOverridesEmp(empOv);
+  });
+}, [outlet]);
+
+useEffect(() => {
+  refreshOutletOverrides();
+}, [refreshOutletOverrides]);
+
+useEffect(() => {
+  const onFocus = () => refreshOutletOverrides();
+  window.addEventListener("focus", onFocus);
+  return () => window.removeEventListener("focus", onFocus);
+}, [refreshOutletOverrides]);
 
 // ── Load master inventory from Supabase ──
 useEffect(() => {
@@ -370,10 +395,13 @@ useEffect(() => {
   });
 }, [supOrder]);
 
-const seedMain = useMemo(() => getOutletInventory(outlet, masterInv), [outlet, masterInv]);
+const seedMain = useMemo(
+  () => getOutletInventory(outlet, masterInv, outletOverridesMain, mainDate),
+  [outlet, masterInv, outletOverridesMain, mainDate]
+);
 const seedEmp = useMemo(() => {
-  return getOutletEmptyInventory(outlet, masterInv, emptyMaster);
-}, [outlet, masterInv, emptyMaster]);
+  return getOutletEmptyInventory(outlet, masterInv, emptyMaster, outletOverridesEmp, empDate);
+}, [outlet, masterInv, emptyMaster, outletOverridesEmp, empDate]);
   // ── Supplier dropdown for Main tab (strip numeric prefix for display) ──
   const mainSuppliers = useMemo(() => {
     const stripped = seedMain.map(i => (i.supplier || "").replace(/^\d{4}-/, "").trim() || "—");
@@ -423,7 +451,7 @@ const [empRows, setER] = useState(() =>
     // selected date so stale data never carries forward.
     skipNextReloadDateRef.current = null;
   }
- const lsMain = getOutletInventory(outlet, masterInv);
+ const lsMain = getOutletInventory(outlet, masterInv, outletOverridesMain, mainDate);
 const baseMaster = masterInv || ls("inv_main", SEED_INVENTORY);
 const baseQtyByCode = {};
 baseMaster.forEach(i => { baseQtyByCode[i.code] = Number(i.qty) || 0; });
@@ -583,8 +611,7 @@ useEffect(() => {
     // the newly selected date so stale data never carries forward.
     skipNextEmpReloadDateRef.current = null;
   }
-  const lsEmp = getOutletEmptyInventory(outlet, masterInv, emptyMaster);
-
+  const lsEmp = getOutletEmptyInventory(outlet, masterInv, emptyMaster, outletOverridesEmp, empDate);
   const baseEmp = {};
   lsEmp.forEach(e => { baseEmp[e.id] = Number(e.qty) || 0; });
 
@@ -1004,10 +1031,12 @@ toast_("Empty stock daily sale saved ✓");
   //  Profit            = Margin × Total Bottle Sale
   //  Margin            = Selling Price − Unit Cost
   // ─────────────────────────────────────────────────────────
-  // AFTER
-const inv = useMemo(() => getOutletInventory(outlet, masterInv), [outlet, masterInv]);
-
-const csData = useMemo(() => inv.map(item => {
+  
+  const inv = useMemo(
+  () => getOutletInventory(outlet, masterInv, outletOverridesMain, csTo),
+  [outlet, masterInv, outletOverridesMain, csTo]
+);
+  const csData = useMemo(() => inv.map(item => {
   const uc = Number(item.unitCost)     || 0;
   const sp = Number(item.sellingPrice) || 0;
   const mg = sp - uc;
