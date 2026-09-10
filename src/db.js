@@ -1515,3 +1515,37 @@ export async function setSupplierBF(supplierId, outlet = "ALL", date, amount, pe
   if (!data) { console.error("setSupplierBF: no row returned — check RLS SELECT policy on supplier_bf"); return null; }
   return { date: data.bf_date, amount: Number(data.bf_amount) || 0, period: data.period };
 }
+// ─── SUPPLIER CREDIT LEDGER — Amount Different / Payment Different ────────
+// Persists the two manual reconciliation fields on SupplierCreditLedger
+// (Reports.jsx) per supplier/outlet/month, same scoping pattern as
+// supplier_bf above, so they survive reloads and reappear when the same
+// month is reselected later instead of resetting to 0 every time.
+export async function getSupplierDiff(supplierId, outlet = "ALL", period = null) {
+  const { data, error } = await supabase
+    .from("supplier_diff")
+    .select("amount_diff, payment_diff, period")
+    .eq("supplier_id", supplierId)
+    .eq("outlet", outlet)
+    .eq("period", period)
+    .maybeSingle();
+  if (error) { console.error("getSupplierDiff error:", error); return null; }
+  if (!data) return null;
+  return { amountDiff: Number(data.amount_diff) || 0, paymentDiff: Number(data.payment_diff) || 0, period: data.period };
+}
+
+export async function setSupplierDiff(supplierId, outlet = "ALL", period = null, amountDiff, paymentDiff) {
+  const { data, error } = await supabase
+    .from("supplier_diff")
+    .upsert({
+      supplier_id: supplierId,
+      outlet,
+      period,
+      amount_diff: Number(amountDiff) || 0,
+      payment_diff: Number(paymentDiff) || 0,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: "supplier_id,outlet,period" })
+    .select()
+    .maybeSingle();
+  if (error) { console.error("setSupplierDiff error:", error); return null; }
+  return data ? { amountDiff: Number(data.amount_diff) || 0, paymentDiff: Number(data.payment_diff) || 0, period: data.period } : null;
+}

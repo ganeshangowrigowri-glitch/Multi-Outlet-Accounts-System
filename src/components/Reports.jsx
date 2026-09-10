@@ -31,7 +31,9 @@ import {
   getInventoryMaster,
   getOpeningStock,
   getSupplierBF,   
-  setSupplierBF,  
+  setSupplierBF, 
+  getSupplierDiff,
+  setSupplierDiff, 
    getPositionLedger,
    POSITION_CATEGORIES, 
    getCrateLedger,
@@ -2752,6 +2754,50 @@ function UGBook({ d, outlet, month }) {
   wood_p:        "Wood — P",
   wood_n:        "Wood — N",
 };
+// Computes ONE supplier's Balance C/D for one outlet+month — identical
+// math to SupplierCreditLedger's own balanceCD (manual B/F override +
+// Amount Different / Payment Different corrections). Used by Stock
+// Summary so its "Credit Outstanding" can never drift from what
+// Supplier Credit Ledger shows for the same supplier/month.
+async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, apPayments) {
+  const mStart = monthStart(month);
+  const mEnd   = monthEnd(month);
+  const isSupMatch = raw => normSup(raw) === normSup(supplierId);
+
+  const invThisMonth = (apInvoices || []).filter(i => isSupMatch(i.supplier_id || i.supplier));
+  const payThisMonth = (apPayments || []).filter(p =>
+    isSupMatch(p.supplier_id || p.supplier) &&
+    (!mStart || (p.date >= mStart && p.date <= mEnd))
+  );
+
+  const invBefore = (apInvoices || []).filter(i => isSupMatch(i.supplier_id || i.supplier) && mStart && i.date < mStart);
+  const payBefore = (apPayments || []).filter(p => isSupMatch(p.supplier_id || p.supplier) && mStart && p.date < mStart);
+  const computedBfBalance =
+    invBefore.reduce((a, i) => a + (Number(i.amount) || 0), 0) -
+    payBefore.reduce((a, p) => a + (Number(p.amount) || 0) + (Number(p.discount) || 0), 0);
+
+  const manualBF = await getSupplierBF(supplierId, outlet, month);
+  const useManualBF     = !!manualBF;
+  const bfBalance        = useManualBF ? manualBF.amount : computedBfBalance;
+  const bfEffectiveDate  = useManualBF ? manualBF.date : mStart;
+
+  const rowsAmount = invThisMonth
+    .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
+    .filter(i => !useManualBF || i.date >= bfEffectiveDate)
+    .reduce((a, i) => a + (Number(i.amount) || 0), 0);
+
+  const totalAmount = bfBalance + rowsAmount;
+  const totalPaid = payThisMonth.reduce((a, p) => a + (Number(p.amount) || 0), 0);
+
+  const diffEntry      = await getSupplierDiff(supplierId, outlet, month);
+  const balanceAmtDiff = diffEntry?.amountDiff  || 0;
+  const paymentDiff    = diffEntry?.paymentDiff || 0;
+
+  const totalAmountAdj = totalAmount + balanceAmtDiff;
+  const totalPaidAdj   = totalPaid   + paymentDiff;
+
+  return totalAmountAdj - totalPaidAdj; // Balance C/D
+}
 
    function StockSummary({ d, outlet, month }) {
   const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [],
@@ -2809,7 +2855,7 @@ function UGBook({ d, outlet, month }) {
     return () => { cancelled = true; };
   }, [outlet, bankAccounts, bankLedger]);
 
-    useEffect(() => {
+       useEffect(() => {
     if (outlet === "ALL" || !cardAccounts.length) { setCardBalances({}); return; }
     let cancelled = false;
     (async () => {
@@ -2824,6 +2870,26 @@ function UGBook({ d, outlet, month }) {
     })();
     return () => { cancelled = true; };
   }, [outlet, cardAccounts, month]);
+
+  // Per-supplier credit outstanding — now computed by the SAME formula
+  // SupplierCreditLedger uses for Balance C/D (manual B/F override +
+  // Amount Different / Payment Different), so this page and Supplier
+  // Credit Ledger can never show different figures for the same
+  // supplier/outlet/month.
+  const [supplierBalances, setSupplierBalances] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const pairs = await Promise.all(
+        SUPPLIERS_LIST.map(async s => [
+          s.id,
+          await computeSupplierBalanceCD(outlet, month, s.id, apInvoices, apPayments),
+        ])
+      );
+      if (!cancelled) setSupplierBalances(Object.fromEntries(pairs));
+    })();
+    return () => { cancelled = true; };
+  }, [outlet, month, apInvoices, apPayments]);
 
   const bankAccountRows = outlet !== "ALL" && bankAccounts.length
     ? bankAccounts.map(a => ({
@@ -2904,19 +2970,11 @@ function UGBook({ d, outlet, month }) {
     .map(t => ({ type: t, label: CRATE_TYPE_LABELS[t], balance: crateBalances[t] }))
     .filter(r => r.balance !== 0);
 
-  // Outstanding credit per supplier (all-time, not just this month —
-  // matches how a real STOCK sheet shows the running creditor balance).
-  const bySupplier = {};
-  (apInvoices || []).forEach(i => {
-    const s = i.supplier_id || i.supplier;
-    if (!s) return;
-    bySupplier[s] = (bySupplier[s] || 0) + (Number(i.amount) || 0);
-  });
-  (apPayments || []).forEach(p => {
-    const s = p.supplier_id || p.supplier;
-    if (!s) return;
-    bySupplier[s] = (bySupplier[s] || 0) - (Number(p.amount) || 0) - (Number(p.discount) || 0);
-  });
+    // Outstanding credit per supplier — this IS Supplier Credit Ledger's
+  // own Balance C/D for this exact outlet+month (see computeSupplierBalanceCD
+  // above). No separate all-time AP-window math anymore, so the two
+  // reports can never disagree for the same supplier/month.
+  const bySupplier = supplierBalances;
 
   const creditRows = SUPPLIERS_LIST
     .map(s => ({ name: s.name, id: s.id, balance: bySupplier[s.id] || 0 }))
@@ -3251,17 +3309,41 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   const totalVatDis      = rows.reduce((a, r) => a + r.vatDis, 0);
   let runBal = bfBalance;
 
-  // Staff-entered manual corrections — these ADD directly into the Amount
+    // Staff-entered manual corrections — these ADD directly into the Amount
   // Total / Payment Total shown on the TOTAL row (not applied as a separate
-  // adjustment to Balance C/D). Local to this view (not persisted), same
-  // as applyDiscount.
-  const [balanceAmtDiff, setBalanceAmtDiff] = useState(0);
+  // adjustment to Balance C/D). Persisted per supplier/outlet/month via
+  // supplier_diff (same load/save pattern as manualBF above), so the value
+  // survives reloads and reappears when this exact month is reselected.
+    const [balanceAmtDiff, setBalanceAmtDiff] = useState(0);
   const [paymentDiff, setPaymentDiff]       = useState(0);
-  const totalAmountAdj = totalAmount + balanceAmtDiff;
-  const totalPaidAdj   = totalPaid + paymentDiff;
-  // Balance C/D = Total Amount − Total Payment (using the adjusted totals
-  // above — no extra term added/subtracted here)
-  const balanceCD = totalAmountAdj - totalPaidAdj;
+  const [diffSaving, setDiffSaving] = useState(false);
+  const [diffError, setDiffError]   = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getSupplierDiff(supplierId, outlet, month).then(entry => {
+      if (cancelled) return;
+      setBalanceAmtDiff(entry?.amountDiff || 0);
+      setPaymentDiff(entry?.paymentDiff || 0);
+      setDiffError(null);
+    });
+    return () => { cancelled = true; };
+  }, [supplierId, outlet, month]);
+
+  async function saveDiff(nextAmountDiff, nextPaymentDiff) {
+    setDiffSaving(true);
+    setDiffError(null);
+    const result = await setSupplierDiff(supplierId, outlet, month, nextAmountDiff, nextPaymentDiff);
+    setDiffSaving(false);
+    if (!result) {
+      setDiffError("Could not save — check that supplier_diff exists with correct permissions.");
+    }
+  }
+const totalAmountAdj = totalAmount + balanceAmtDiff;
+const totalPaidAdj   = totalPaid + paymentDiff;
+// Balance C/D = Total Amount − Total Payment (using the adjusted totals
+// above — no extra term added/subtracted here)
+const balanceCD = totalAmountAdj - totalPaidAdj;
 
   const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
   const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
@@ -3272,7 +3354,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   return (
     
     <div>
-      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
+        <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <select value={supplierId} onChange={e => setSupplierId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
             {SUPPLIERS_LIST.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
@@ -3281,6 +3363,8 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
             <input type="checkbox" checked={applyDiscount} onChange={e => setApplyDiscount(e.target.checked)} />
             Apply 6% trade discount + VAT
           </label>
+          {diffSaving && <div style={{ fontSize: 11, color: "var(--mut)" }}>Saving…</div>}
+          {diffError && <div style={{ fontSize: 11, color: "var(--red)" }}>{diffError}</div>}
         </div>
         <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
       </div>
@@ -3363,6 +3447,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
                   <td style={td(false)}>
                   <input type="number" step="0.01" value={balanceAmtDiff}
                     onChange={e => setBalanceAmtDiff(parseFloat(e.target.value) || 0)}
+                    onBlur={e => saveDiff(parseFloat(e.target.value) || 0, paymentDiff)}
                     style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
                 </td>
                 <td style={td(false)}></td>
@@ -3378,8 +3463,9 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
                 <td style={td(false)}></td>
                 <td style={td(false)}></td>
                 <td style={td(false)}>
-                  <input type="number" step="0.01" value={paymentDiff}
+                    <input type="number" step="0.01" value={paymentDiff}
                     onChange={e => setPaymentDiff(parseFloat(e.target.value) || 0)}
+                    onBlur={e => saveDiff(balanceAmtDiff, parseFloat(e.target.value) || 0)}
                     style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
                 </td>
                 <td style={td(false)}></td>
