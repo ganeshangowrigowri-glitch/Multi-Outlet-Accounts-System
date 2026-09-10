@@ -1498,28 +1498,20 @@ export async function getSupplierBF(supplierId, outlet = "ALL", period = null) {
   if (!data || !data.length) return null;
   return { date: data[0].bf_date, amount: Number(data[0].bf_amount) || 0, period: data[0].period };
 }
-
 export async function setSupplierBF(supplierId, outlet = "ALL", date, amount, period = null) {
-  let del = supabase
-    .from("supplier_bf")
-    .delete()
-    .eq("supplier_id", supplierId)
-    .eq("outlet", outlet);
-  del = period ? del.eq("period", period) : del.is("period", null);
-  await del;
-
   const { data, error } = await supabase
     .from("supplier_bf")
-    .insert({
+    .upsert({
       supplier_id: supplierId,
       outlet,
       period: period || null,
       bf_date: date,
       bf_amount: Number(amount) || 0,
       updated_at: new Date().toISOString(),
-    })
+    }, { onConflict: "supplier_id,outlet,period" })
     .select()
     .maybeSingle();
   if (error) { console.error("setSupplierBF error:", error); return null; }
+  if (!data) { console.error("setSupplierBF: no row returned — check RLS SELECT policy on supplier_bf"); return null; }
   return { date: data.bf_date, amount: Number(data.bf_amount) || 0, period: data.period };
 }

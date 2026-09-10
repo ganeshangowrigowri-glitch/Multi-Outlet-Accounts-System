@@ -2210,7 +2210,7 @@ const UG_FIXED_PRODUCTS = [
   "UISW Q", "UISW P",
   "UPV Q", "UPV P",
   "UMDG Q",
-  "UAP N",
+  "UPA N",
   "ULE N",
   "UGAV Q",
 ];
@@ -2291,20 +2291,20 @@ function UGBook({ d, outlet, month }) {
   const [bfDateInput, setBfDateInput]     = useState(today());
   const [bfAmountInput, setBfAmountInput] = useState("");
   const [bfSaving, setBfSaving]           = useState(false);
-  useEffect(() => {
+    useEffect(() => {
     let cancelled = false;
-    getSupplierBF(UG_SUPPLIER_ID, outlet).then(entry => {
+    getSupplierBF(UG_SUPPLIER_ID, outlet, month).then(entry => {
       if (cancelled) return;
       setManualBFState(entry);
       setBfDateInput(entry?.date || today());
       setBfAmountInput(entry?.amount ?? "");
     });
     return () => { cancelled = true; };
-  }, [outlet]);
+  }, [outlet, month]);
 
   async function handleSetBF() {
     setBfSaving(true);
-    const entry = await setSupplierBF(UG_SUPPLIER_ID, outlet, bfDateInput, bfAmountInput);
+    const entry = await setSupplierBF(UG_SUPPLIER_ID, outlet, bfDateInput, bfAmountInput, month);
     setBfSaving(false);
     if (entry) setManualBFState(entry);
   }
@@ -2419,11 +2419,18 @@ function UGBook({ d, outlet, month }) {
   const vatDiscount  = (totalPurchase * 0.06) - ugDiscount; // VAT on the discount 
   const netBalance   = grossBalance - ugDiscount - vatDiscount;
 
-    // P/Stock: END-of-month stock value for UG item codes only 
-  const ugItemCodes = buildUGCodeSet(d.inv);
-  const pStock  = Object.entries(d.endStockByCode || {})
-    .filter(([code]) => ugItemCodes.has(code))
-    .reduce((a, [, v]) => a + (v.qty || 0) * (v.unitCost || 0), 0);
+      // P/Stock: END-of-month stock value for UG SUPPLIER items — filtered
+    // by supplier (via the existing isUG check, same as Current Status's
+    // own Supplier filter), NOT by the 28-name fixed product list. Filtering
+    // by name misses any UG item whose name isn't in that fixed list (e.g.
+    // a mistyped/unmapped code), which was undercounting P/Stock versus
+    // Current Status. endStockByCodeIS itself is unchanged — it already
+    // replicates Current Status's exact opening/purchase/in-hand-stock
+    // algorithm for the selected month.
+    const ugSupplierCodes = new Set((d.inv || []).filter(i => isUG(i.supplier)).map(i => i.code));
+    const pStock  = Object.entries(d.endStockByCodeIS || {})
+      .filter(([code]) => ugSupplierCodes.has(code))
+      .reduce((a, [, v]) => a + (v.qty || 0) * (v.unitCost || 0), 0);
   const mo = month
     ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
     : "All Periods";
@@ -2749,6 +2756,11 @@ function UGBook({ d, outlet, month }) {
    function StockSummary({ d, outlet, month }) {
   const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [],
           bankLedger = [], cardLedgerAll = [] } = d;
+  // Stock Summary's "Stock" must equal Current Status's Total Physical
+  // Stock for the selected period. endStockValIS already replicates that
+  // exact per-outlet opening/purchase/in-hand-stock algorithm (see
+  // useReportData) — reused here instead of the older endStockVal.
+  const stockVal = d.endStockValIS;
 
   // ── Per-account Bank & Card balances — mirrors BankStatement's and
   // CardStatement's own balance calculation exactly (same B/F helper, same
@@ -2912,7 +2924,7 @@ function UGBook({ d, outlet, month }) {
     .sort((a, b) => b.balance - a.balance);
 
   const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
-  const totalPosition = d.endStockVal + d.emptyStockVal + d.cashBal + d.bankBal + cardTotal + extraAssetsTotal;
+  const totalPosition = stockVal + d.emptyStockVal + d.cashBal + d.bankBal + cardTotal + extraAssetsTotal;
   const netPosition = totalPosition - totalCredit - otherCreditsTotal;
   // Supplier Stock vs Credit — mirrors the Excel STOCK sheet's "CREDIT"
   // block: per supplier, compares stock value (at cost) currently held
@@ -2955,7 +2967,7 @@ function UGBook({ d, outlet, month }) {
           {/* Top summary tiles */}
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
              {[
-            ["Item Stock (at cost)", d.endStockVal],
+            ["Item Stock (at cost)", stockVal],
             ["Empty Bottle Stock", d.emptyStockVal],
             ["In Hand Cash", d.cashBal],
             ...bankAccountRows.map(r => [r.label, r.balance]),
@@ -3039,7 +3051,7 @@ function UGBook({ d, outlet, month }) {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
                {[
-                ["Stock",             d.endStockVal, ""],
+               ["Stock",             stockVal, ""],
                 ["Empty",             d.emptyStockVal, ""],
                 ["In Hand Cash",      d.cashBal, ""],
                 ...bankAccountRows.map(r => [r.label, r.balance, ""]),
