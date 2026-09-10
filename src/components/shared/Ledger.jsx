@@ -1,7 +1,7 @@
 import { today } from "../../utils/helpers";
 import { fmt } from "../../utils/helpers";
 
-        export default function Ledger({ rows, bfBal = 0, bfDate }) {
+  export default function Ledger({ rows, bfBal = 0, bfDate, cdDate }) {
   let bal = Number(bfBal) || 0;
         return (
     <div>
@@ -36,8 +36,8 @@ import { fmt } from "../../utils/helpers";
           </div>
         );
       })}
-      <div className="lrow lcd">
-        <div className="lc mono">{today()}</div>
+         <div className="lrow lcd">
+        <div className="lc mono">{cdDate || today()}</div>
         <div className="lc">Balance C/D</div>
         <div className="lc"/>
         <div className="lc"/>

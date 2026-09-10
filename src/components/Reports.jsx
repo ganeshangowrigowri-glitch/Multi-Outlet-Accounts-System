@@ -3226,11 +3226,30 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   const allRows = [...rows, ...orphanPaymentRows]
     .sort((a, b) => (a.date || a.payDate || "").localeCompare(b.date || b.payDate || ""));
 
- const totalAmount      = rows.reduce((a, r) => a + r.amount, 0);
-  const totalPaid        = rows.reduce((a, r) => a + r.paid, 0);
+    // "Total" here matches the Excel sheet's Total row: the Amount column
+  // total includes B/F Balance (shown at the top of that column), and the
+  // Payment column total includes EVERY payment made this period —
+  // including orphan payments whose invoice belongs to an earlier period
+  // and is already folded into bfBalance. Using only `rows` for either of
+  // these undercounts both, since orphan payments live in allRows/
+  // orphanPaymentRows, not `rows`.
+  const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount, 0);
+  const totalPaid        = allRows.reduce((a, r) => a + r.paid, 0);
   const totalSixPctDis   = rows.reduce((a, r) => a + r.sixPctDis, 0);
   const totalVatDis      = rows.reduce((a, r) => a + r.vatDis, 0);
   let runBal = bfBalance;
+
+  // Staff-entered manual corrections — these ADD directly into the Amount
+  // Total / Payment Total shown on the TOTAL row (not applied as a separate
+  // adjustment to Balance C/D). Local to this view (not persisted), same
+  // as applyDiscount.
+  const [balanceAmtDiff, setBalanceAmtDiff] = useState(0);
+  const [paymentDiff, setPaymentDiff]       = useState(0);
+  const totalAmountAdj = totalAmount + balanceAmtDiff;
+  const totalPaidAdj   = totalPaid + paymentDiff;
+  // Balance C/D = Total Amount − Total Payment (using the adjusted totals
+  // above — no extra term added/subtracted here)
+  const balanceCD = totalAmountAdj - totalPaidAdj;
 
   const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
   const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
@@ -3306,7 +3325,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
                                 {allRows.length === 0 && (
                 <tr><td colSpan={10} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No invoices this period</td></tr>
               )}
-              {allRows.map((r, i) => {
+                            {allRows.map((r, i) => {
                 // Balance = Amount Total − Payment Total (orphan payment
                 // rows have amount 0, so they only ever reduce the balance)
                 runBal += r.amount - r.paid;
@@ -3325,16 +3344,55 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
                   </tr>
                 );
               })}
-                           <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+
+              {/* Staff-entered corrections — shown before TOTAL */}
+              <tr className="no-print-input-labels">
+                <td style={{ ...td(false), textAlign: "left" }} colSpan={2}>Amount Different</td>
+                  <td style={td(false)}>
+                  <input type="number" step="0.01" value={balanceAmtDiff}
+                    onChange={e => setBalanceAmtDiff(parseFloat(e.target.value) || 0)}
+                    style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
+                </td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+              </tr>
+              <tr>
+                <td style={{ ...td(false), textAlign: "left" }} colSpan={2}>Payment Different</td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}>
+                  <input type="number" step="0.01" value={paymentDiff}
+                    onChange={e => setPaymentDiff(parseFloat(e.target.value) || 0)}
+                    style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
+                </td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+              </tr>
+
+                <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
                 <td style={td(true)} colSpan={2}>TOTAL</td>
-                <td style={td(true)}>{fmt(totalAmount)}</td>
+                <td style={td(true)}>{fmt(totalAmountAdj)}</td>
                 <td style={td(true)}></td>
-                <td style={td(true)}>{fmt(totalPaid)}</td>
+                <td style={td(true)}>{fmt(totalPaidAdj)}</td>
                 <td style={td(true)}></td>
                 <td style={td(true)}>{fmt(totalSixPctDis)}</td>
                 <td style={td(true)}>{fmt(totalVatDis)}</td>
                 <td style={td(true)}></td>
                 <td style={td(true)}>{fmt(runBal)}</td>
+              </tr>
+
+              {/* Balance C/D = Total Amount − Total Payment */}
+              <tr style={{ background: "var(--s2)" }}>
+                <td style={td(true)} colSpan={9}>Balance C/D</td>
+                <td style={td(true)}>{fmt(balanceCD)}</td>
               </tr>
             </tbody>
           </table>

@@ -42,6 +42,7 @@ export default function S_AP({ outlet, user, toast_ }) {
   });
 
     const [manualInv, setManualInv] = useState(false); // toggle: dropdown vs typed invoice no
+    const [saving, setSaving] = useState(false); // guards against double-submit in savePayment
    
   const [aged, setAged] = useState("");
 
@@ -105,6 +106,22 @@ useEffect(() => {
     setPf(p => ({ ...p, invNo, invAmt: amt !== "" ? String(amt) : "" }));
   }
 async function savePayment() {
+  // Guard against double-submit: if a save is already in flight (e.g. a
+  // fast double-click, or the button gets clicked again before the first
+  // request resolves), ignore the second call entirely — this was the
+  // cause of duplicate rows in ap_payments (and therefore duplicate rows
+  // in the Supplier Credit Ledger / Bank Ledger / Card Ledger) from a
+  // single intended save.
+  if (saving) return;
+  setSaving(true);
+  try {
+    await savePaymentInner();
+  } finally {
+    setSaving(false);
+  }
+}
+
+async function savePaymentInner() {
   if (!pf.invNo || !pf.payAmt) { toast_("Fill invoice no & payment amount", "err"); return; }
   if ((pf.payType === "Bank" || pf.payType === "Visa Card") && !pf.bankId) { toast_("Select a bank account", "err"); return; }
   if (pf.payType === "Visa Card" && !pf.cardId) { toast_("Select a card account", "err"); return; }
@@ -466,9 +483,8 @@ if (pf.payType === "Visa Card") {
                   </div>
                 ) : null;
               })()}
-
-              <button className="btn btng" style={{ marginTop: 12 }} onClick={savePayment}>
-                {I.check} Save Payment
+              <button className="btn btng" style={{ marginTop: 12 }} onClick={savePayment} disabled={saving}>
+                {saving ? "Saving…" : <>{I.check} Save Payment</>}
               </button>
             </div>
           </div>

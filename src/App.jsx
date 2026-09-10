@@ -416,11 +416,11 @@ function S_GL({ outlet }) {
         </div>
       </div>
     </div>
-    <div className="card">
-      <div className="chd">
-        <div><h3>In Hand Cash Ledger (1001)</h3><p>Auto-linked from Sales, Expenses, Returns</p></div>
-        <button className="btn btnd btnsm no-print" onClick={()=>window.print()}>{I.print} Print</button>
-      </div>
+     <div className="card cash-print-area">
+  <div className="chd">
+    <div><h3>In Hand Cash Ledger (1001)</h3><p>Auto-linked from Sales, Expenses, Returns</p></div>
+    <button className="btn btnd btnsm no-print" onClick={()=>window.print()}>{I.print} Print</button>
+  </div>
       <div className="no-print" style={{padding:"10px 14px 0",display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
         <div className="ff" style={{marginBottom:0}}>
           <label>From Date</label>
@@ -433,7 +433,7 @@ function S_GL({ outlet }) {
         {(filterFrom || filterTo) &&
           <button className="btn btnd btnsm" onClick={()=>{setFilterFrom("");setFilterTo("");}}>Clear</button>}
       </div>
-          <div style={{padding:12}}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate}/></div>
+       <div style={{padding:12}}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate} cdDate={filterTo || today()}/></div>
 
       {/* ── Totals + Day Sheet Balance / Different ── */}
       <div style={{ padding:"0 14px 14px" }}>
@@ -443,16 +443,16 @@ function S_GL({ outlet }) {
           <div className="sc"><div className="sl">Balance C/D</div><div className="sa">Rs.{fmt(periodBalanceCD)}</div></div>
         </div>
 
-        <div className="no-print" style={{ display:"flex", gap:8, alignItems:"flex-end", flexWrap:"wrap", borderTop:"1px solid var(--bdr)", paddingTop:14 }}>
-          <div className="ff" style={{ marginBottom:0 }}>
+            <div style={{ display:"flex", gap:8, alignItems:"flex-end", flexWrap:"wrap", borderTop:"1px solid var(--bdr)", paddingTop:14 }}>
+            <div className="ff no-print" style={{ marginBottom:0 }}>
             <label>Day Sheet Date</label>
             <input type="date" value={daySheetDate} onChange={e=>setDaySheetDate(e.target.value)} />
           </div>
-          <div className="ff" style={{ marginBottom:0 }}>
-            <label>Day Sheet Balance (Rs.)</label>
+         <div className="ff no-print" style={{ marginBottom:0 }}>
+          <label>Day Sheet Balance (Rs.)</label>
             <input type="number" placeholder="Enter actual cash counted" value={daySheetAmt} onChange={e=>setDaySheetAmt(e.target.value)} />
           </div>
-          <button className="btn btnd btnsm" onClick={saveDaySheet}>{I.check} Set</button>
+          <button className="btn btnd btnsm no-print" onClick={saveDaySheet}>{I.check} Set</button>
 
           {daySheetSaved !== null && (
             <div style={{ marginLeft:"auto", display:"flex", gap:24 }}>

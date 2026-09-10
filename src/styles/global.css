@@ -442,13 +442,12 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
   body.printing-ledger .ledger-print-zone * {
     visibility: visible !important;
   }
-   body.printing-ledger .ledger-print-zone {
+     body.printing-ledger .ledger-print-zone {
   position: static !important;
   width: 100% !important;
   background: #fff !important;
   padding: 0 !important;
 }
-  }
   body.printing-ledger .ledger-print-header {
     display: block !important;
     text-align: center !important;
@@ -516,7 +515,7 @@ body{font-family:'Inter',sans-serif;background:var(--bg);color:var(--txt);font-s
     background: #f5f5f5 !important;
     font-weight: 700 !important;
   }
-  body.printing-ledger .ledger-print-tbl .ledger-total-row td {
+   body.printing-ledger .ledger-print-tbl .ledger-total-row td {
     background: #eee !important;
     font-weight: 700 !important;
     border-top: 2px solid #666 !important;
@@ -534,3 +533,101 @@ body.printing-ledger .ledger-print-tbl tfoot,
 body.printing-ledger .ledger-print-tbl .ledger-total-row {
   page-break-inside: avoid !important;
 }
+
+
+
+/* ============================================
+   IN HAND CASH LEDGER — PRINT ONLY
+   Scoped via body:has(.cash-print-area) so it
+   only activates when the Cash page is open —
+   every other page/tab prints exactly as before.
+   ============================================ */
+@media print {
+  body:has(.cash-print-area) {
+    --bg: #ffffff;
+    --s1: #ffffff;
+    --s2: #ffffff;
+    --s3: #eeeeee;
+    --txt: #111111;
+    --mut: #444444;
+    --mut2: #666666;
+    --bdr: #cccccc;
+    --grn: #067d1e;
+    --red: #b91c1c;
+    background: #ffffff !important;
+  }
+
+  /* Hide the whole page (sidebar, topbar, other cards, filters, buttons)... */
+  body:has(.cash-print-area) * {
+    visibility: hidden !important;
+  }
+
+  /* ...then reveal only the ledger print area and its contents. */
+  body:has(.cash-print-area) .cash-print-area,
+  body:has(.cash-print-area) .cash-print-area * {
+    visibility: visible !important;
+  }
+
+  body:has(.cash-print-area) .cash-print-area {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: auto !important;
+    background: #ffffff !important;
+    box-shadow: none !important;
+    border: none !important;
+  }
+  /* Clean, professional print-only header */
+  body:has(.cash-print-area) .cash-print-title {
+    display: block !important;
+    text-align: center;
+    margin-bottom: 14px;
+  }
+  body:has(.cash-print-area) .cash-print-title h2 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    color: #111;
+  }
+    body:has(.cash-print-area) .cash-print-title p {
+    margin: 0;
+    font-size: 11px;
+    color: #555;
+  }
+
+  /* Compact the ledger rows only when printing the Cash Ledger,
+     so more rows fit per page — screen view is untouched since
+     these rules only fire inside @media print, scoped to
+     body:has(.cash-print-area). */
+  body:has(.cash-print-area) .lhd,
+  body:has(.cash-print-area) .lrow {
+    grid-template-columns: 65px 1fr 85px 85px 95px !important;
+  }
+
+  body:has(.cash-print-area) .lc {
+    padding: 2px 5px !important;
+    font-size: 8.5px !important;
+    line-height: 1.25 !important;
+  }
+
+  body:has(.cash-print-area) .lhc {
+    padding: 3px 5px !important;
+    font-size: 7px !important;
+  }
+}
+}
+  body:has(.cash-print-area) .cash-print-title {
+    display: block !important;
+    text-align: center;
+    margin-bottom: 14px;
+  }
+  body:has(.cash-print-area) .cash-print-title h2 {
+    margin: 0 0 4px;
+    font-size: 18px;
+    color: #111;
+  }
+  body:has(.cash-print-area) .cash-print-title p {
+    margin: 0;
+    font-size: 11px;
+    color: #555;
+  }
