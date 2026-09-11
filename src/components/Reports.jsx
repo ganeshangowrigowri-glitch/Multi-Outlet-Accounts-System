@@ -2926,11 +2926,14 @@ async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, a
   // category's balance is a running total across every entry, so there's no
   // single "the" note; showing the latest one mirrors how B/F values work
   // elsewhere in the app (most recent entry wins).
-  const categoryNote = key => {
+  // AFTER — Reports.jsx, inside StockSummary()
+const categoryNote = key => {
     const rows = positionUpToMonthEnd.filter(r => r.category === key && r.notes);
     if (!rows.length) return "";
-    return [...rows].sort((a, b) => (a.date||"").localeCompare(b.date||"")).pop().notes;
-  
+    return [...rows]
+      .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+      .map(r => r.notes)
+      .join(" / ");
   };
 
     // Same 1000–1499 restriction as S_Position.jsx — keeps Fixed Assets
@@ -2940,9 +2943,24 @@ async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, a
   const assetRows       = coaAssetCats.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) })).filter(r => r.balance !== 0);
   // "Damage" removed from Other Credit Outstanding — filtered here so
   // POSITION_CATEGORIES itself (and any other consumer of it) is untouched.
-  const otherCreditRows = POSITION_CATEGORIES.other_credit
-    .filter(c => c.key !== "damage" && !/damage/i.test(c.label))
-    .map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
+  // AFTER
+const otherCreditRows = POSITION_CATEGORIES.other_credit
+  .filter(c => c.key !== "damage" && !/damage/i.test(c.label))
+  .map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
+
+// AFTER
+const othersCat = POSITION_CATEGORIES.other_credit.find(c => /^others$/i.test(c.label));
+const othersEntries = othersCat
+  ? positionUpToMonthEnd.filter(r => r.category === othersCat.key)
+  : [];
+
+// Same fix, mirrored for the Asset side: Asset "Others" was collapsing
+// every entry into one row/note via categoryBalance + categoryNote. This
+// pulls the individual entries so each can render as its own row.
+const assetOthersCat = coaAssetCats.find(c => /^others$/i.test(c.label));
+const assetOthersEntries = assetOthersCat
+  ? positionUpToMonthEnd.filter(r => r.category === assetOthersCat.key && r.category_group === "asset")
+  : [];
 
     const extraAssetsTotal   = assetRows.reduce((a, r) => a + r.balance, 0);
   const otherCreditsTotal  = otherCreditRows.reduce((a, r) => a + r.balance, 0);
@@ -3023,21 +3041,25 @@ async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, a
         </div>
 
           {/* Top summary tiles */}
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
-             {[
-            ["Item Stock (at cost)", stockVal],
-            ["Empty Bottle Stock", d.emptyStockVal],
-            ["In Hand Cash", d.cashBal],
-            ...bankAccountRows.map(r => [r.label, r.balance]),
-            ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance]),
-            ...assetRows.map(r => [r.label, r.balance]),
+              {/* AFTER */}
+           {/* Top summary tiles — screen-only quick glance; the same figures are
+          already shown in the "1. Total Assets" table below, so printing
+          both is redundant and wastes paper/ink. */}
+          <div className="no-print" style={{ display: "flex", flexWrap: "wrap", gap: 12, padding: 16 }}>
+          {[
+          ["Item Stock (at cost)", stockVal],
+          ["Empty Bottle Stock", d.emptyStockVal],
+          ["In Hand Cash", d.cashBal],
+           ...bankAccountRows.map(r => [r.label, r.balance]),
+          ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance]),
+          ...assetRows.map(r => [r.label, r.balance]),
           ].map(([label, val], i) => (
-            <div key={`${label}-${i}`} style={{ flex: "1 1 160px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "12px 14px" }}>
-              <div style={{ fontSize: 10.5, color: "var(--mut)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
-              <div style={{ fontSize: 17, fontWeight: 700, marginTop: 4 }}>Rs.{fmt(val || 0)}</div>
-            </div>
+         <div key={`${label}-${i}`} style={{ flex: "1 1 160px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "12px 14px" }}>
+         <div style={{ fontSize: 10.5, color: "var(--mut)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
+         <div style={{ fontSize: 17, fontWeight: 700, marginTop: 4 }}>Rs.{fmt(val || 0)}</div>
+         </div>
           ))}
-        </div>
+         </div>
 
        {/* Supplier stock value vs credit outstanding — mirrors Excel's CREDIT block */}
         <div style={sectionHead}>Supplier Stock vs Credit</div>
@@ -3107,51 +3129,91 @@ async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, a
                 <div style={catHead("#1d3f66", "#dce8f7")}>1. Total Assets</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <tbody>
-               {[
-               ["Stock",             stockVal, ""],
-                ["Empty",             d.emptyStockVal, ""],
-                ["In Hand Cash",      d.cashBal, ""],
-                ...bankAccountRows.map(r => [r.label, r.balance, ""]),
-                ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance, ""]),
-                ...assetRows.map(r => [r.label, r.balance, r.notes]),
-              ].map(([label, val, note], i) => (
-                <tr key={`${label}-${i}`}>
-                  <td style={td}>{label}</td>
-                  <td style={{ ...td, color: "var(--mut)", fontStyle: note ? "normal" : "italic" }}>{note || "—"}</td>
-                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val || 0)}</td>
-                </tr>
-              ))}
-              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
-                <td style={{ ...td, fontWeight: 700 }}>Total Assets</td>
-                <td style={td}></td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>+Rs.{fmt(totalPosition)}</td>
-              </tr>
-            </tbody>
+           {/* AFTER */}
+<tbody>
+   {[
+   ["Stock",             stockVal, "", null],
+    ["Empty",             d.emptyStockVal, "", null],
+    ["In Hand Cash",      d.cashBal, "", null],
+    ...bankAccountRows.map(r => [r.label, r.balance, "", null]),
+    ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance, "", null]),
+    ...assetRows.map(r => [r.label, r.balance, r.notes, r.key]),
+  ].map(([label, val, note, catKey], i) => {
+    // Asset "Others": show every saved entry as its own row instead of
+    // one collapsed row. Every other Total Assets row (Stock, Empty,
+    // Cash, Bank, Card, and every other Asset category) is untouched.
+    if (assetOthersCat && catKey === assetOthersCat.key && assetOthersEntries.length > 0) {
+      return assetOthersEntries.map((entry, j) => (
+        <tr key={`asset-others-${entry.id || j}`}>
+          <td style={td}>{j === 0 ? label : ""}</td>
+          <td style={{ ...td, color: "var(--mut)", fontStyle: entry.notes ? "normal" : "italic" }}>
+            {entry.notes || "—"}
+          </td>
+          <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
+            {fmt(entry.direction === "in" ? Number(entry.amount) || 0 : -(Number(entry.amount) || 0))}
+          </td>
+        </tr>
+      ));
+    }
+    return (
+      <tr key={`${label}-${i}`}>
+        <td style={td}>{label}</td>
+        <td style={{ ...td, color: "var(--mut)", fontStyle: note ? "normal" : "italic" }}>{note || "—"}</td>
+        <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val || 0)}</td>
+      </tr>
+    );
+  })}
+  <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+    <td style={{ ...td, fontWeight: 700 }}>Total Assets</td>
+    <td style={td}></td>
+    <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>Rs.{fmt(totalPosition)}</td>
+  </tr>
+</tbody>
           </table>
         </div>
 
                      <div style={catHead("#65438f", "#e6dcf5")}>2. Total Credit Outstanding</div>
         <div style={{ padding: "8px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
           <span>Total Credit Outstanding</span>
-          <strong style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(totalCredit)}</strong>
+          <strong style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>Rs.{fmt(totalCredit)}</strong>
         </div>
 
          <div style={catHead("#246457", "#d3ede6")}>3. Other Credit Outstanding</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
-              {otherCreditRows.map(r => (
-                <tr key={r.key}>
-                  <td style={td}>{r.label}</td>
-                  <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
-                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
-                </tr>
-              ))}
+              {/* AFTER */}
+{otherCreditRows.map(r => {
+  // "Others" category: show every saved entry as its own row instead of
+  // one collapsed row. All other categories (Due Deposit, Empty Credits)
+  // are untouched and still render as a single aggregate row as before.
+  if (othersCat && r.key === othersCat.key && othersEntries.length > 0) {
+    return othersEntries.map((entry, i) => (
+      <tr key={`others-${entry.id || i}`}>
+        <td style={td}>{i === 0 ? r.label : ""}</td>
+        <td style={{ ...td, color: "var(--mut)", fontStyle: entry.notes ? "normal" : "italic" }}>
+          {entry.notes || "—"}
+        </td>
+        <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
+          {fmt(entry.direction === "in" ? Number(entry.amount) || 0 : -(Number(entry.amount) || 0))}
+        </td>
+      </tr>
+    ));
+  }
+  return (
+    <tr key={r.key}>
+      <td style={td}>{r.label}</td>
+      <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
+      <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
+    </tr>
+  );
+})}
+              
+              {/* AFTER */}
               <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
-                <td style={{ ...td, fontWeight: 700 }}>Total Other Credit Outstanding</td>
-                <td style={td}></td>
-                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>-Rs.{fmt(otherCreditsTotal)}</td>
+              <td style={{ ...td, fontWeight: 700 }}>Total Other Credit Outstanding</td>
+              <td style={td}></td>
+              <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>Rs.{fmt(Math.abs(otherCreditsTotal))}</td>
               </tr>
             </tbody>
           </table>

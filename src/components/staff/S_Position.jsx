@@ -50,11 +50,12 @@ export default function S_Position({ outlet, toast_ }) {
     : group === "other_credit" ? OTHER_CREDIT_CATS
     : POSITION_CATEGORIES[group];
 
-  const blank = {
+  // AFTER
+const blank = {
     date: today(), categoryGroup: "other_credit",
     category: OTHER_CREDIT_CATS[0]?.key || "",
-    direction: "in", amount: "", notes: "",
-  };
+    amount: "", notes: "",
+};
   const [form, setForm] = useState(blank);
   const [saving, setSaving] = useState(false);
     function set(k, v) {
@@ -65,7 +66,8 @@ export default function S_Position({ outlet, toast_ }) {
       return next;
     });
   }
-  async function save() {
+  // AFTER
+async function save() {
     if (saving) return;
     if (!form.amount || parseFloat(form.amount) <= 0) { toast_?.("Enter valid amount", "err"); return; }
     setSaving(true);
@@ -73,15 +75,15 @@ export default function S_Position({ outlet, toast_ }) {
       date: form.date,
       categoryGroup: form.categoryGroup,
       category: form.category,
-      direction: form.direction,
+      direction: "in", // Group already determines +/- in Net Position (see Stock Summary), so every entry is a straightforward increase to its category running balance.
       amount: parseFloat(form.amount),
       notes: form.notes,
     });
     toast_?.("Entry saved ✓");
-    setForm(f => ({ ...blank, categoryGroup: f.categoryGroup, category: f.category, direction: f.direction }));
+    setForm(f => ({ ...blank, categoryGroup: f.categoryGroup, category: f.category }));
     await reload();
     setSaving(false);
-  }
+}
   async function remove(id) {
     if (!window.confirm("Delete this entry?")) return;
     await deletePositionEntry(id);
@@ -110,29 +112,24 @@ export default function S_Position({ outlet, toast_ }) {
               <label>Date *</label>
               <input type="date" value={form.date} onChange={e => set("date", e.target.value)} />
             </div>
-            <div className="ff">
-              <label>Group *</label>
-              <select value={form.categoryGroup} onChange={e => set("categoryGroup", e.target.value)}>
-                {Object.keys(GROUP_LABELS).map(g => <option key={g} value={g}>{GROUP_LABELS[g]}</option>)}
+            {/* AFTER — Direction block removed, Category block restored */}
+           <div className="ff">
+             <label>Group *</label>
+             <select value={form.categoryGroup} onChange={e => set("categoryGroup", e.target.value)}>
+             {Object.keys(GROUP_LABELS).map(g => <option key={g} value={g}>{GROUP_LABELS[g]}</option>)}
               </select>
-            </div>
+             </div>
+
               <div className="ff">
               <label>Category *</label>
-              <select value={form.category} onChange={e => set("category", e.target.value)}>
-                {categoryOptions(form.categoryGroup).map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
-              </select>
-            </div>
+             <select value={form.category} onChange={e => set("category", e.target.value)}>
+             {categoryOptions(form.categoryGroup).map(c => <option key={c.key} value={c.key}>{c.label}</option>)}
+             </select>
+             </div>
             <div className="ff">
-              <label>Direction *</label>
-              <select value={form.direction} onChange={e => set("direction", e.target.value)}>
-                <option value="in">Increase balance</option>
-                <option value="out">Decrease / recover balance</option>
-              </select>
-            </div>
-            <div className="ff">
-              <label>Amount *</label>
-              <input type="number" step="0.01" placeholder="0.00" value={form.amount} onChange={e => set("amount", e.target.value)} />
-            </div>
+           <label>Amount *</label>
+             <input type="number" step="0.01" placeholder="0.00" value={form.amount} onChange={e => set("amount", e.target.value)} />
+              </div>
             <div className="ff" style={{ minWidth: 220 }}>
               <label>Notes</label>
               <input placeholder="Optional note" value={form.notes} onChange={e => set("notes", e.target.value)} />
@@ -157,15 +154,15 @@ export default function S_Position({ outlet, toast_ }) {
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
+             {/* AFTER */}
               <tr>
-                <th style={{ ...th, textAlign: "left" }}>Date</th>
-                <th style={{ ...th, textAlign: "left" }}>Group</th>
-                <th style={{ ...th, textAlign: "left" }}>Category</th>
+              <th style={{ ...th, textAlign: "left" }}>Date</th>
+              <th style={{ ...th, textAlign: "left" }}>Group</th>
+               <th style={{ ...th, textAlign: "left" }}>Category</th>
                 <th style={{ ...th, textAlign: "left" }}>Notes</th>
-                <th style={{ ...th, textAlign: "right" }}>Increase</th>
-                <th style={{ ...th, textAlign: "right" }}>Decrease</th>
+                <th style={{ ...th, textAlign: "right" }}>Amount</th>
                 <th style={th}></th>
-              </tr>
+                </tr>
             </thead>
             <tbody>
               {loading && <tr><td colSpan={7} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
@@ -178,8 +175,8 @@ export default function S_Position({ outlet, toast_ }) {
                   <td style={td}>{GROUP_LABELS[e.category_group] || e.category_group}</td>
                   <td style={td}>{label(e.category_group, e.category)}</td>
                   <td style={{ ...td, color: "var(--mut)" }}>{e.notes || "—"}</td>
-                  <td style={{ ...td, textAlign: "right" }}>{e.direction === "in" ? fmt(e.amount) : ""}</td>
-                  <td style={{ ...td, textAlign: "right" }}>{e.direction === "out" ? fmt(e.amount) : ""}</td>
+                  {/* AFTER */}
+                  <td style={{ ...td, textAlign: "right" }}>{fmt(e.amount)}</td>
                   <td style={{ ...td, textAlign: "center" }}>
                     <button className="btn btnsm no-print" title="Delete" style={{ color: "var(--red)" }} onClick={() => remove(e.id)}>{I.trash}</button>
                   </td>
