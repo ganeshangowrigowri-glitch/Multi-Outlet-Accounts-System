@@ -848,7 +848,7 @@ const [entries, setEntries] = useState([]);
           No bank accounts assigned to this outlet yet — ask your admin to add one in Bank Master.
         </div>
       ) : (
-        <div className="ledger-print-zone">
+          <div className="ledger-print-zone">
           <div className="ledger-print-header">
             <h1>Bank Ledger</h1>
             <p>{outlet}</p>
