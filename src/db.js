@@ -304,14 +304,14 @@ export const getOutletItemFlags = async (outlet, isEmpty = false) => {
   return map;
 };
 
+
 export const setOutletItemHidden = async (outlet, itemKey, isEmpty, hidden) => {
   const { error } = await supabase.from("outlet_item_flags").upsert({
     outlet_id: outlet, item_key: itemKey, is_empty: isEmpty,
     hidden, updated_at: new Date().toISOString(),
   }, { onConflict: "outlet_id,item_key,is_empty" });
-  if (error) console.error("setOutletItemHidden:", error);
+  if (error) { console.error("setOutletItemHidden:", error); throw error; }
 };
-
 export const getOutletPriceHistory = async (outlet, isEmpty = false) => {
   const { data, error } = await supabase
     .from("outlet_price_history").select("item_key,effective_date,unit_cost,selling_price")
@@ -330,13 +330,14 @@ export const getOutletPriceHistory = async (outlet, isEmpty = false) => {
   return map;
 };
 
+
 export const upsertOutletPrice = async (outlet, itemKey, isEmpty, effectiveDate, unitCost, sellingPrice) => {
   const { error } = await supabase.from("outlet_price_history").upsert({
     outlet_id: outlet, item_key: itemKey, is_empty: isEmpty,
     effective_date: effectiveDate, unit_cost: unitCost, selling_price: sellingPrice,
     updated_at: new Date().toISOString(),
   }, { onConflict: "outlet_id,item_key,is_empty,effective_date" });
-  if (error) console.error("upsertOutletPrice:", error);
+  if (error) { console.error("upsertOutletPrice:", error); throw error; }
 };
 
 export const deleteOutletPriceOverride = async (outlet, itemKey, isEmpty) => {
@@ -346,6 +347,28 @@ export const deleteOutletPriceOverride = async (outlet, itemKey, isEmpty) => {
   const { error: e2 } = await supabase.from("outlet_item_flags").delete()
     .eq("outlet_id", outlet).eq("item_key", itemKey).eq("is_empty", isEmpty);
   if (e2) console.error("deleteOutletPriceOverride (flags):", e2);
+};
+
+// ─── PRICE HISTORY TAB — Stock field only (Tab 3, staff Stock/Inventory) ───
+// Isolated table: this Stock value is used ONLY for the Price History
+// MARGIN × STOCK = VALUE calculation. It never touches outlet_inventory,
+// daily_sale, opening/closing stock, purchases, or any other stock figure.
+export const getPriceHistoryStock = async (outlet) => {
+  const { data, error } = await supabase
+    .from("price_history_stock").select("item_key,effective_date,stock")
+    .eq("outlet_id", outlet);
+  if (error) { console.error("getPriceHistoryStock:", error); return {}; }
+  const map = {};
+  (data || []).forEach(r => { map[`${r.item_key}__${r.effective_date}`] = Number(r.stock); });
+  return map;
+};
+
+export const upsertPriceHistoryStock = async (outlet, itemKey, effectiveDate, stock) => {
+  const { error } = await supabase.from("price_history_stock").upsert({
+    outlet_id: outlet, item_key: itemKey, effective_date: effectiveDate,
+    stock, updated_at: new Date().toISOString(),
+  }, { onConflict: "outlet_id,item_key,effective_date" });
+  if (error) { console.error("upsertPriceHistoryStock:", error); throw error; }
 };
  
 // ─── SALES ──────────────────────────────────────────────────
@@ -1523,29 +1546,70 @@ export async function setSupplierBF(supplierId, outlet = "ALL", date, amount, pe
 export async function getSupplierDiff(supplierId, outlet = "ALL", period = null) {
   const { data, error } = await supabase
     .from("supplier_diff")
-    .select("amount_diff, payment_diff, period")
+    .select("amount_diff, payment_diff, apply_discount, period")
     .eq("supplier_id", supplierId)
     .eq("outlet", outlet)
     .eq("period", period)
     .maybeSingle();
   if (error) { console.error("getSupplierDiff error:", error); return null; }
   if (!data) return null;
-  return { amountDiff: Number(data.amount_diff) || 0, paymentDiff: Number(data.payment_diff) || 0, period: data.period };
+  return {
+    amountDiff: Number(data.amount_diff) || 0,
+    paymentDiff: Number(data.payment_diff) || 0,
+    // null/undefined means "never saved for this outlet+supplier+month" —
+    // callers use this to fall back to the default-supplier-list rule.
+    applyDiscount: data.apply_discount === null || data.apply_discount === undefined ? null : !!data.apply_discount,
+    period: data.period,
+  };
 }
 
-export async function setSupplierDiff(supplierId, outlet = "ALL", period = null, amountDiff, paymentDiff) {
+export async function setSupplierDiff(supplierId, outlet = "ALL", period = null, amountDiff, paymentDiff, applyDiscount) {
+  const payload = {
+    supplier_id: supplierId,
+    outlet,
+    period,
+    amount_diff: Number(amountDiff) || 0,
+    payment_diff: Number(paymentDiff) || 0,
+    updated_at: new Date().toISOString(),
+  };
+  // Only include apply_discount in the write when the caller actually
+  // passed something — so existing callers that still call this with
+  // just (supplierId, outlet, period, amountDiff, paymentDiff) behave
+  // exactly as before and never blank out a previously saved value.
+  if (applyDiscount !== undefined) payload.apply_discount = !!applyDiscount;
+
   const { data, error } = await supabase
     .from("supplier_diff")
-    .upsert({
-      supplier_id: supplierId,
-      outlet,
-      period,
-      amount_diff: Number(amountDiff) || 0,
-      payment_diff: Number(paymentDiff) || 0,
-      updated_at: new Date().toISOString(),
-    }, { onConflict: "supplier_id,outlet,period" })
+    .upsert(payload, { onConflict: "supplier_id,outlet,period" })
     .select()
     .maybeSingle();
   if (error) { console.error("setSupplierDiff error:", error); return null; }
-  return data ? { amountDiff: Number(data.amount_diff) || 0, paymentDiff: Number(data.payment_diff) || 0, period: data.period } : null;
+  return data ? {
+    amountDiff: Number(data.amount_diff) || 0,
+    paymentDiff: Number(data.payment_diff) || 0,
+    applyDiscount: data.apply_discount === null || data.apply_discount === undefined ? null : !!data.apply_discount,
+    period: data.period,
+  } : null;
+}
+// NEW — Owners' Capital, scoped per outlet + month (mirrors getSupplierBF/setSupplierBF)
+export async function getOwnersCapital(outlet, month) {
+  const { data, error } = await supabase
+    .from("owners_capital")
+    .select("*")
+    .eq("outlet_id", outlet)
+    .eq("month", month)
+    .maybeSingle();
+  if (error || !data) return null;
+  return { date: data.date, amount: Number(data.amount) || 0 };
+}
+
+export async function setOwnersCapital(outlet, date, amount, month) {
+  const payload = { outlet_id: outlet, month, date, amount: parseFloat(amount) || 0 };
+  const { data, error } = await supabase
+    .from("owners_capital")
+    .upsert(payload, { onConflict: "outlet_id,month" })
+    .select()
+    .maybeSingle();
+  if (error) { console.error("setOwnersCapital failed:", error); return null; }
+  return { date: data.date, amount: Number(data.amount) || 0 };
 }

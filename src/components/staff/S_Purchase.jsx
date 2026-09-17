@@ -1,48 +1,44 @@
 // src/components/staff/S_Purchase.jsx
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { fmt, oKey, today } from "../../utils/helpers";
 import { uid } from "../../utils/helpers";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SUPPLIERS_LIST, COA_DEF } from "../../data/seeds";
-import { loadEmptyFromStorage } from "../admin/InventoryAdmin";
-import { outletInvKey } from "../admin/InventoryAdmin";
+import { loadEmptyFromStorage, resolveOutletPrice, loadOutletOverridesFromDB } from "../admin/InventoryAdmin";
 import {
   addPurchase, addAPInvoice, addGLEntry,
   addCashEntry, addTransfer, addAREntry, addReturn,
   getCOA, getInventoryMaster, getSuppliers, getEmptyInventoryMaster,
 } from "../../db";
-// ── Helper: apply outlet-specific price overrides (same logic as Daily Sale) ──
-function applyOutletOverrides(masterItems, outlet) {
-  const overrides = (() => {
-    try {
-      return JSON.parse(localStorage.getItem(outletInvKey(outlet)) || "{}");
-    } catch { return {}; }
-  })();
-
+// ── Helper: apply outlet-specific price overrides — SAME Supabase-backed,
+// date-effective logic used by Admin (Tab 3/4) and the Daily Sale page ──
+function applyOutletOverrides(masterItems, overridesMap, dateStr) {
   return masterItems
     .filter(item => {
       const ovKey = `${item.code}__${item.supplier}`;
-      return item.type !== "EMP" && !overrides[ovKey]?.hidden;
+      return item.type !== "EMP" && !overridesMap[ovKey]?.hidden;
     })
     .map(item => {
       const ovKey = `${item.code}__${item.supplier}`;
-      const ov = overrides[ovKey];
-      return {
-        ...item,
-        unitCost:     ov?.unitCost     !== undefined ? ov.unitCost     : item.unitCost,
-        sellingPrice: ov?.sellingPrice !== undefined ? ov.sellingPrice : item.sellingPrice,
-      };
+      const ov = overridesMap[ovKey];
+      const { unitCost, sellingPrice } = resolveOutletPrice(ov, dateStr, item.unitCost, item.sellingPrice);
+      return { ...item, unitCost, sellingPrice };
     });
 }
 
 export default function S_Purchase({ outlet, user, toast_ }) {
 
   // ── Load from Supabase (inv_main & COA) but keep emptyInv & extra suppliers from localStorage ──
-  const [inv,            setInv]     = useState(SEED_INVENTORY);
+  // masterInv/overridesMap are the raw, date-independent inputs. `inv` (below)
+  // is derived from them for whichever Purchase Date is currently selected.
+  const [masterInv,      setMasterInv] = useState(SEED_INVENTORY);
+  const [overridesMap,   setOverridesMap] = useState({});
   const [emptyInvState,  setEmptyInv] = useState([]);
   const [allCOA,         setCOA]     = useState(COA_DEF);
   const [suppliersReady, setReady]   = useState(false);
   const [saving, setSaving] = useState(false);
+  // Moved up (was declared further below) — price resolution needs it now.
+  const [date,       setDate]       = useState(today());
 
   // AFTER
 const SUP_ORDER = [
@@ -53,8 +49,11 @@ const SUP_ORDER = [
   "2019-BAG","2020-SODA","2021-GOLD LEAF","2022-BITE","2023-KASTHURI W/S",
 ];
 
-useEffect(() => {
-  getInventoryMaster().then(data => {
+const loadMasterAndOverrides = () => {
+  Promise.all([
+    getInventoryMaster(),
+    loadOutletOverridesFromDB(outlet, false),
+  ]).then(([data, ovMap]) => {
     if (data.length) {
       const sorted = [...data.filter(i => i.type !== "EMP")].sort((a, b) => {
         const oi = SUP_ORDER.indexOf(a.supplier);
@@ -65,19 +64,37 @@ useEffect(() => {
         const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
         return numA - numB;
       });
-      // ✅ Apply outlet-specific price overrides — same logic as Daily Sale
-      const withOutletPrices = applyOutletOverrides(sorted, outlet);
-      setInv(withOutletPrices);
+      setMasterInv(sorted);
     }
+    setOverridesMap(ovMap);
   });
+};
+
+useEffect(() => {
+  loadMasterAndOverrides();
   getEmptyInventoryMaster().then(data => {
     if (data && data.length) setEmptyInv(data);
     else setEmptyInv(loadEmptyFromStorage());
   });
   getCOA().then(data => { if (data.length) setCOA(data); });
   setReady(true);
-}, []);
+}, [outlet]);
 
+// Refresh outlet prices when the staff returns to this tab, so an Admin
+// price change made while this page was open is picked up without a reload.
+useEffect(() => {
+  window.addEventListener("focus", loadMasterAndOverrides);
+  return () => window.removeEventListener("focus", loadMasterAndOverrides);
+}, [outlet]);
+
+// ✅ Resolve outlet-specific prices for the PURCHASE DATE SELECTED ON THIS
+// PAGE (the Date field below), not always today — so an old purchase date
+// shows the price that was effective on that date, using the SAME
+// resolveOutletPrice/effective-date logic Staff Inventory already uses.
+const inv = useMemo(
+  () => applyOutletOverrides(masterInv, overridesMap, date),
+  [masterInv, overridesMap, date]
+);
     const emptyInv = emptyInvState.length > 0 ? emptyInvState : loadEmptyFromStorage();
   const extraSuppliers = (() => { try { return JSON.parse(localStorage.getItem("extra_suppliers") || "[]"); } catch { return []; } })();
   const extraSupIds    = extraSuppliers.map(s => s.id);
@@ -88,7 +105,6 @@ useEffect(() => {
   ];
 
   const [subTab,     setSubTab]     = useState("received");
-  const [date,       setDate]       = useState(today());
   const [supId,      setSupId]      = useState(mergedSuppliers[0]?.id || "");
   const [invNo,      setInvNo]      = useState("");
   const [lateCharge, setLateCharge] = useState("");

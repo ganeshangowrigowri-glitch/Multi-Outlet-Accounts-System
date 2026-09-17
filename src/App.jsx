@@ -565,7 +565,7 @@ function StaffPortal({ user, onLogout }) {
 
           {page==="inv" && (
             <div style={{display:"flex",alignItems:"stretch",height:"100%",gap:0}}>
-              {[["daily","Daily Sale"],["status","Current Status"]].map(([id,lbl])=>(
+               {[["daily","Daily Sale"],["status","Current Status"],["priceHistory","💰 Price History"]].map(([id,lbl])=>(
                 <button key={id} onClick={()=>setInvSubTab(id)}
                   style={{height:"100%",padding:"0 14px",fontSize:12,fontWeight:600,background:"transparent",color:invSubTab===id?"var(--gld,#f59e0b)":"var(--mut)",border:"none",borderBottom:invSubTab===id?"2px solid var(--gld,#f59e0b)":"2px solid transparent",cursor:"pointer",whiteSpace:"nowrap",transition:"color .15s,border-color .15s"}}
                 >{lbl}</button>

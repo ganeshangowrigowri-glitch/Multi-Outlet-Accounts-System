@@ -17,7 +17,7 @@ if (!url || !serviceKey) {
 const supabase = createClient(url, serviceKey, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
-node scripts/check-auth-user.mjs Maheshi 'Jq6wLb3Ry'
+
 async function main() {
   const email = `${username.toLowerCase()}@internal.myaccounts.local`;
   const { data: list, error: listErr } = await supabase.auth.admin.listUsers();

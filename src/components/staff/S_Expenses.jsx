@@ -280,7 +280,7 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             <div className="ff">
               <label>Payment Method</label>
               <select value={payMethod} onChange={e => setPayMethod(e.target.value)}>
-                {["Cash", "Bank", "Visa Card", "Amex Card"].map(m => <option key={m}>{m}</option>)}
+                {["Cash", "Bank", "Visa Card", "Amex Card","Pending"].map(m => <option key={m}>{m}</option>)}
               </select>
             </div>
             <div className="ff full">
@@ -336,6 +336,11 @@ export default function S_Expenses({ outlet, user, toast_ }) {
               ⚠ {selectedCard ? <>Will deduct from <strong>{selectedCard.bank} — {selectedCard.account_no || selectedCard.accountNo}</strong> and appear on the Debit side of the Card Settlement Ledger.</> : `Select a ${payMethod} account — the expense will deduct from that card's Settlement Ledger.`}
             </div>
           )}
+          {payMethod === "Pending" && (
+          <div className="nbox nb-a" style={{ marginBottom: 10 }}>
+          ℹ Pending expenses are recorded for reporting only — no Cash, Bank, Visa, or Amex account will be deducted.
+          </div>
+          )}
 
           <button className="btn btng" onClick={submit}>{I.check} Save Expense</button>
         </div>
@@ -359,34 +364,6 @@ export default function S_Expenses({ outlet, user, toast_ }) {
         </div>
       )}
 
-      {/* ── Expense History ── */}
-      <div className="card">
-        <div className="chd">
-          <h3>Expense History</h3>
-          <p>{records.length} entries</p>
-        </div>
-        <table className="tbl">
-          <thead>
-            <tr>
-              <th>Date</th><th>Account</th><th>Description</th><th>Method</th><th className="rt">Amount</th>
-            </tr>
-          </thead>
-          <tbody>
-            {records.length === 0 && (
-              <tr><td colSpan={5}><div className="empty">No expenses yet.</div></td></tr>
-            )}
-            {records.slice(0, 25).map(r => (
-              <tr key={r.id}>
-                <td className="mono">{r.date}</td>
-                 <td style={{ fontSize: 11 }}>{accounts.find(a => a.id === r.account_id)?.name || r.account_id}</td>
-                 <td style={{ fontSize: 11, color: "var(--mut)" }}>{r.description || "—"}</td>
-                 <td><span className={`badge ${r.paid_via === "Cash" ? "ba" : "bb"}`}>{r.paid_via}</span></td>
-                <td className="rt mono cr bold">Rs.{fmt(r.amount)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
  
   {/* ── Other Cash Payments / Personal Drawings ── */}
       <div className="card">

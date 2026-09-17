@@ -6,6 +6,7 @@ import { addSale, deleteSaleForDate, addCashEntry,deleteCashEntryForDate, delete
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
 import { resolveOutletPrice, loadOutletOverridesFromDB } from "../admin/InventoryAdmin";
+import S_PriceHistory from "./S_PriceHistory";
 const EMPTY_PURCHASE_SUP_ID = "EMPTY_PURCHASE"; // adjust to match your actual Supabase ID
 
 const MAIN_EMPTY_SUP_IDS = new Set([
@@ -602,7 +603,7 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       };
     }));
   })();
-}, [outlet, mainDate, masterInv, dbPurchases, dbTransfers, dbReturns]); // eslint-disable-line
+}, [outlet, mainDate, masterInv, outletOverridesMain, dbPurchases, dbTransfers, dbReturns]); // eslint-disable-line
 
 useEffect(() => {
   if (skipNextEmpReloadRef.current) {
@@ -785,7 +786,7 @@ const pQ = {}, ipQ = {};
       })
     );
   })();
-}, [outlet, empDate, dbPurchases, masterInv, emptyMaster]); // eslint-disable-line
+}, [outlet, empDate, dbPurchases, masterInv, emptyMaster, outletOverridesEmp]); // eslint-disable-line
 
   
 
@@ -1948,6 +1949,14 @@ if (salesInRange.length > 0) {
       )}
     </table>
   </div>
+)}
+{/* ════════════════ PRICE HISTORY (Tab 3) ════════════════ */}
+{subTab === "priceHistory" && (
+  <S_PriceHistory
+    outlet={outlet}
+    masterInv={masterInv}
+    outletOverridesMain={outletOverridesMain}
+  />
 )}
  </div>
   );

@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import { I } from "../utils/icons";
+import { printFull, printA4 } from "../utils/printMode";
 import { supabase } from "../supabase";
 import { OUTLETS, SUPPLIERS_LIST } from "../data/seeds";
 import { getOutletInventory } from "./staff/S_Inventory";
@@ -34,6 +35,8 @@ import {
   setSupplierBF, 
   getSupplierDiff,
   setSupplierDiff, 
+   getOwnersCapital,
+   setOwnersCapital,
    getPositionLedger,
    POSITION_CATEGORIES, 
    getCrateLedger,
@@ -77,6 +80,16 @@ const monthEnd = m => {
   const [y, mo] = m.split("-").map(Number);
   const lastDay = new Date(y, mo, 0).getDate();
   return `${m}-${String(lastDay).padStart(2, "0")}`;
+};
+// The YYYY-MM string for the calendar month immediately before `m` — used
+// ONLY to look up the previous month whose actual closing Balance C/D
+// becomes this month's automatic B/F (see SupplierCreditLedger's
+// autoBfBalance below). Pure date arithmetic — never today's date.
+const prevMonthStr = m => {
+  if (!m) return null;
+  const [y, mo] = m.split("-").map(Number);
+  const d = new Date(y, mo - 2, 1); // mo is 1-indexed; mo-2 = previous month, 0-indexed
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
 
 // ─── Shared UI Atoms ─────────────────────────────────────────────────────────
@@ -161,12 +174,45 @@ function ReportWrap({ title, outlet, month, children }) {
 function useReportData(outlet, month, outletList) {
   const [data, setData]       = useState(null);
   const [loading, setLoading] = useState(true);
+  // Tracks the most recently STARTED load() call. Because saving a field
+  // now triggers a silent background reload on every blur, two loads can
+  // overlap; whichever network response lands last used to win regardless
+  // of which was started last, so an older (pre-edit) snapshot could
+  // overwrite a newer one and make a just-typed value seem to vanish a
+  // moment later. Only the response matching the latest requestId is
+  // applied — everything else is discarded.
+  const loadIdRef = useRef(0);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // Empty Loan Register edits saved THIS session, keyed by row key (e.g.
+  // "CRATE::plastic_beer") -> { field: value }. Re-applied on top of
+  // EVERY freshly-fetched emptyLoanRows below (see load()). This lives
+  // here in the parent hook, not inside EmptyLoanRegister's own state, so
+  // it survives that component unmounting/remounting when the person
+  // switches report tabs. Root-cause fix for: an edit (most visibly a
+  // crate's Actual override) appearing to save, then reverting a few
+  // seconds later or after navigating away and back — that happened
+  // because the background read-after-write refresh could return a
+  // snapshot that predated the save actually being visible, and that
+  // stale snapshot became the new source of truth for the whole page
+  // (including Stock Summary's emptyStockVal). Cleared only when
+  // outlet/month genuinely changes — never by the silent background sync.
+  const pendingEmptyLoanEditsRef = useRef({});
+  useEffect(() => { pendingEmptyLoanEditsRef.current = {}; }, [outlet, month]);
+
+  const recordEmptyLoanEdit = useCallback((rowKey, field, value) => {
+    pendingEmptyLoanEditsRef.current = {
+      ...pendingEmptyLoanEditsRef.current,
+      [rowKey]: { ...(pendingEmptyLoanEditsRef.current[rowKey] || {}), [field]: value },
+    };
+  }, []);
+
+  const load = useCallback(async (opts = {}) => {
+    const { silent = false } = opts;
+    const requestId = ++loadIdRef.current;
+    if (!silent) setLoading(true);
     try {
       const outlets = outlet === "ALL" ? outletList : [outlet];
-      if (!outlets.length) { setLoading(false); return; }
+       if (!outlets.length) { if (requestId === loadIdRef.current) setLoading(false); return; }
 
       const mStart = monthStart(month);
       const mEnd   = monthEnd(month);
@@ -312,7 +358,7 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
         overridesByOutlet[o] = await loadOutletOverridesFromDB(o, false);
       }
 
-            // ── Opening / Purchase / End Stock (Income Statement only) ──
+      // ── Opening / Purchase / End Stock (Income Statement only) ──
       // Per requirement: these three values, and Cost of Sales derived from
       // them, must come from the SAME Current Status figures shown in
       // Stock/Inventory → Current Status (opening qty, total purchase qty,
@@ -552,15 +598,32 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
         if(sol>0) empSoldByName[key]=(empSoldByName[key]||0)+sol*rate;
         if(ret>0) empRetByName[key]=(empRetByName[key]||0)+ret*rate;
       }));
-      const totalDiscPayment=Object.values(discBySup).reduce((a,v)=>a+v,0);
+            const totalDiscPayment=Object.values(discBySup).reduce((a,v)=>a+v,0);
       const totalDiscEmpty=Object.values(emptyDiscBySup).reduce((a,v)=>a+v,0);
       const totalEmpSold=Object.values(empSoldByName).reduce((a,v)=>a+v,0);
       const totalEmpRet=Object.values(empRetByName).reduce((a,v)=>a+v,0);
-      const totalOtherInc=totalDiscPayment+totalDiscEmpty;
+
+      // ── Supplier Credit Ledger 6% Discount & VAT → Income Statement ──
+      // For the selected outlet/month, pull every supplier's 6% Discount
+      // and VAT Discount exactly as Supplier Credit Ledger computes them
+      // (see computeSupplierDiscountVAT), and fold the totals into Other
+      // Income. Read-only against apInvoices — Supplier Credit Ledger's
+      // own screen/state/calculations are completely untouched.
+      const sup6PctDiscBySup = {};
+      const supVatDiscBySup  = {};
+      const supDiscVatPairs = await Promise.all(
+        SUPPLIERS_LIST.map(async s => [s.id, await computeSupplierDiscountVAT(outlet, month, s.id, apInvoices)])
+      );
+      supDiscVatPairs.forEach(([id, { sixPctDis, vatDis }]) => {
+        if (sixPctDis > 0) sup6PctDiscBySup[id] = sixPctDis;
+        if (vatDis > 0) supVatDiscBySup[id] = vatDis;
+      });
+      const totalSup6PctDisc = Object.values(sup6PctDiscBySup).reduce((a, v) => a + v, 0);
+      const totalSupVatDisc  = Object.values(supVatDiscBySup).reduce((a, v) => a + v, 0);
+
+      const totalOtherInc=totalDiscPayment+totalDiscEmpty+totalSup6PctDisc+totalSupVatDisc;
       const totalIncome=grossProfit+totalOtherInc;
       const netProfit=totalIncome-totalExp;
-
-      
  
        // "daysheet" rows (from S_Cash.jsx's "Day Sheet Balance" field) are
       // a manually-entered physical cash count for one date — informational
@@ -691,8 +754,23 @@ Object.keys(cosByItem).forEach(code => {
       // Personal Drawings / Other Cash Payments — Excel's "CASH PAYEMENT"
       // sheet, fed by cash_ledger rows tagged balance_type "drawing" /
       // "other_cash" (entered from S_Expenses.jsx's Other Cash Payments card).
-      const personalDrawings = cashLedgerTxns.reduce((a,r)=> r.balance_type==="drawing" ? a+(Number(r.credit)||0) : a, 0);
+         const personalDrawings = cashLedgerTxns.reduce((a,r)=> r.balance_type==="drawing" ? a+(Number(r.credit)||0) : a, 0);
       const otherCashPayments = cashLedgerTxns.reduce((a,r)=> r.balance_type==="other_cash" ? a+(Number(r.credit)||0) : a, 0);
+
+      // Other Cash Payment breakdown by category (BB CASH/BBB/UBB/DBB/
+      // K.K Loan/UG Discount/Other) — same cashLedgerTxns source as
+      // otherCashPayments above (already month-scoped via inMonth()),
+      // just grouped by description instead of summed into one total.
+      // Sum of this map always equals otherCashPayments — no double count,
+      // no new transaction, no change to how Other Cash Payment is saved.
+      const OCP_CATEGORY_LABELS = ["BB CASH", "BBB", "UBB", "DBB", "MR.KK LOAN", "UG DISCOUNT"];
+      const ocpByCategory = {};
+      cashLedgerTxns.forEach(r => {
+        if (r.balance_type !== "other_cash") return;
+        const desc = (r.description || "").trim().toUpperCase();
+        const label = OCP_CATEGORY_LABELS.find(l => l === desc) || "OTHER";
+        ocpByCategory[label] = (ocpByCategory[label] || 0) + (Number(r.credit) || 0);
+      });
 
       const cashFlowIn=totalDailySaleCash+totalEmpSold;
       const cashFlowOut=totalExp+totalCardSettle+totalEmpRet+bankDeposit+totalReturns+personalDrawings+otherCashPayments;
@@ -711,11 +789,11 @@ Object.keys(cosByItem).forEach(code => {
           const key = `${supplier}::${itemCode}`;
           if(!empItemMeta[key]) empItemMeta[key] = { supplier, code: itemCode, label: e.name || itemCode };
           if(!empDailyData[key]) empDailyData[key]={};
-          if(!empDailyData[key][day]) empDailyData[key][day]={sold:0,return_:0,purchase:0,invPurchase:0,received:0,invIssue:0,issue:0};
+          if(!empDailyData[key][day]) empDailyData[key][day]={sold:0,return_:0,purchase:0,invPurchase:0,received:0,invIssue:0,issue:0,stkSE:0};
           empDailyData[key][day].sold+=parseFloat(e.sold)||0; empDailyData[key][day].return_+=parseFloat(e.return_)||0;
           empDailyData[key][day].purchase+=parseFloat(e.purchase)||0; empDailyData[key][day].invPurchase+=parseFloat(e.invPurchase)||0;
           empDailyData[key][day].received+=parseFloat(e.received)||0; empDailyData[key][day].invIssue+=parseFloat(e.invIssue)||0;
-          empDailyData[key][day].issue+=parseFloat(e.issue)||0;
+          empDailyData[key][day].issue+=parseFloat(e.issue)||0; empDailyData[key][day].stkSE+=parseFloat(e.stkSE)||0;
         });
       });
       // Supplier (parent) → ordered list of item keys (children), preserving
@@ -771,20 +849,31 @@ Object.keys(cosByItem).forEach(code => {
 
       const emptyLoanRows = [];
 
-      // Bottles — one row per Supplier::Code item.
-      Object.keys(empItemMeta).forEach(key => {
+     // Bottles — one row per Supplier::Code item.
+    // PHYSICAL must match the selected month's Empty Bottles last BAL.
+    Object.keys(empItemMeta).forEach(key => {
         const meta = empItemMeta[key];
         let physical = empOpeningByItem[key] || 0;
         let received = 0, issue = 0;
-        Object.values(empDailyData[key] || {}).forEach(dd => {
-          physical += (dd.purchase||0) + (dd.invPurchase||0) + (dd.received||0) + (dd.return_||0)
-                    - (dd.invIssue||0) - (dd.issue||0) - (dd.sold||0);
+      Object.values(empDailyData[key] || {}).forEach(dd => {
+             const stkSE = Number(dd.stkSE || 0);
+            const ex  = stkSE > 0 ? stkSE : 0;
+            const sho = stkSE < 0 ? Math.abs(stkSE) : 0;
+
+            physical += (dd.purchase||0) + (dd.invPurchase||0) + (dd.received||0) + (dd.return_||0)
+            + ex
+            - (dd.invIssue||0) - (dd.issue||0) - (dd.sold||0)
+            - sho;
+
           received += dd.received || 0;
-          issue    += dd.issue    || 0;
-        });
-         const movement = received - issue;
+           issue    += dd.issue    || 0;
+          });
+        const movement = received - issue;
         const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null, details: "" };
-        const loan = bfEntry.bfLoan + movement;
+        // Loan = B/F + Current, where Current (shown in the register's
+        // Current column) is the sign-corrected -movement value
+        // (Loan -> negative, O/I -> positive). Equivalent to bfLoan - movement.
+        const loan = bfEntry.bfLoan - movement;
         const actual = physical + loan;
         const rate = bfEntry.rate !== null && bfEntry.rate !== undefined
        ? bfEntry.rate
@@ -817,7 +906,9 @@ Object.keys(cosByItem).forEach(code => {
           });
          const movement = received - issue;
          const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null, details: "", actualOverride: null };
-         const loan = bfEntry.bfLoan + movement;
+         // Same Loan = B/F + Current rule as bottles, using the Plastic
+         // Crate Ledger's own received/issue movement (unchanged source).
+         const loan = bfEntry.bfLoan - movement;
 // Crates: staff can type the counted Actual directly, overriding
 // the computed Physical+Loan figure. Everything else (Physical,
 // Movement, Loan, Rate, Amount) keeps the same logic as before.
@@ -831,6 +922,29 @@ Object.keys(cosByItem).forEach(code => {
           actualOverride: bfEntry.actualOverride,
           physical, bfLoan: bfEntry.bfLoan, movement, loan, actual, rate, amount: actual * rate,
         });
+      });
+
+          // Re-apply any not-yet-confirmed local edits on top of the freshly
+      // fetched rows (see pendingEmptyLoanEditsRef above), recomputing the
+      // same derived fields (loan/actual/amount) each row was built with —
+      // no new formula, just re-running the existing one with the locally
+      // known-correct inputs instead of whatever the fetch returned.
+      emptyLoanRows.forEach(row => {
+        const pending = pendingEmptyLoanEditsRef.current[row.key];
+        if (!pending) return;
+        if (pending.details !== undefined) row.details = pending.details;
+        if (pending.bfLoan !== undefined) {
+          row.bfLoan = pending.bfLoan;
+          row.loan = row.bfLoan - row.movement;
+        }
+        if (pending.actualOverride !== undefined) {
+          row.actualOverride = pending.actualOverride;
+        }
+        row.actual = (row.kind === "crate" && row.actualOverride !== null && row.actualOverride !== undefined)
+          ? row.actualOverride
+          : row.physical + row.loan;
+        if (pending.rate !== undefined) row.rate = pending.rate;
+        row.amount = row.actual * row.rate;
       });
 
       const emptyLoanStockVal = emptyLoanRows.reduce((a, r) => a + r.amount, 0);
@@ -858,17 +972,20 @@ Object.keys(cosByItem).forEach(code => {
       });
       const totalCapitalIn  = capitalLedger.filter(e => e.direction === "in").reduce((a, e) => a + Number(e.amount || 0), 0);
       const totalCapitalOut = capitalLedger.filter(e => e.direction === "out").reduce((a, e) => a + Number(e.amount || 0), 0);
-     setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS, endStockByCodeIS,endStockOrderIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
+      // Only commit this response if no newer load() has started since —
+     // otherwise an older, slower call would clobber a newer, faster one.
+     if (requestId !== loadIdRef.current) return;
+         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS, endStockByCodeIS,endStockOrderIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
-      setLoading(false);
+      if (requestId === loadIdRef.current && !silent) setLoading(false);
     }
   }, [outlet, month, outletList]); // eslint-disable-line
 
-  useEffect(() => { load(); }, [load]);
+   useEffect(() => { load(); }, [load]);
 
-  return { data, loading, refresh: load };
+  return { data, loading, refresh: load, recordEmptyLoanEdit };
 }
 
 // ══════════════════════════════════════════════════════
@@ -877,12 +994,14 @@ Object.keys(cosByItem).forEach(code => {
 //          → Other Income → Total Income → Expenses → Net Profit
 // ══════════════════════════════════════════════════════
     function IncomeStatement({ d, outlet, month }) {
-  const {
+    const {
     totalSalesAmt, totalReturns, netSalesAmt,
     purBySup,
     transInAmt, transOutAmt,
     discBySup, emptyDiscBySup,
-    totalDiscPayment, totalDiscEmpty, totalOtherInc,
+    totalDiscPayment, totalDiscEmpty,
+    sup6PctDiscBySup = {}, supVatDiscBySup = {}, totalSup6PctDisc = 0, totalSupVatDisc = 0,
+    totalOtherInc,
     expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp,
     // Opening Stock / Purchases / End Stock now come from Current Status
     // (opening qty, total purchase qty, in-hand stock qty × each item's
@@ -971,7 +1090,7 @@ Object.keys(cosByItem).forEach(code => {
         </>
       )}
 
-      {/* Discount Received on Empty */}
+            {/* Discount Received on Empty */}
       {(Object.keys(emptyDiscBySup).length > 0) && (
         <>
           <TR label="Discount Received on Empty" indent={1} />
@@ -979,6 +1098,30 @@ Object.keys(cosByItem).forEach(code => {
             <TR key={sup} label={sup} col2={amt} indent={2} />
           ))}
           <TR label="Total Discount on Empty" val={totalDiscEmpty} bold indent={1} />
+        </>
+      )}
+
+      {/* Supplier Credit Ledger — 6% Discount & VAT (selected month, all suppliers) */}
+      {(Object.keys(sup6PctDiscBySup).length > 0 || Object.keys(supVatDiscBySup).length > 0) && (
+        <>
+          {Object.keys(sup6PctDiscBySup).length > 0 && (
+            <>
+              <TR label="Supplier 6% Discount" indent={1} />
+              {Object.entries(sup6PctDiscBySup).map(([sup, amt]) => (
+                <TR key={`s6-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} 6% Discount`} col2={amt} indent={2} />
+              ))}
+              <TR label="Total Supplier 6% Discount" val={totalSup6PctDisc} bold indent={1} />
+            </>
+          )}
+          {Object.keys(supVatDiscBySup).length > 0 && (
+            <>
+              <TR label="VAT" indent={1} />
+              {Object.entries(supVatDiscBySup).map(([sup, amt]) => (
+                <TR key={`sv-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} VAT`} col2={amt} indent={2} />
+              ))}
+              <TR label="Total VAT" val={totalSupVatDisc} bold indent={1} />
+            </>
+          )}
         </>
       )}
 
@@ -1065,22 +1208,140 @@ function BalanceSheet({ d, outlet, month }) {
 // Per PDF: Owner's Capital + Net Profit - Drawings - Commission = Total Capital
 // ══════════════════════════════════════════════════════
   function CapitalSheet({ d, outlet, month }) {
-  const { netProfit, cashBal, bankBal, endStockVal, coaCapital, capitalByParty = {}, totalCapitalIn = 0, totalCapitalOut = 0 } = d;
-  // Capital accounts from COA 3000-3999 (drawings, commission etc.)
-  // Net Profit flows in from Income Statement
-  const capital = cashBal + bankBal;
+   const {
+    cashBal, bankBal, endStockVal, coaCapital,
+    capitalByParty = {}, totalCapitalIn = 0, totalCapitalOut = 0,
+    personalDrawings = 0, otherCashPayments = 0, ocpByCategory = {},
+    sup6PctDiscBySup = {}, supVatDiscBySup = {},
+  } = d;
+    // NOT d.netProfit — that's computed from the old Daily-Sale-based
+    // stock figures. Income Statement's ACTUAL displayed Net Profit/Loss
+    // is a separate local calculation there, built from the IS-based
+    // (Current Status) stock figures. Reproduce that exact same formula
+    // from the same underlying `d` fields so Capital Sheet's Net
+    // Profit/Loss always equals what Income Statement shows for this
+    // selected month — no duplicate raw-data computation, just the same
+    // combination Income Statement itself uses.
+
+  const costOfSalesIS = (d.openingStockValIS || 0) + (d.totalPurchaseIS || 0) - (d.endStockValIS || 0);
+  const grossProfitIS = (d.netSalesAmt || 0) - costOfSalesIS;
+  const totalIncomeIS = grossProfitIS + (d.totalOtherInc || 0);
+  const netProfit = totalIncomeIS - (d.totalExp || 0);
+
+    const [ownersCapital, setOwnersCapitalState] = useState(0);
+  const [ocDateInput, setOcDateInput] = useState(today());
+  const [ocAmountInput, setOcAmountInput] = useState("");
+  const [ocSaving, setOcSaving] = useState(false);
+  const [ocError, setOcError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getOwnersCapital(outlet, month).then(entry => {
+      if (cancelled) return;
+      setOwnersCapitalState(entry?.amount || 0);
+      setOcDateInput(entry?.date || today());
+      setOcAmountInput(entry?.amount ?? "");
+      setOcError(null);
+    }).catch(err => {
+      if (!cancelled) setOcError("Could not load Owners' Capital: " + err.message);
+    });
+    return () => { cancelled = true; };
+  }, [outlet, month]);
+
+  async function handleSetOwnersCapital() {
+    setOcSaving(true);
+    setOcError(null);
+    const amt = parseFloat(ocAmountInput) || 0;
+    try {
+      const entry = await setOwnersCapital(outlet, ocDateInput, amt, month);
+      if (entry) {
+        setOwnersCapitalState(entry.amount);
+      } else {
+        // Save call returned no row — most likely the owners_capital table
+        // is missing a UNIQUE constraint on (outlet_id, month), which the
+        // upsert's onConflict target requires. Reflect the entered value
+        // in the UI so it isn't silently lost, and surface the failure
+        // instead of pretending it saved.
+        setOwnersCapitalState(amt);
+        setOcError("Could not save Owners' Capital — check that owners_capital has a UNIQUE constraint on (outlet_id, month) and correct permissions.");
+      }
+    } catch (err) {
+      setOwnersCapitalState(amt);
+      setOcError("Save failed: " + err.message);
+    } finally {
+      setOcSaving(false);
+    }
+  }
+
+  // ── UG / IDL Sales Commissions — reuses the SAME sup6PctDiscBySup /
+  // supVatDiscBySup values already computed once in useReportData for the
+  // Income Statement fix (no duplicate calculation) — item 4.
+  const ugCommission  = (sup6PctDiscBySup["2003-UG"]  || 0) + (supVatDiscBySup["2003-UG"]  || 0);
+  const idlCommission = (sup6PctDiscBySup["2004-IDL"] || 0) + (supVatDiscBySup["2004-IDL"] || 0);
+
+  // ── Capital Represented By — Stock Summary's own Net Position Total,
+  // for the selected outlet/month (item 10) ──
+  const [netPositionTotal, setNetPositionTotal] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    computeNetPositionTotal(outlet, month, d).then(v => { if (!cancelled) setNetPositionTotal(v); });
+    return () => { cancelled = true; };
+  }, [outlet, month, d]);
+
   const parties = Object.keys(capitalByParty);
-  const totalCapital = netProfit + totalCapitalIn - totalCapitalOut;
+
+  // Item 5: Owners' Capital + Net Profit/Loss − Personal Drawings − UG − IDL
+  const totalCapitalItem5 = ownersCapital + netProfit - personalDrawings - ugCommission - idlCommission;
+
+  // Item 9: Net Profit/Loss + Contributions − (Partner Drawings TO +
+  // applicable Other Cash Payment drawings — otherCashPayments already IS
+  // that total, month-scoped, from S_Expenses.jsx's Other Cash Payments)
+  const totalDrawingsTO = totalCapitalOut + otherCashPayments;
+  const totalCapitalItem9 = netProfit + totalCapitalIn - totalDrawingsTO;
 
   return (
     <ReportWrap title="Capital Sheet" outlet={outlet} month={month}>
+      {/* ── Owners' Capital entry (month-scoped) ── */}
+      <tr className="no-print">
+        <td colSpan={3} style={{ padding: "10px 12px" }}>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap", padding: "10px 12px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8 }}>
+            <div>
+              <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 }}>Owners' Capital Date</div>
+              <input type="date" value={ocDateInput} onChange={e => setOcDateInput(e.target.value)}
+                style={{ padding: "6px 10px", background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+            </div>
+            <div>
+              <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 }}>Owners' Capital Amount</div>
+              <input type="number" step="0.01" value={ocAmountInput} onChange={e => setOcAmountInput(e.target.value)}
+                placeholder="0.00"
+                style={{ padding: "6px 10px", width: 140, background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+            </div>
+                      <button className="btn btnd btnsm" onClick={handleSetOwnersCapital} disabled={ocSaving}>
+              {ocSaving ? "Saving…" : "Set Owners' Capital"}
+            </button>
+            <span style={{ fontSize: 11, color: "var(--mut)" }}>Applies only to {month || "the selected month"}.</span>
+            {ocError && <span style={{ fontSize: 11, color: "var(--red)" }}>{ocError}</span>}
+          </div>
+        </td>
+      </tr>
+
       <SH>Capital Summary</SH>
-      <TR label="Owner's Capital" col2={0} indent={1} />
-      <TR label=" Net Profit / (Loss)" col2={netProfit} indent={1} />
-      {coaCapital.filter(a => a.id >= "3003").map(a => (
-        <TR key={a.id} label={`(-) ${a.name}`} col2={0} neg indent={1} />
-      ))}
-      <TR label="Total Capital" val={netProfit} bold total />
+      <TR label="Owners' Capital" col2={ownersCapital} indent={1} />
+      <TR label="Net Profit / (Loss)" col2={netProfit} indent={1} />
+      {personalDrawings > 0 && <TR label="(-) Personal Drawings" col2={personalDrawings} neg indent={1} />}
+      {ugCommission > 0 && <TR label="(-) UG Sales Commission" col2={ugCommission} neg indent={1} />}
+      {idlCommission > 0 && <TR label="(-) IDL Sales Commission" col2={idlCommission} neg indent={1} />}
+            {coaCapital
+        .filter(a => a.id >= "3003")
+        // Exclude accounts that duplicate the real, calculated UG/IDL Sales
+        // Commission lines rendered above — those already show the actual
+        // amount; this fallback list is a placeholder-only list for OTHER
+        // 3003+ accounts and shouldn't repeat these two with a hardcoded 0.
+        .filter(a => !/UG Sales Commission/i.test(a.name || "") && !/IDL Sales Commission/i.test(a.name || ""))
+        .map(a => (
+          <TR key={a.id} label={`(-) ${a.name}`} col2={0} neg indent={1} />
+        ))}
+      <TR label="Total Capital" val={totalCapitalItem5} bold total />
 
       <SH>Partner Contributions (BY)</SH>
       {parties.length === 0 && <TR label="No contributions/drawings recorded this period" col2="" indent={1} />}
@@ -1093,15 +1354,15 @@ function BalanceSheet({ d, outlet, month }) {
       {parties.filter(p => capitalByParty[p].out > 0).map(p => (
         <TR key={`out-${p}`} label={`TO ${p}`} col2={capitalByParty[p].out} neg indent={1} />
       ))}
-      <TR label="Total Drawings" val={totalCapitalOut} bold total neg />
+        {Object.entries(ocpByCategory).filter(([, amt]) => amt > 0).map(([label, amt]) => (
+        <TR key={`ocp-${label}`} label={label === "MR.KK LOAN" ? "K.K Loan" : label} col2={amt} neg indent={1} />
+      ))}
+      <TR label="Total Drawings" val={totalDrawingsTO} bold total neg />
 
-      <TR label="Total Capital (Net Profit + Contributions − Drawings)" val={totalCapital} bold total />
+      <TR label="Total Capital (Net Profit + Contributions − Drawings)" val={totalCapitalItem9} bold total />
 
       <SH>Capital Represented By</SH>
-      <TR label="Main Stock Value" col2={endStockVal} indent={1} />
-      <TR label="Cash in Hand"    col2={cashBal}      indent={1} />
-      <TR label="Bank Balance"    col2={bankBal}      indent={1} />
-      <TR label="Total" val={endStockVal + capital} bold total />
+      <TR label="Stock Summary — Net Position Total" val={netPositionTotal ?? 0} bold total />
 
       <tr>
         <td colSpan={3} style={{ padding: "10px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
@@ -1117,12 +1378,12 @@ function BalanceSheet({ d, outlet, month }) {
 // CASH FLOW STATEMENT
 // ══════════════════════════════════════════════════════
   function CashFlowStatement({ d, outlet, month }) {
-    const {
+      const {
     totalDailySaleCash, empSoldByName, empRetByName,
     totalEmpSold, totalEmpRet,
     cashFlowIn, cashFlowOut, netCashFlow,
     bankDeposit, totalCardSettle, totalReturns, totalExp,
-    personalDrawings, otherCashPayments,
+    personalDrawings, otherCashPayments, ocpByCategory = {},
     cashPettyCash, cashCoins, cashPendingBal, cashDiffSigned,
     cashBF, cashBal,
   } = d;
@@ -1146,9 +1407,11 @@ function BalanceSheet({ d, outlet, month }) {
       <TR label="(1) Total Cash Inflows" val={cashFlowIn} bold total />
 
       <SH>Cash Outflows</SH>
-      <TR label="Day Sheet Expenses"     col2={totalExp}           indent={1} />
+            <TR label="Day Sheet Expenses"     col2={totalExp}           indent={1} />
       {personalDrawings > 0 && <TR label="Personal Drawings"    col2={personalDrawings}  indent={1} />}
-      {otherCashPayments > 0 && <TR label="Other Cash Payments" col2={otherCashPayments} indent={1} />}
+      {Object.entries(ocpByCategory).filter(([, amt]) => amt > 0).map(([label, amt]) => (
+        <TR key={`cf-ocp-${label}`} label={label === "MR.KK LOAN" ? "K.K Loan" : label} col2={amt} indent={1} />
+      ))}
       <TR label="Bank Deposit"       col2={bankDeposit}      indent={1} />
       <TR label="Visa Card Deposit"  col2={totalCardSettle}  indent={1} />
       {totalEmpRet > 0 && <TR label="Empty Return" col2={totalEmpRet} indent={1} />}
@@ -1444,11 +1707,11 @@ function SalesSummary({ d, outlet, month }) {
   // ── 7. Render ─────────────────────────────────────────────────────────
   return (
     <div>
-      {/* Print button */}
-      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+            {/* Print button */}
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
+        <button className="btn btnd btnsm" onClick={printA4}>{I.print} Print (A4)</button>
+        <button className="btn btnd btnsm" onClick={printFull}>{I.print} Print (8K)</button>
       </div>
-
       <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
 
         {/* Card header */}
@@ -1610,36 +1873,184 @@ function SalesSummary({ d, outlet, month }) {
 // EXPENSE SUMMARY 
 // ══════════════════════════════════════════════════════
 function ExpenseSummary({ d, outlet, month }) {
-  const { expenses, totalExp, coa } = d;
+  const { expenses, totalExp, coa, cardLedgerAll } = d;
 
   const [methodFilter, setMethodFilter] = useState("All");
   const methods = ["All", ...new Set((expenses || []).map(e => e.paid_via).filter(Boolean))];
-
-  const rows = [...(expenses || [])]
-    .filter(e => methodFilter === "All" || e.paid_via === methodFilter)
-    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-
-  const filteredTotal = methodFilter === "All"
-    ? totalExp
-    : rows.reduce((a, e) => a + (Number(e.amount) || 0), 0);
-
-  const acctName = accId => (coa || []).find(a => a.id === accId)?.name || accId || "—";
+   const acctName = accId => (coa || []).find(a => a.id === accId)?.name || accId || "—";
 
   const mo = month
     ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
     : "All Periods";
+    // Unfiltered — deliberately NOT restricted to active/hidden, because a
+  // card account that was later deactivated or hidden must still resolve
+  // correctly for a PAST month's interest that already happened under it.
+  // Filtering by active/hidden here was the bug: it silently dropped any
+  // card account currently toggled off from ever appearing in this list,
+  // even though its historical card_ledger interest rows are still valid.
+  const [cardAccounts, setCardAccounts] = useState([]);
+  useEffect(() => {
+    let query = supabase.from("bank_accounts").select("*").eq("account_type", "card");
+    if (outlet !== "ALL") query = query.eq("outlet_id", outlet);
+    query.then(({ data }) => setCardAccounts(data || []));
+  }, [outlet]);
 
-  const th = { padding: "8px 12px", fontSize: 9, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--txt)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)" };
-  const td = { padding: "7px 12px", fontSize: 12, borderBottom: "1px solid rgba(63,63,70,.15)" };
+  const cardAccountsById = {};
+  cardAccounts.forEach(c => { cardAccountsById[c.id] = c; });
 
-  return (
+  // Matches the existing "…Card Interest" expense account already set up
+  // in Chart of Accounts, if one exists — falls back to a plain label so
+  // this never breaks on a schema that doesn't have it yet.
+  const findInterestAcc = re => (coa || []).find(a => re.test(a.name || ""));
+  const visaInterestAcc = findInterestAcc(/visa.*card.*interest/i);
+  const amexInterestAcc = findInterestAcc(/amex.*card.*interest/i);
+
+  // Data-driven: start from whichever card_ids actually carry interest in
+  // the month's ledger (the source of truth), THEN resolve each one's
+  // account label — rather than starting from a pre-filtered account list
+  // and hoping every interest-bearing card_id is still in it.
+  //
+  // networkTest also now accepts "Viza" (not just "Visa") — this system's
+  // own S_Card.jsx mirrors the original Excel "VIZA CARD" / "VIZA CARD 2"
+  // sheets, so a card account set up under that legacy spelling in Bank
+  // Master ("VIZA CARD 1", "NTB/VIZA", etc.) was matching neither
+  // /visa/i nor /amex/i and silently disappearing — no row, not even a
+  // zero row — which is exactly the symptom reported.
+  function buildInterestRows(networkTest, interestAccMeta, fallbackLabel) {
+    const byCardId = {};
+    (cardLedgerAll || []).forEach(r => {
+      if (["bf", "pending", "cd_manual", "different"].includes(r.balance_type)) return;
+      if (!(Number(r.interest) > 0)) return;
+      const acc = cardAccountsById[r.card_id];
+      if (!networkTest((acc && acc.bank) || "")) return;
+      if (!byCardId[r.card_id]) byCardId[r.card_id] = { acc, byDay: {}, total: 0 };
+      const day = dayOf(r.date);
+      const amt = Number(r.interest) || 0;
+      byCardId[r.card_id].byDay[day] = (byCardId[r.card_id].byDay[day] || 0) + amt;
+      byCardId[r.card_id].total += amt;
+    });
+    return Object.entries(byCardId).map(([cardId, v]) => {
+      const acctLabel = v.acc
+        ? `${v.acc.bank}${v.acc.account_no || v.acc.accountNo ? ` — ${v.acc.account_no || v.acc.accountNo}` : ""}`
+        : `Card ${cardId}`;
+      return {
+        id: `${interestAccMeta ? interestAccMeta.id : fallbackLabel}_${cardId}`,
+        name: `${interestAccMeta ? interestAccMeta.name : fallbackLabel} (${acctLabel})`,
+        byDay: v.byDay, total: v.total,
+      };
+    });
+  }
+
+  // Only meaningful when no payment-method filter is applied — these rows
+  // aren't tied to a paid_via (Cash/Bank/Visa Card/Amex Card/Pending), so
+  // they only appear in the "All Payment Methods" view.
+  const cardInterestRows = methodFilter === "All"
+    ? [
+        ...buildInterestRows(b => /vi[sz]a/i.test(b), visaInterestAcc, "Visa Card Interest"),
+        ...buildInterestRows(b => /amex/i.test(b), amexInterestAcc, "Amex Card Interest"),
+      ]
+    : [];
+
+  // Safety net: any card_id with interest that matched NEITHER pattern
+  // above (e.g. a bank name spelled some other way entirely) is still
+  // surfaced here instead of vanishing silently a second time — so a
+  // future naming mismatch is visible immediately instead of requiring
+  // another round of debugging.
+  const matchedCardIds = new Set(
+    (cardLedgerAll || [])
+      .filter(r => !["bf","pending","cd_manual","different"].includes(r.balance_type) && Number(r.interest) > 0)
+      .map(r => r.card_id)
+      .filter(id => {
+        const acc = cardAccountsById[id];
+        const bank = (acc && acc.bank) || "";
+        return /vi[sz]a/i.test(bank) || /amex/i.test(bank);
+      })
+  );
+    const unmatchedInterestRows = methodFilter === "All"
+    ? Object.entries(
+        (cardLedgerAll || []).reduce((byCardId, r) => {
+          if (["bf", "pending", "cd_manual", "different"].includes(r.balance_type)) return byCardId;
+          if (!(Number(r.interest) > 0)) return byCardId;
+          if (matchedCardIds.has(r.card_id)) return byCardId;
+          if (!byCardId[r.card_id]) byCardId[r.card_id] = { acc: cardAccountsById[r.card_id], byDay: {}, total: 0 };
+          const day = dayOf(r.date);
+          const amt = Number(r.interest) || 0;
+          byCardId[r.card_id].byDay[day] = (byCardId[r.card_id].byDay[day] || 0) + amt;
+          byCardId[r.card_id].total += amt;
+          return byCardId;
+        }, {})
+      ).map(([cardId, v]) => {
+        const acctLabel = v.acc
+          ? `${v.acc.bank}${v.acc.account_no || v.acc.accountNo ? ` — ${v.acc.account_no || v.acc.accountNo}` : ""}`
+          : `Card ${cardId}`;
+        return {
+          id: `card_interest_other_${cardId}`,
+          name: `Card Interest (${acctLabel})`,
+          byDay: v.byDay, total: v.total,
+        };
+      })
+    : [];
+
+  // ── Pivot: one row per account/description, one column per day (1–31) ──
+  const filteredExpenses = (expenses || [])
+    .filter(e => methodFilter === "All" || e.paid_via === methodFilter);
+
+  const rowsByAcc = {};
+  filteredExpenses.forEach(e => {
+    const aid = e.account_id || e.acc || "Uncategorised";
+    if (!rowsByAcc[aid]) {
+      rowsByAcc[aid] = { id: aid, name: acctName(aid) !== "—" ? acctName(aid) : (e.description || aid), byDay: {}, total: 0 };
+    }
+    const day = dayOf(e.date);
+    const amt = Number(e.amount) || 0;
+    rowsByAcc[aid].byDay[day] = (rowsByAcc[aid].byDay[day] || 0) + amt;
+    rowsByAcc[aid].total += amt;
+  });
+    const rows = [...Object.values(rowsByAcc), ...cardInterestRows, ...unmatchedInterestRows]
+    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+
+  const days = Array.from({ length: 31 }, (_, i) => i + 1);
+  const dayTotal = day => rows.reduce((a, r) => a + (r.byDay[day] || 0), 0);
+  const cardInterestTotal = cardInterestRows.reduce((a, r) => a + r.total, 0)
+    + unmatchedInterestRows.reduce((a, r) => a + r.total, 0);
+  const filteredTotal = methodFilter === "All"
+    ? totalExp + cardInterestTotal
+    : rows.reduce((a, r) => a + r.total, 0);
+  const th = { padding: "6px 7px", fontSize: 9, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", borderRight: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "center", position: "sticky", top: 0, zIndex: 2 };
+  const tdName = { padding: "5px 10px", fontSize: 11.5, fontWeight: 600, color: "var(--txt)", borderBottom: "1px solid rgba(63,63,70,.15)", borderRight: "1px solid var(--bdr)", whiteSpace: "nowrap", minWidth: 180, position: "sticky", left: 0, zIndex: 1, background: "var(--s1)" };
+  const tdCell = (val) => ({
+    padding: "4px 6px", fontSize: 10.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right",
+    borderRight: "1px solid rgba(63,63,70,.2)", borderBottom: "1px solid rgba(63,63,70,.15)",
+    color: val > 0 ? "var(--txt)" : "var(--mut2)", whiteSpace: "nowrap",
+  });
+  const tdTotal = (bold, color) => ({
+    padding: "5px 10px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right",
+    borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400,
+    color: color || "var(--txt)", whiteSpace: "nowrap",
+  });
+
+        return (
     <div>
+      <style>{`
+        .exp-scroll { max-height: 70vh; overflow: auto; }
+        @media print {
+          .exp-scroll { max-height: none !important; overflow: visible !important; }
+          .exp-sticky-head, .exp-sticky-col, .exp-sticky-foot { position: static !important; }
+          .exp-print-table { min-width: 0 !important; width: 100% !important; }
+          .exp-print-table th, .exp-print-table td { padding: 2px 3px !important; }
+        }
+        /* Page size is NOT set here — it's controlled dynamically by
+           printMode.js (printA4 / printFull) based on which Print button
+           is clicked, so this block only ever handles layout, not size. */
+        body:not(.print-full) .exp-print-table { font-size: 8px !important; }
+      `}</style>
       <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <select value={methodFilter} onChange={e => setMethodFilter(e.target.value)}
           style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
           {methods.map(m => <option key={m} value={m}>{m === "All" ? "All Payment Methods" : m}</option>)}
         </select>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+        <button className="btn btnd btnsm" onClick={printA4}>{I.print} Print (A4)</button>
+        <button className="btn btnd btnsm" onClick={printFull}>{I.print} Print (8K)</button>
       </div>
 
       <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
@@ -1650,45 +2061,41 @@ function ExpenseSummary({ d, outlet, month }) {
             {methodFilter !== "All" && <> &nbsp;·&nbsp; {methodFilter} only</>}
           </div>
         </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <colgroup>
-              <col style={{ width: "12%" }} />
-              <col style={{ width: "23%" }} />
-              <col style={{ width: "30%" }} />
-              <col style={{ width: "13%" }} />
-              <col style={{ width: "22%" }} />
-            </colgroup>
+                <div className="exp-scroll" style={{ overflowX: "auto" }}>
+          <table className="exp-print-table" style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 1100 }}>
             <thead>
               <tr>
-                <th style={{ ...th, textAlign: "left" }}>Date</th>
-                <th style={{ ...th, textAlign: "left" }}>Account</th>
-                <th style={{ ...th, textAlign: "left" }}>Description</th>
-                <th style={{ ...th, textAlign: "left" }}>Method</th>
-                <th style={{ ...th, textAlign: "right" }}>Total</th>
+                <th className="exp-sticky-head exp-sticky-col" style={{ ...th, textAlign: "left", minWidth: 200, left: 0, zIndex: 3 }}>Description</th>
+                {days.map(day => <th key={day} className="exp-sticky-head" style={th}>{day}</th>)}
+                <th className="exp-sticky-head" style={{ ...th, textAlign: "right" }}>Total</th>
               </tr>
             </thead>
             <tbody>
               {rows.length === 0 && (
-                <tr><td colSpan={5} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No expenses recorded.</td></tr>
+                <tr><td colSpan={33} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No expenses recorded.</td></tr>
               )}
-              {rows.map((e, i) => (
-                <tr key={e.id || i}>
-                  <td style={{ ...td, fontFamily: "'JetBrains Mono',monospace", color: "var(--mut)" }}>{e.date}</td>
-                  <td style={{ ...td, color: "var(--txt)" }}>{acctName(e.account_id)}</td>
-                  <td style={{ ...td, color: "var(--mut)" }}>{e.description || "—"}</td>
-                  <td style={td}>
-                    <span className={`badge ${e.paid_via === "Cash" ? "ba" : "bb"}`}>{e.paid_via || "—"}</span>
-                  </td>
-                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--red)" }}>Rs.{fmt(e.amount)}</td>
+               {rows.map(r => (
+                <tr key={r.id}>
+                  <td className="exp-sticky-col" style={tdName}>{r.name}</td>
+                  {days.map(day => (
+                    <td key={day} style={tdCell(r.byDay[day] || 0)}>
+                      {r.byDay[day] > 0 ? fmt(r.byDay[day]) : "-"}
+                    </td>
+                  ))}
+                  <td style={tdTotal(true, "var(--red)")}>{fmt(r.total)}</td>
                 </tr>
               ))}
-                 {/* ...table... */}
-              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
-                <td style={{ ...td, fontWeight: 700, borderBottom: "none" }} colSpan={4}>
-                  {methodFilter === "All" ? "Total Expenses" : `Total (${methodFilter})`}
+
+                 <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+                <td className="exp-sticky-foot exp-sticky-col" style={{ ...tdName, fontWeight: 700, borderRight: "1px solid var(--bdr)", bottom: 0, zIndex: 3, background: "var(--s3)" }}>
+                  {methodFilter === "All" ? "Total" : `Total (${methodFilter})`}
                 </td>
-                <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, fontSize: 13, color: "var(--red)", borderBottom: "none" }}>Rs.{fmt(filteredTotal)}</td>
+                {days.map(day => (
+                  <td key={day} className="exp-sticky-foot" style={{ ...tdCell(dayTotal(day)), fontWeight: 700, position: "sticky", bottom: 0, zIndex: 2, background: "var(--s3)" }}>
+                    {dayTotal(day) > 0 ? fmt(dayTotal(day)) : "-"}
+                  </td>
+                ))}
+                <td className="exp-sticky-foot" style={{ ...tdTotal(true, "var(--red)"), position: "sticky", bottom: 0, zIndex: 2, background: "var(--s3)" }}>{fmt(filteredTotal)}</td>
               </tr>
             </tbody>
           </table>
@@ -1697,6 +2104,7 @@ function ExpenseSummary({ d, outlet, month }) {
     </div>
   );
 }
+
 // ══════════════════════════════════════════════════════
 // PURCHASE SUMMARY 
 // ══════════════════════════════════════════════════════
@@ -1879,7 +2287,7 @@ function EmptyBottles({ d, outlet, month }) {
     const label = empItemMeta[itemKey]?.label || itemKey;
     let runBal = empOpeningByItem?.[itemKey] || 0;
 
-    const totals = { purchase: 0, invPurchase: 0, received: 0, return_: 0, invIssue: 0, issue: 0, sold: 0 };
+    const totals = { purchase: 0, invPurchase: 0, received: 0, return_: 0, invIssue: 0, issue: 0, sold: 0, stkSE: 0 };
     Object.values(empDailyData[itemKey] || {}).forEach(dd => {
       totals.purchase    += dd.purchase    || 0;
       totals.invPurchase += dd.invPurchase || 0;
@@ -1888,14 +2296,18 @@ function EmptyBottles({ d, outlet, month }) {
       totals.invIssue    += dd.invIssue    || 0;
       totals.issue       += dd.issue       || 0;
       totals.sold         += dd.sold        || 0;
+      totals.stkSE        += dd.stkSE       || 0;
     });
+    totals.ex    = totals.stkSE > 0 ? totals.stkSE : 0;
+    totals.short = totals.stkSE < 0 ? Math.abs(totals.stkSE) : 0;
     const totalBal = totals.purchase + totals.invPurchase + totals.received + totals.return_
-      - totals.invIssue - totals.issue - totals.sold;
-    const diff = totals.received - totals.issue;
-    const isLoan = diff >= 0;
-    const loanLabel = isLoan ? "Loan / OI" : "Over Paid / OS";
-    const loanColor = isLoan ? "var(--grn)" : "var(--red)";
-
+  + totals.ex - totals.invIssue - totals.issue - totals.sold - totals.short;
+    const diff = totals.received - totals.issue; // Received − Issued
+    // Received > Issued → LOAN (negative value); Received < Issued → O/I (positive value);
+    // Received = Issued → keep existing zero-case label/color.
+    const loanLabel = diff > 0 ? "LOAN" : diff < 0 ? "O/I" : "Loan / OI";
+    const loanColor = diff > 0 ? "var(--red)" : diff < 0 ? "var(--grn)" : "var(--grn)";
+    const loanDisplayVal = -diff;
     return (
       <div style={{ marginBottom: 22 }}>
         {/* Item block header — Supplier · Item name, e.g. "DCSL — DEMP Q" */}
@@ -1918,7 +2330,7 @@ function EmptyBottles({ d, outlet, month }) {
               </tr>
             </thead>
             <tbody>
-              {days.map(day => {
+                            {days.map(day => {
                 const dd  = (empDailyData[itemKey] || {})[day] || {};
                 const pur = dd.purchase    || 0;
                 const ip  = dd.invPurchase || 0;
@@ -1927,8 +2339,11 @@ function EmptyBottles({ d, outlet, month }) {
                 const ii  = dd.invIssue    || 0;
                 const iss = dd.issue       || 0;
                 const sol = dd.sold        || 0;
+                const stkSE = dd.stkSE     || 0;
                 const bf  = runBal;
-                const bal = bf + pur + ip + rec + ret - ii - iss - sol;
+                const ex  = stkSE > 0 ? stkSE : 0;
+                const sho = stkSE < 0 ? Math.abs(stkSE) : 0;
+                const bal = bf + pur + ip + rec + ret + ex - ii - iss - sol - sho;
                 runBal = bal;
 
                 const cell = (col) => {
@@ -1938,9 +2353,11 @@ function EmptyBottles({ d, outlet, month }) {
                   if (col === "IN PUR" && ip   > 0)  val = fmtN(ip);
                   if (col === "REC"    && rec  > 0)  val = fmtN(rec);
                   if (col === "RET"    && ret  > 0)  val = fmtN(ret);
+                  if (col === "EX"     && stkSE > 0) val = fmtN(stkSE);
                   if (col === "IN ISS" && ii   > 0)  val = fmtN(ii);
                   if (col === "ISS"    && iss  > 0)  val = fmtN(iss);
                   if (col === "SOL"    && sol  > 0)  val = fmtN(sol);
+                  if (col === "SHO"    && stkSE < 0) val = fmtN(Math.abs(stkSE));
                   if (col === "BAL")                  val = fmtN(bal);
                   return val;
                 };
@@ -1963,25 +2380,25 @@ function EmptyBottles({ d, outlet, month }) {
               })}
 
               {/* TOTAL row */}
-              <tr style={{ borderTop: "2px solid var(--bdr2)", background: "var(--s3)" }}>
+                <tr style={{ borderTop: "2px solid var(--bdr2)", background: "var(--s3)" }}>
                 <td style={{ ...dayTdStyle, fontWeight: 700, fontSize: 10, color: "var(--txt)" }}>TOTAL</td>
                 <td style={tdStyle(true)} />{/* B/F blank on total, matches prior behavior */}
                 <td style={tdStyle(true)}>{fmtN(totals.purchase)}</td>
                 <td style={tdStyle(true)}>{fmtN(totals.invPurchase)}</td>
                 <td style={tdStyle(true)}>{fmtN(totals.received)}</td>
                 <td style={tdStyle(true)}>{fmtN(totals.return_)}</td>
-                <td style={tdStyle(true)} />{/* EX not tracked, same as before */}
+                <td style={tdStyle(true)}>{totals.ex > 0 ? fmtN(totals.ex) : ""}</td>
                 <td style={tdStyle(true)}>{fmtN(totals.invIssue)}</td>
                 <td style={tdStyle(true)}>{fmtN(totals.issue)}</td>
                 <td style={tdStyle(true, "var(--grn)")}>{fmtN(totals.sold)}</td>
-                <td style={tdStyle(true)} />{/* SHO not tracked, same as before */}
+                <td style={tdStyle(true)}>{totals.short > 0 ? fmtN(totals.short) : ""}</td>
                 <td style={tdStyle(true, "var(--gld2)")}>{fmtN(totalBal)}</td>
               </tr>
 
               {/* Loan / Overpaid row */}
-              <tr style={{ background: "var(--s2)" }}>
+                <tr style={{ background: "var(--s2)" }}>
                 <td colSpan={COLS.length + 1} style={{ ...tdStyle(true, loanColor), textAlign: "left" }}>
-                  RECEIVED {fmtN(totals.received)} &nbsp;·&nbsp; ISSUED {fmtN(totals.issue)} &nbsp;·&nbsp; {loanLabel}: {fmtN(Math.abs(diff))}
+                  RECEIVED {fmtN(totals.received)} &nbsp;·&nbsp; ISSUED {fmtN(totals.issue)} &nbsp;·&nbsp; {loanLabel} {fmtN(loanDisplayVal)}
                 </td>
               </tr>
             </tbody>
@@ -2034,7 +2451,7 @@ function EmptyBottles({ d, outlet, month }) {
 // never drift out of sync with them. The AMOUNT total feeds emptyStockVal
 // used on the Balance Sheet and Stock Summary.
 // ══════════════════════════════════════════════════════════════════════════
-function EmptyLoanRegister({ d, outlet, month, refresh }) {
+function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
   const { emptyLoanRows = [] } = d;
   const editable = outlet !== "ALL";
 
@@ -2049,22 +2466,48 @@ function EmptyLoanRegister({ d, outlet, month, refresh }) {
       if (r.key !== row.key) return r;
       if (isText) return { ...r, details: value };
       if (field === "actualOverride") {
-        const actual = rawValue === "" ? r.physical - r.loan : value;
+        // FIX: was `r.physical - r.loan`, which didn't match the fallback
+        // formula used everywhere else in this file (physical + loan) —
+        // clearing an override showed the wrong figure.
+        const actual = rawValue === "" ? r.physical + r.loan : value;
         return { ...r, actualOverride: rawValue === "" ? null : value, actual, amount: actual * r.rate };
       }
       const bfLoan = field === "bfLoan" ? value : r.bfLoan;
       const rate   = field === "rate"   ? value : r.rate;
-      const loan   = bfLoan + r.movement;
+      // Mirrors the server-side formula: Loan = B/F − movement
+      // (i.e. B/F + Current), so editing B/F inline matches the value
+      // that appears after a refresh/reload.
+      const loan   = bfLoan - r.movement;
       const actual = (r.kind === "crate" && r.actualOverride !== null && r.actualOverride !== undefined)
         ? r.actualOverride : r.physical + loan;
       return { ...r, bfLoan, rate, loan, actual, amount: actual * rate };
     }));
-    setSavingKey(row.key + field);
-    upsertEmptyLoanEntry(outlet, row.key, month, { [field]: isText ? value : (rawValue === "" ? "" : value) })
+       setSavingKey(row.key + field);
+       // Record this edit in the parent hook's pending-edits overlay
+       // (see useReportData) so it's re-applied on top of every future
+       // fetch — including the silent one triggered right below — until
+       // outlet/month changes. This is the actual fix: it no longer
+       // matters whether the background read-after-write returns a stale
+       // snapshot, because that snapshot gets this value stamped back on
+       // top of it before it ever becomes `d`.
+       if (typeof recordEdit === "function") {
+         const overlayValue = isText
+           ? value
+           : (rawValue === "" ? (field === "actualOverride" ? null : 0) : value);
+         recordEdit(row.key, field, overlayValue);
+       }
+       upsertEmptyLoanEntry(outlet, row.key, month, { [field]: isText ? value : (rawValue === "" ? "" : value) })
+      .then(() => {
+        // Pull the freshly-saved value back through the SAME data source
+        // Stock Summary reads (d.emptyLoanRows / d.emptyStockVal). Uses
+        // the silent option so this background sync updates `d` (and
+        // therefore Stock Summary) without flipping the page-level
+        // `loading` flag.
+        if (typeof refresh === "function") refresh({ silent: true });
+      })
       .catch(err => console.error("EmptyLoanRegister save failed:", err))
       .finally(() => setSavingKey(null));
   }
-
   const th = { padding: "6px 9px", fontSize: 9.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
   const td = (bold, color) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, color: color || "var(--txt)", whiteSpace: "nowrap" });
   const inputSt = { width: 84, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" };
@@ -2116,7 +2559,18 @@ function EmptyLoanRegister({ d, outlet, month, refresh }) {
         </td>
 
         <td style={td(false, bfStatus.color)}>{bfStatus.label}</td>
-        <td style={td(false, r.movement >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.movement)}</td>
+          <td style={td(false, r.movement > 0 ? "var(--red)" : r.movement < 0 ? "var(--grn)" : "var(--mut)")}>
+          {(() => {
+            // Reuses the exact same Loan/O-I value Empty Bottle Summary
+            // shows (loanDisplayVal = -diff) for bottles, and the same
+            // received-issue movement sourced from the Plastic Crate
+            // Ledger for crates — no new calculation, just numeric,
+            // sign-only display: Loan -> negative, O/I -> positive.
+            const currentVal = -r.movement;
+            if (currentVal === 0) return "-";
+            return currentVal > 0 ? `+${fmtN(currentVal)}` : fmtN(currentVal);
+          })()}
+        </td>
         <td style={td(true, r.loan >= 0 ? "var(--grn)" : "var(--red)")}>{fmtN(r.loan)}</td>
 
         <td style={td(true, "var(--gld2)")}>
@@ -2508,12 +2962,16 @@ function UGBook({ d, outlet, month }) {
   // ── 9. Render ─────────────────────────────────────────────────────────
   return (
     <div>
-           {/* Print button */}
-      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>
-          {I.print} Print
+    {/* Print button */}
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
+        <button className="btn btnd btnsm" onClick={printA4}>
+          {I.print} Print (A4)
+        </button>
+        <button className="btn btnd btnsm" onClick={printFull}>
+          {I.print} Print (8K)
         </button>
       </div>
+
 
       {/* Manual B/F control — new, isolated section (reuses supplier_bf) */}
       <div className="no-print" style={{ display: "flex", alignItems: "flex-end", gap: 10, marginBottom: 12, flexWrap: "wrap", padding: "10px 12px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8 }}>
@@ -2781,17 +3239,33 @@ async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, a
   const bfBalance        = useManualBF ? manualBF.amount : computedBfBalance;
   const bfEffectiveDate  = useManualBF ? manualBF.date : mStart;
 
-  const rowsAmount = invThisMonth
-    .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
-    .filter(i => !useManualBF || i.date >= bfEffectiveDate)
-    .reduce((a, i) => a + (Number(i.amount) || 0), 0);
-
-  const totalAmount = bfBalance + rowsAmount;
-  const totalPaid = payThisMonth.reduce((a, p) => a + (Number(p.amount) || 0), 0);
-
   const diffEntry      = await getSupplierDiff(supplierId, outlet, month);
   const balanceAmtDiff = diffEntry?.amountDiff  || 0;
   const paymentDiff    = diffEntry?.paymentDiff || 0;
+
+  // Read the EXACT outlet/supplier/month discount choice staff made in
+  // Supplier Credit Ledger (persisted via the same supplier_diff row) —
+  // no more guessing from a hardcoded default list, so this can never
+  // disagree with the Ledger once a value has been saved. Falls back to
+  // the same default-supplier rule only if nothing was ever saved for
+  // this exact outlet+supplier+month.
+  const DEFAULT_DISCOUNT_SUPPLIERS = ["2003-UG", "2004-IDL"];
+  const applyDiscount = (diffEntry?.applyDiscount !== undefined && diffEntry?.applyDiscount !== null)
+    ? !!diffEntry.applyDiscount
+    : DEFAULT_DISCOUNT_SUPPLIERS.some(id => normSup(id) === normSup(supplierId));
+
+  const rowsAmount = invThisMonth
+    .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
+    .filter(i => !useManualBF || i.date >= bfEffectiveDate)
+    .reduce((a, i) => {
+      const amount    = Number(i.amount) || 0;
+      const sixPctDis = applyDiscount ? (amount / 1.18) * 0.06 : 0;
+      const vatDis    = applyDiscount ? (amount * 0.06) - sixPctDis : 0;
+      return a + amount - sixPctDis - vatDis;
+    }, 0);
+
+  const totalAmount = bfBalance + rowsAmount;
+  const totalPaid = payThisMonth.reduce((a, p) => a + (Number(p.amount) || 0), 0);
 
   const totalAmountAdj = totalAmount + balanceAmtDiff;
   const totalPaidAdj   = totalPaid   + paymentDiff;
@@ -2799,8 +3273,106 @@ async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, a
   return totalAmountAdj - totalPaidAdj; // Balance C/D
 }
 
+// Computes ONE supplier's 6% Discount and VAT Discount totals for one
+// outlet+month, using the EXACT same filtering/formula as Supplier
+// Credit Ledger's own per-invoice sixPctDis/vatDis columns (see
+// SupplierCreditLedger's `rows` calculation) — so Income Statement can
+// never disagree with what Supplier Credit Ledger shows for the same
+// supplier/month. Read-only against apInvoices; does not touch or alter
+// any Supplier Credit Ledger state/calculation.
+async function computeSupplierDiscountVAT(outlet, month, supplierId, apInvoices) {
+  const mStart = monthStart(month);
+  const mEnd   = monthEnd(month);
+  const isSupMatch = raw => normSup(raw) === normSup(supplierId);
+
+  const invThisMonth = (apInvoices || []).filter(i => isSupMatch(i.supplier_id || i.supplier));
+
+  const manualBF = await getSupplierBF(supplierId, outlet, month);
+  const useManualBF     = !!manualBF;
+  const bfEffectiveDate = useManualBF ? manualBF.date : mStart;
+
+  const diffEntry = await getSupplierDiff(supplierId, outlet, month);
+  const DEFAULT_DISCOUNT_SUPPLIERS = ["2003-UG", "2004-IDL"];
+  const applyDiscount = (diffEntry?.applyDiscount !== undefined && diffEntry?.applyDiscount !== null)
+    ? !!diffEntry.applyDiscount
+    : DEFAULT_DISCOUNT_SUPPLIERS.some(id => normSup(id) === normSup(supplierId));
+
+  if (!applyDiscount) return { sixPctDis: 0, vatDis: 0 };
+
+  let sixPctDis = 0, vatDis = 0;
+  invThisMonth
+    .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
+    .filter(i => !useManualBF || i.date >= bfEffectiveDate)
+    .forEach(i => {
+      const amount = Number(i.amount) || 0;
+      const six = (amount / 1.18) * 0.06;
+      const vat = (amount * 0.06) - six;
+      sixPctDis += six;
+      vatDis    += vat;
+    });
+
+  return { sixPctDis, vatDis };
+}
+ 
+  // Computes the SAME "Net Position" total Stock Summary shows, for one
+// outlet+month, by calling the exact same underlying functions Stock
+// Summary uses (getBankBF, getCardCD, computeSupplierBalanceCD) — so
+// Capital Sheet's "Capital Represented By" can never disagree with Stock
+// Summary for the same outlet/month. Read-only; does not touch, call, or
+// alter any state inside the StockSummary component itself.
+async function computeNetPositionTotal(outlet, month, d) {
+  const stockVal = d.endStockValIS;
+  let bankTotal = d.bankBal;
+  let cardTotal = 0;
+
+  if (outlet !== "ALL") {
+    const [{ data: bankRows }, { data: cardRows }] = await Promise.all([
+      supabase.from("bank_accounts").select("*")
+        .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+        .neq("account_type", "card"),
+      supabase.from("bank_accounts").select("*")
+        .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+        .eq("account_type", "card"),
+    ]);
+    const excl = ["bf", "bf_monthly", "pending", "cd_manual", "different"];
+    bankTotal = 0;
+    for (const acc of (bankRows || [])) {
+      const bf = await getBankBF(outlet, acc.id);
+      const txns = (d.bankLedger || []).filter(r => r.bank_id === acc.id && !excl.includes(r.balance_type));
+      bankTotal += (Number(bf) || 0) + txns.reduce((a, r) => a + (Number(r.debit) || 0) - (Number(r.credit) || 0), 0);
+    }
+    for (const acc of (cardRows || [])) {
+      cardTotal += Number(await getCardCD(outlet, acc.id, month)) || 0;
+    }
+  }
+
+  const supplierBalances = await Promise.all(
+    SUPPLIERS_LIST.map(s => computeSupplierBalanceCD(outlet, month, s.id, d.apInvoices, d.apPayments))
+  );
+  const totalCredit = supplierBalances.reduce((a, v) => a + v, 0);
+
+  const mStartPos = monthStart(month);
+  const mEndPos = monthEnd(month);
+  const positionUpToMonthEnd = (mStartPos && mEndPos)
+    ? (d.positionLedgerAll || []).filter(r => (r.date || "") >= mStartPos && (r.date || "") <= mEndPos)
+    : (d.positionLedgerAll || []);
+  const categoryBalance = key => positionUpToMonthEnd
+    .filter(r => r.category === key)
+    .reduce((a, r) => a + (r.direction === "in" ? Number(r.amount) || 0 : -(Number(r.amount) || 0)), 0);
+  const EXCLUDED_ASSET_IDS = ["1100", "1400"];
+  const extraAssetsTotal = (d.coa || [])
+    .filter(a => a.id >= "1000" && a.id <= "1499" && !EXCLUDED_ASSET_IDS.includes(a.id))
+    .reduce((a, acc) => a + categoryBalance(acc.id), 0);
+  const otherCreditsTotal = (POSITION_CATEGORIES.other_credit || [])
+    .filter(c => c.key !== "damage" && !/damage/i.test(c.label))
+    .reduce((a, c) => a + categoryBalance(c.key), 0);
+
+  const totalPosition = stockVal + d.emptyStockVal + d.cashBal + bankTotal + cardTotal + extraAssetsTotal;
+  return totalPosition - totalCredit - otherCreditsTotal;
+}
+
    function StockSummary({ d, outlet, month }) {
-  const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [],
+    const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [],
           bankLedger = [], cardLedgerAll = [] } = d;
   // Stock Summary's "Stock" must equal Current Status's Total Physical
   // Stock for the selected period. endStockValIS already replicates that
@@ -2907,13 +3479,16 @@ async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, a
       }))
     : [];
 
-  // Position entries are loaded all-time (see useReportData). Apply the
-  // selected month-end cutoff HERE so every Position balance represents the
-  // as-of-month-end figure: include every entry dated on/before month-end,
-  // exclude anything dated after it. With no month selected, use all rows.
-  const mEndPos = monthEnd(month);
-  const positionUpToMonthEnd = mEndPos
-    ? positionLedgerAll.filter(r => (r.date || "") <= mEndPos)
+   
+  // selected month. This was a cumulative "as of month-end" running total
+  // (<= mEndPos), so a June entry kept reappearing in July, August, etc.
+  // Scoping to the exact month range matches every other Stock Summary
+  // figure (Stock/Bank/Card/Supplier) — formula/logic inside each entry
+  // (category totals, direction in/out) is completely untouched.
+  const mStartPos = monthStart(month);
+  const mEndPos   = monthEnd(month);
+  const positionUpToMonthEnd = mStartPos && mEndPos
+    ? positionLedgerAll.filter(r => (r.date || "") >= mStartPos && (r.date || "") <= mEndPos)
     : positionLedgerAll;
 
   // Running balance per category as of month-end: 'in' raises it, 'out'
@@ -2999,9 +3574,14 @@ const assetOthersEntries = assetOthersCat
     .filter(r => Math.abs(r.balance) > 0.5)
     .sort((a, b) => b.balance - a.balance);
 
-  const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
+    const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
   const totalPosition = stockVal + d.emptyStockVal + d.cashBal + d.bankBal + cardTotal + extraAssetsTotal;
   const netPosition = totalPosition - totalCredit - otherCreditsTotal;
+  // Display-only subtotal for the "Stock + Empty + Bank and Card" UI group —
+  // derived purely from totalPosition/extraAssetsTotal (both already
+  // computed above), so it can never drift from the existing Total Assets
+  // formula. No new calculation, just an existing-value subtraction.
+  const assetsSubtotal1 = totalPosition - extraAssetsTotal;
   // Supplier Stock vs Credit — mirrors the Excel STOCK sheet's "CREDIT"
   // block: per supplier, compares stock value (at cost) currently held
   // from that supplier against the outstanding credit owed to them, and
@@ -3028,10 +3608,11 @@ const assetOthersEntries = assetOthersCat
 
   const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
 
-  return (
+    return (
     <div>
-      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print (Letter)</button>
+        <button className="btn btnd btnsm" onClick={printA4}>{I.print} Print (A4)</button>
       </div>
 
       <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
@@ -3061,7 +3642,92 @@ const assetOthersEntries = assetOthersCat
           ))}
          </div>
 
-       {/* Supplier stock value vs credit outstanding — mirrors Excel's CREDIT block */}
+        {/* Overall Position — reordered per spec: Assets (Stock, Empty,
+            Bank and Card → subtotal; Other Assets → subtotal) → Total
+            Assets → Supplier Stock vs Credit → Credit Outstanding Total →
+            Other Credit Outstanding → Net Position. Crate Balances (not
+            part of the required financial total) is kept at the very end
+            so nothing already shown is removed. Every value below is the
+            SAME already-computed variable used before — only position and
+            grouping changed. */}
+        <div style={sectionHead}>Overall Position</div>
+
+        <div style={catHead("#1d3f66", "#dce8f7")}>Assets</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {[
+                ["Stock", stockVal],
+                ["Empty", d.emptyStockVal],
+                ["In Hand Cash", d.cashBal],
+                ...bankAccountRows.map(r => [r.label, r.balance]),
+                ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance]),
+              ].map(([label, val], i) => (
+                <tr key={`${label}-${i}`}>
+                  <td style={td}>{label}</td>
+                  <td style={td}></td>
+                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val || 0)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                <td style={{ ...td, fontWeight: 700 }}>TOTAL</td>
+                <td style={td}></td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>Rs.{fmt(assetsSubtotal1)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style={catHead("#1d3f66", "#dce8f7")}>Other Assets</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {assetRows.length === 0 && (
+                <tr><td colSpan={3} style={{ ...td, textAlign: "center", color: "var(--mut)" }}>No Other Asset entries this period</td></tr>
+              )}
+              {assetRows.map((r, i) => {
+                // Asset "Others": show every saved entry as its own row —
+                // unchanged from the original logic, just relocated.
+                if (assetOthersCat && r.key === assetOthersCat.key && assetOthersEntries.length > 0) {
+                  return assetOthersEntries.map((entry, j) => (
+                    <tr key={`asset-others-${entry.id || j}`}>
+                      <td style={td}>{j === 0 ? r.label : ""}</td>
+                      <td style={{ ...td, color: "var(--mut)", fontStyle: entry.notes ? "normal" : "italic" }}>
+                        {entry.notes || "—"}
+                      </td>
+                      <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
+                        {fmt(entry.direction === "in" ? Number(entry.amount) || 0 : -(Number(entry.amount) || 0))}
+                      </td>
+                    </tr>
+                  ));
+                }
+                return (
+                  <tr key={`${r.label}-${i}`}>
+                    <td style={td}>{r.label}</td>
+                    <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
+                    <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance || 0)}</td>
+                  </tr>
+                );
+              })}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
+                <td style={{ ...td, fontWeight: 700 }}>TOTAL</td>
+                <td style={td}></td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace" }}>Rs.{fmt(extraAssetsTotal)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{
+          display: "flex", justifyContent: "space-between", alignItems: "center",
+          padding: "12px 16px", fontSize: 15, fontWeight: 700,
+          background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))",
+        }}>
+          <span style={{ letterSpacing: ".02em", textTransform: "uppercase" }}>Total Assets</span>
+          <span style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>Rs.{fmt(totalPosition)}</span>
+        </div>
+
+        {/* Supplier stock value vs credit outstanding — mirrors Excel's CREDIT block */}
         <div style={sectionHead}>Supplier Stock vs Credit</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -3092,134 +3758,52 @@ const assetOthersEntries = assetOthersCat
           </div>
         </div>
 
-        {/* Crate balances — quantity only, informational */}
-        <div style={sectionHead}>Crate Balances (Empty Containers)</div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr>
-                <th style={{ ...th, textAlign: "left" }}>Crate Type</th>
-                <th style={{ ...th, textAlign: "right" }}>Balance (Qty)</th>
-              </tr>
-            </thead>
-            <tbody>
-              {crateRows.length === 0 && (
-                <tr><td colSpan={2} style={{ ...td, textAlign: "center", color: "var(--mut)" }}>No crate balances recorded</td></tr>
-              )}
-              {crateRows.map(r => (
-                <tr key={r.type}>
-                  <td style={td}>{r.label}</td>
-                  <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-                    <div style={{ padding: "6px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
-            Quantity only — no cost value is tracked for crates, so this is not included in Net Position below.
-          </div>
-        </div>
-
-                {/* Overall Position — Total Assets, Liabilities, Total Credit
-            Outstanding, Other Credit Outstanding, then Net Position, all
-            grouped under one heading in that exact order. Each category
-            gets its own coloured highlight bar (no bordered box) so the
-            sections read at a glance, same dark theme throughout. */}
-        <div style={sectionHead}>Overall Position</div>
-
-                <div style={catHead("#1d3f66", "#dce8f7")}>1. Total Assets</div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-           {/* AFTER */}
-<tbody>
-   {[
-   ["Stock",             stockVal, "", null],
-    ["Empty",             d.emptyStockVal, "", null],
-    ["In Hand Cash",      d.cashBal, "", null],
-    ...bankAccountRows.map(r => [r.label, r.balance, "", null]),
-    ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance, "", null]),
-    ...assetRows.map(r => [r.label, r.balance, r.notes, r.key]),
-  ].map(([label, val, note, catKey], i) => {
-    // Asset "Others": show every saved entry as its own row instead of
-    // one collapsed row. Every other Total Assets row (Stock, Empty,
-    // Cash, Bank, Card, and every other Asset category) is untouched.
-    if (assetOthersCat && catKey === assetOthersCat.key && assetOthersEntries.length > 0) {
-      return assetOthersEntries.map((entry, j) => (
-        <tr key={`asset-others-${entry.id || j}`}>
-          <td style={td}>{j === 0 ? label : ""}</td>
-          <td style={{ ...td, color: "var(--mut)", fontStyle: entry.notes ? "normal" : "italic" }}>
-            {entry.notes || "—"}
-          </td>
-          <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
-            {fmt(entry.direction === "in" ? Number(entry.amount) || 0 : -(Number(entry.amount) || 0))}
-          </td>
-        </tr>
-      ));
-    }
-    return (
-      <tr key={`${label}-${i}`}>
-        <td style={td}>{label}</td>
-        <td style={{ ...td, color: "var(--mut)", fontStyle: note ? "normal" : "italic" }}>{note || "—"}</td>
-        <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(val || 0)}</td>
-      </tr>
-    );
-  })}
-  <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
-    <td style={{ ...td, fontWeight: 700 }}>Total Assets</td>
-    <td style={td}></td>
-    <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--green,#4ade80)" }}>Rs.{fmt(totalPosition)}</td>
-  </tr>
-</tbody>
-          </table>
-        </div>
-
-                     <div style={catHead("#65438f", "#e6dcf5")}>2. Total Credit Outstanding</div>
+        <div style={catHead("#65438f", "#e6dcf5")}>Credit Outstanding Total</div>
         <div style={{ padding: "8px 16px", display: "flex", justifyContent: "space-between", fontSize: 14 }}>
           <span>Total Credit Outstanding</span>
           <strong style={{ fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>Rs.{fmt(totalCredit)}</strong>
         </div>
 
-         <div style={catHead("#246457", "#d3ede6")}>3. Other Credit Outstanding</div>
+        <div style={catHead("#246457", "#d3ede6")}>Other Credit Outstanding</div>
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <tbody>
-              {/* AFTER */}
-{otherCreditRows.map(r => {
-  // "Others" category: show every saved entry as its own row instead of
-  // one collapsed row. All other categories (Due Deposit, Empty Credits)
-  // are untouched and still render as a single aggregate row as before.
-  if (othersCat && r.key === othersCat.key && othersEntries.length > 0) {
-    return othersEntries.map((entry, i) => (
-      <tr key={`others-${entry.id || i}`}>
-        <td style={td}>{i === 0 ? r.label : ""}</td>
-        <td style={{ ...td, color: "var(--mut)", fontStyle: entry.notes ? "normal" : "italic" }}>
-          {entry.notes || "—"}
-        </td>
-        <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
-          {fmt(entry.direction === "in" ? Number(entry.amount) || 0 : -(Number(entry.amount) || 0))}
-        </td>
-      </tr>
-    ));
-  }
-  return (
-    <tr key={r.key}>
-      <td style={td}>{r.label}</td>
-      <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
-      <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
-    </tr>
-  );
-})}
-              
-              {/* AFTER */}
+              {otherCreditRows.map(r => {
+                // "Others" category: show every saved entry as its own row instead of
+                // one collapsed row. All other categories (Due Deposit, Empty Credits)
+                // are untouched and still render as a single aggregate row as before.
+                if (othersCat && r.key === othersCat.key && othersEntries.length > 0) {
+                  return othersEntries.map((entry, i) => (
+                    <tr key={`others-${entry.id || i}`}>
+                      <td style={td}>{i === 0 ? r.label : ""}</td>
+                      <td style={{ ...td, color: "var(--mut)", fontStyle: entry.notes ? "normal" : "italic" }}>
+                        {entry.notes || "—"}
+                      </td>
+                      <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
+                        {fmt(entry.direction === "in" ? Number(entry.amount) || 0 : -(Number(entry.amount) || 0))}
+                      </td>
+                    </tr>
+                  ));
+                }
+                return (
+                  <tr key={r.key}>
+                    <td style={td}>{r.label}</td>
+                    <td style={{ ...td, color: "var(--mut)", fontStyle: r.notes ? "normal" : "italic" }}>{r.notes || "—"}</td>
+                    <td style={{ ...td, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{fmt(r.balance)}</td>
+                  </tr>
+                );
+              })}
+
               <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2,var(--bdr))" }}>
-              <td style={{ ...td, fontWeight: 700 }}>Total Other Credit Outstanding</td>
-              <td style={td}></td>
-              <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>Rs.{fmt(Math.abs(otherCreditsTotal))}</td>
+                <td style={{ ...td, fontWeight: 700 }}>Total Other Credit Outstanding</td>
+                <td style={td}></td>
+                <td style={{ ...td, textAlign: "right", fontWeight: 700, fontFamily: "'JetBrains Mono',monospace", color: "var(--red,#f87171)" }}>Rs.{fmt(Math.abs(otherCreditsTotal))}</td>
               </tr>
             </tbody>
           </table>
         </div>
 
-          <div style={{
+        <div style={{
           display: "flex", justifyContent: "space-between", alignItems: "center",
           padding: "14px 16px", margin: "4px 0 0", fontSize: 16, fontWeight: 700,
           background: "#2b5483", color: "#dce8f7", borderTop: "2px solid var(--bdr2,var(--bdr))",
@@ -3227,7 +3811,8 @@ const assetOthersEntries = assetOthersCat
           <span style={{ letterSpacing: ".02em", textTransform: "uppercase" }}>Net Position</span>
           <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 17 }}>Rs.{fmt(netPosition)}</span>
         </div>
-      </div>
+
+        </div>
     </div>
   );
 }
@@ -3241,6 +3826,17 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   const [bfDateInput, setBfDateInput]     = useState(today());
   const [bfAmountInput, setBfAmountInput] = useState("");
   const [bfSaving, setBfSaving]           = useState(false);
+  // Automatic carry-forward fallback — the PREVIOUS month's actual final
+  // Balance C/D (B/F + Invoices − applicable 6%/VAT Discounts − Payments
+  // − Amount/Payment Differences), used ONLY when no manual B/F has been
+  // saved for THIS month/supplier/outlet. Computed via
+  // computeSupplierBalanceCD — the same function already used for Balance
+  // C/D elsewhere in this file — so the carried-forward figure can never
+  // disagree with what this same ledger would show for the previous
+  // month. Replaces the old raw invoice/payment sum, which ignored
+  // discounts and manual differences and produced an incorrect next-month
+  // B/F.
+  const [autoBfBalance, setAutoBfBalance] = useState(0);
   
   const normBFDate = v => {
     if (!v) return "";
@@ -3266,6 +3862,21 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
     setBfSaving(false);
     if (entry) setManualBFState(entry);
   }
+
+  // Previous-month → this-month carry-forward. Recomputes whenever the
+  // supplier, outlet, month, or underlying invoice/payment data change —
+  // always tied to the SAME supplier key already used throughout this
+  // component (supplierId), never row position or display order.
+  useEffect(() => {
+    let cancelled = false;
+    const prevMonth = prevMonthStr(month);
+    if (!prevMonth) { setAutoBfBalance(0); return; }
+    computeSupplierBalanceCD(outlet, prevMonth, supplierId, apInvoices, apPayments)
+      .then(v => { if (!cancelled) setAutoBfBalance(v || 0); })
+      .catch(() => { if (!cancelled) setAutoBfBalance(0); });
+    return () => { cancelled = true; };
+  }, [supplierId, outlet, month, apInvoices, apPayments]);
+
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
 
@@ -3280,24 +3891,18 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
     (!mStart || (p.date >= mStart && p.date <= mEnd))
   );
 
- // B/F: everything before this month (unchanged, existing logic)
-  const invBefore = (apInvoices || []).filter(i => isSup(i.supplier_id || i.supplier) && mStart && i.date < mStart);
-  const payBefore = (apPayments || []).filter(p => isSup(p.supplier_id || p.supplier) && mStart && p.date < mStart);
-  const computedBfBalance =
-    invBefore.reduce((a, i) => a + (Number(i.amount) || 0), 0) -
-    payBefore.reduce((a, p) => a + (Number(p.amount) || 0) + (Number(p.discount) || 0), 0);
-
-  // Manual B/F override (new): if a manual B/F has been saved for this
-  // supplier and its date falls on/before the end of the period being
-  // viewed, it replaces the computed opening balance. Invoices dated
-  // before the manual B/F date are excluded from the rows below so they
-  // aren't double-counted (they're already folded into the manual figure).
-    // manualBF is now fetched already scoped to this exact `month`, so no
+   // Manual B/F override: if a manual B/F has been saved for this exact
+  // supplier/outlet/month, it replaces the automatic carry-forward.
+  // Invoices dated before the manual B/F date are excluded from the rows
+  // below so they aren't double-counted (they're already folded into the
+  // manual figure).
+  // manualBF is fetched already scoped to this exact `month`, so no
   // date-range check is needed here — its mere presence means it was set
   // for this specific period, and it will correctly be absent (falling
-  // back to computedBfBalance) for every other month.
+  // back to autoBfBalance — the previous month's real Balance C/D) for
+  // every other month.
   const useManualBF     = !!manualBF;
-  const bfBalance        = useManualBF ? manualBF.amount : computedBfBalance;
+  const bfBalance        = useManualBF ? manualBF.amount : autoBfBalance;
   const bfEffectiveDate  = useManualBF ? manualBF.date : mStart;
   // Normalises an invoice-reference string for matching — trims whitespace
   // and ignores case, so a payment saved from Account Payable still matches
@@ -3365,7 +3970,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   // and is already folded into bfBalance. Using only `rows` for either of
   // these undercounts both, since orphan payments live in allRows/
   // orphanPaymentRows, not `rows`.
-  const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount, 0);
+  const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.vatDis, 0);
   const totalPaid        = allRows.reduce((a, r) => a + r.paid, 0);
   const totalSixPctDis   = rows.reduce((a, r) => a + r.sixPctDis, 0);
   const totalVatDis      = rows.reduce((a, r) => a + r.vatDis, 0);
@@ -3387,19 +3992,37 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
       if (cancelled) return;
       setBalanceAmtDiff(entry?.amountDiff || 0);
       setPaymentDiff(entry?.paymentDiff || 0);
+      // Persisted per outlet/supplier/month, same row as amountDiff/paymentDiff.
+      // Falls back to the existing default-supplier-list rule only when no
+      // saved value exists yet for this outlet+supplier+month (e.g. never
+      // touched before) — preserves current behaviour for untouched records.
+      if (entry?.applyDiscount !== undefined && entry?.applyDiscount !== null) {
+        setApplyDiscount(!!entry.applyDiscount);
+      }
       setDiffError(null);
     });
     return () => { cancelled = true; };
   }, [supplierId, outlet, month]);
 
-  async function saveDiff(nextAmountDiff, nextPaymentDiff) {
+  async function saveDiff(nextAmountDiff, nextPaymentDiff, nextApplyDiscount = applyDiscount) {
     setDiffSaving(true);
     setDiffError(null);
-    const result = await setSupplierDiff(supplierId, outlet, month, nextAmountDiff, nextPaymentDiff);
+    // 4th arg persists the checkbox in the SAME supplier_diff row as
+    // amountDiff/paymentDiff — additive column only, no other columns
+    // touched, no other table involved.
+    const result = await setSupplierDiff(supplierId, outlet, month, nextAmountDiff, nextPaymentDiff, nextApplyDiscount);
     setDiffSaving(false);
     if (!result) {
       setDiffError("Could not save — check that supplier_diff exists with correct permissions.");
     }
+  }
+
+  // Persists the discount checkbox the moment staff toggle it (not just on
+  // blur, since a checkbox has no blur event) — same supplier_diff row,
+  // amountDiff/paymentDiff untouched.
+  function handleApplyDiscountToggle(val) {
+    setApplyDiscount(val);
+    saveDiff(balanceAmtDiff, paymentDiff, val);
   }
 const totalAmountAdj = totalAmount + balanceAmtDiff;
 const totalPaidAdj   = totalPaid + paymentDiff;
@@ -3421,8 +4044,8 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
           <select value={supplierId} onChange={e => setSupplierId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
             {SUPPLIERS_LIST.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--mut)", cursor: "pointer" }}>
-            <input type="checkbox" checked={applyDiscount} onChange={e => setApplyDiscount(e.target.checked)} />
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--mut)", cursor: "pointer" }}>
+            <input type="checkbox" checked={applyDiscount} onChange={e => handleApplyDiscountToggle(e.target.checked)} />
             Apply 6% trade discount + VAT
           </label>
           {diffSaving && <div style={{ fontSize: 11, color: "var(--mut)" }}>Saving…</div>}
@@ -3841,7 +4464,8 @@ export default function Reports({ user }) {
   useEffect(() => {
     getOutlets(OUTLETS).then(list => { if (list?.length) setOutletList(list); });
   }, []);
-  const { data: d, loading, refresh } = useReportData(effectiveOutlet, month, outletList);
+
+  const { data: d, loading, refresh, recordEmptyLoanEdit } = useReportData(effectiveOutlet, month, outletList);
   
 
   const reportList = [
@@ -3920,7 +4544,7 @@ export default function Reports({ user }) {
             {report==="purchase"  && <PurchaseSummary    d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="cos"       && <CostOfSalesSummary d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month}/>}
-            {report==="emptyloan" && <EmptyLoanRegister  d={d} outlet={effectiveOutlet} month={month} refresh={refresh}/>}
+            {report==="emptyloan" && <EmptyLoanRegister  d={d} outlet={effectiveOutlet} month={month} refresh={refresh} recordEdit={recordEmptyLoanEdit}/>}
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={handleSupplierChange} applyDiscount={applyDiscount} setApplyDiscount={val => { setApplyDiscount(val); setDiscountTouched(true); }}/>}
             {report==="stocksum"  && <StockSummary d={d} outlet={effectiveOutlet} month={month}/>}

@@ -27,6 +27,14 @@ export function resolveOutletPrice(ov, dateStr, fallbackCost, fallbackPrice) {
     const latest = hist.reduce((a, b) => (a.date > b.date ? a : b));
     return { unitCost: latest.unitCost, sellingPrice: latest.sellingPrice };
   }
+  // No dated history record is effective yet for this date. If dated
+  // history exists at all, ov.unitCost/sellingPrice mirror the OVERALL
+  // latest entry (which may be dated AFTER dateStr) — using them here
+  // would project a future price change backward onto earlier dates.
+  // Fall back to the true base/master price instead.
+  if ((ov.priceHistory || []).length > 0) {
+    return { unitCost: fallbackCost, sellingPrice: fallbackPrice };
+  }
   return {
     unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : fallbackCost,
     sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : fallbackPrice,
@@ -227,12 +235,7 @@ async function openEdit(item) {
   }
 }
 
-  function resetOverride(itemKey) {
-    const newOv = { ...overrides };
-    delete newOv[itemKey];
-    saveOverrides(newOv);
-    toast_("Reset to main inventory price ✓");
-  }
+
 
   const sups = useMemo(() => {
     const extra = ls("extra_suppliers", []);
