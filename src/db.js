@@ -575,10 +575,39 @@ export const deleteCashEntryForDate = async (outlet, date, description) => {
     .delete()
     .eq("outlet_id", outlet)
     .eq("date", date)
-    .eq("description", description);
+      .eq("description", description);
   if (error) console.error("deleteCashEntryForDate:", error);
 };
 
+// Idempotent insert keyed on cash_ledger.ref. Returns "inserted" | "exists" | "error".
+export const addCashEntryOnce = async (outlet, entry) => {
+  if (!entry.ref) return "error";
+  const { data: found, error: selErr } = await supabase
+    .from("cash_ledger").select("id")
+    .eq("outlet_id", outlet).eq("ref", entry.ref).limit(1);
+  if (selErr) { console.error("addCashEntryOnce (check):", selErr); return "error"; }
+  if (found && found.length) return "exists";
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id:    outlet,
+    date:         entry.date,
+    description:  entry.description || "",
+    debit:        entry.debit || 0,
+    credit:       entry.credit || 0,
+    ref:          entry.ref,
+    balance_type: entry.type || "",
+  });
+  if (error) { console.error("addCashEntryOnce (insert):", error); return "error"; }
+  return "inserted";
+};
+
+// Removes the cash_ledger + general_ledger rows linked to a recovery by ref.
+export const deleteCashEntryByRef = async (outlet, ref) => {
+  if (!ref) return;
+  const { error } = await supabase.from("cash_ledger").delete().eq("outlet_id", outlet).eq("ref", ref);
+  if (error) console.error("deleteCashEntryByRef (cash):", error);
+  const { error: glErr } = await supabase.from("general_ledger").delete().eq("outlet_id", outlet).eq("ref", ref);
+  if (glErr) console.error("deleteCashEntryByRef (gl):", glErr);
+};
 // Deletes all "Empty Sold / Empty Return / Empty Purchase" cash rows
 // for a given outlet+date, so re-saving the Empty tab clears stale
 // entries (e.g. from before the Quarts-only fix) instead of just
@@ -1014,6 +1043,14 @@ export const POSITION_CATEGORIES = {
     { key: "damage_payable",    label: "Damage Payable" },
     { key: "liability_misc",    label: "Others" },
   ],
+
+ // NEW — Stock/Excess Tab 2
+  stock_se: [
+    { key: "short_bf",        label: "Short B/F" },
+    { key: "excess_bf",       label: "Excess B/F" },
+    { key: "short_recover",   label: "Short Recover" },
+    { key: "excess_recover",  label: "Excess Recover" },
+  ],
 };
 
 export const getPositionLedger = async (outlet) => {
@@ -1023,8 +1060,8 @@ export const getPositionLedger = async (outlet) => {
   return data;
 };
 
-export const addPositionEntry = async (outlet, entry) => {
-  const { error } = await supabase.from("position_ledger").insert({
+  export const addPositionEntry = async (outlet, entry) => {
+  const { data, error } = await supabase.from("position_ledger").insert({
     outlet_id:      outlet,
     date:           entry.date,
     category_group: entry.categoryGroup, // 'asset' | 'other_credit' | 'liability'
@@ -1032,8 +1069,9 @@ export const addPositionEntry = async (outlet, entry) => {
     direction:      entry.direction,     // 'in' | 'out'
     amount:         entry.amount || 0,
     notes:          entry.notes || "",
-  });
-  if (error) console.error("addPositionEntry:", error);
+   }).select("id").single();
+  if (error) { console.error("addPositionEntry:", error); return null; }
+  return data?.id ?? null; // existing callers ignore the return value
 };
 
 export const deletePositionEntry = async (id) => {

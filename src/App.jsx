@@ -23,11 +23,13 @@ import { supabase } from "./supabase";
 
 import {
   getCOA,
-  getCashLedger, addCashEntry, getCashBF, getCashBFDate, setCashBF,
+    getCashLedger, addCashEntry, addCashEntryOnce, deleteCashEntryByRef, getCashBF, getCashBFDate, setCashBF,
   getCashDaySheetBalance, setCashDaySheetBalance,
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
   getUsernameOutlets, verifyClerkLogin, signInClerkAuth, getClerkProfile,
+  getSales,
+  getPositionLedger, addPositionEntry, deletePositionEntry, POSITION_CATEGORIES,
 } from "./db";
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
 
@@ -293,6 +295,7 @@ function S_GL({ outlet }) {
   const [manAmt,  setMA]   = useState("");
   const [filterFrom, setFilterFrom] = useState("");
   const [filterTo,   setFilterTo]   = useState("");
+  const [cashTab, setCashTab] = useState("ledger"); // NEW — Stock/Excess Tab 2
 
   useEffect(() => {
     getCashLedger(outlet).then(setL);
@@ -381,8 +384,14 @@ function S_GL({ outlet }) {
   const balanceAsOfDaySheetDate = bfBal + dedupedLedger
     .filter(e => e.date <= daySheetDate)
     .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
-
-  return (<>
+         return (<>
+    <div className="no-print" style={{display:"flex",gap:8,marginBottom:14}}>
+      <button className={`btn btnsm ${cashTab==="ledger"?"btng":"btnd"}`} onClick={()=>setCashTab("ledger")}>In Hand Cash Ledger</button>
+      <button className={`btn btnsm ${cashTab==="se"?"btng":"btnd"}`} onClick={()=>setCashTab("se")}>Stock/Excess</button>
+    </div>
+    {cashTab==="se" ? (
+      <StockExcessTab outlet={outlet} toast_={toast_} ledger={ledger} bfBal={bfBal} dedupedLedger={dedupedLedger} onCashChanged={() => getCashLedger(outlet).then(setL)}/>
+    ) : (<>
     <div className="sg3">
       <div className="sc"><div className="sl">Account</div><div className="sv">1001</div></div>
       <div className="sc"><div className="sl">Entries</div><div className="sv">{ledger.length}</div></div>
@@ -476,6 +485,279 @@ function S_GL({ outlet }) {
         </div>
       </div>
     </div>
+  </>)}
+  </>);
+}
+// ═══════════════════════════════════════════
+// NEW — Stock/Excess Tab 2 (In Hand Cash window)
+// ═══════════════════════════════════════════
+  function StockExcessTab({ outlet, toast_, ledger, bfBal, dedupedLedger, onCashChanged }) {
+  const [salesData, setSalesData] = useState([]);
+  const [posEntries, setPosEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [periodFrom, setPeriodFrom] = useState(() => today().slice(0,7)+"-01");
+  const [periodTo,   setPeriodTo]   = useState(today());
+  const [shortBfInput, setShortBfInput]   = useState("0");
+  const [excessBfInput, setExcessBfInput] = useState("0");
+  const [savingBf, setSavingBf] = useState(false);
+  const [recForm, setRecForm] = useState({ kind:"short", date: today(), amount:"" });
+  const [savingRec, setSavingRec] = useState(false);
+
+  function reload() {
+    setLoading(true);
+    Promise.all([getSales(outlet), getPositionLedger(outlet)]).then(([s, p]) => {
+      setSalesData(s || []); setPosEntries(p || []); setLoading(false);
+    });
+  }
+  useEffect(() => { reload(); }, [outlet]);
+
+  const stockSeEntries = posEntries.filter(e => e.category_group === "stock_se");
+  const shortBfRow   = stockSeEntries.find(e => e.category === "short_bf"  && e.date === periodFrom);
+  const excessBfRow  = stockSeEntries.find(e => e.category === "excess_bf" && e.date === periodFrom);
+
+  useEffect(() => {
+    setShortBfInput(String(shortBfRow?.amount ?? 0));
+    setExcessBfInput(String(excessBfRow?.amount ?? 0));
+  }, [periodFrom, shortBfRow?.amount, excessBfRow?.amount]);
+
+  // ── Source A: Inventory Short/Excess (main stock only — see report) ──
+  const inventorySE = {};
+  salesData.forEach(sale => {
+    if (!sale.date || sale.date < periodFrom || sale.date > periodTo) return;
+    (sale.items || []).forEach(r => {
+      if (r.isEmptyItem) return;
+      const stkSE = Number(r.stkSE) || 0;
+      const adminSP = Number(r.adminSellingPrice) || 0;
+      const rate = Number(r.rate) || adminSP;
+      const sold = parseFloat(r.sold) || 0;
+      const amtSE = sold === 0 ? stkSE * adminSP : (stkSE * adminSP) + ((rate - adminSP) * sold);
+      if (!amtSE) return;
+      if (!inventorySE[sale.date]) inventorySE[sale.date] = { short:0, excess:0 };
+      if (amtSE < 0) inventorySE[sale.date].short += Math.abs(amtSE);
+      else inventorySE[sale.date].excess += amtSE;
+    });
+  });
+
+  
+  // ── Source B: Day Sheet Short/Excess (read-only, uses Tab 1's own data) ──
+  // "Different" in Tab 1 is cumulative, so only the CHANGE since the previous
+  // day-sheet date is counted; otherwise one shortfall would repeat every day.
+  const daySheetSE = {};
+  {
+    let prevDiff = 0;
+    ledger.filter(e => e.balance_type === "daysheet")
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .forEach(row => {
+        const dsAmt = Number(row.debit) - Number(row.credit);
+        const balanceAsOf = bfBal + dedupedLedger
+          .filter(e => e.date <= row.date)
+          .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
+        const diff = dsAmt - balanceAsOf;
+        const change = diff - prevDiff;
+        prevDiff = diff;
+        if (row.date < periodFrom || row.date > periodTo || !change) return;
+        if (!daySheetSE[row.date]) daySheetSE[row.date] = { short:0, excess:0 };
+        if (change < 0) daySheetSE[row.date].short += Math.abs(change);
+        else daySheetSE[row.date].excess += change;
+      });
+  }
+
+  
+  // ── Manual Short Recover / Excess Recover (position_ledger, in range) ──
+  const shortRecoverRows  = stockSeEntries.filter(e => e.category === "short_recover"  && e.date >= periodFrom && e.date <= periodTo);
+  const excessRecoverRows = stockSeEntries.filter(e => e.category === "excess_recover" && e.date >= periodFrom && e.date <= periodTo);
+
+  // ── Combine into one Date-ordered row set ──
+  const allDates = new Set([
+        ...Object.keys(inventorySE), ...Object.keys(daySheetSE), ...Object.keys(daySheetSE),
+    ...shortRecoverRows.map(e=>e.date), ...excessRecoverRows.map(e=>e.date),
+  ]);
+  const rows = [...allDates].sort().map(date => ({
+    date,
+    short:  (inventorySE[date]?.short||0)  + (daySheetSE[date]?.short||0),
+    excess: (inventorySE[date]?.excess||0) + (daySheetSE[date]?.excess||0),
+    shortRecover:  shortRecoverRows.filter(e=>e.date===date).reduce((a,e)=>a+(Number(e.amount)||0),0),
+    excessRecover: excessRecoverRows.filter(e=>e.date===date).reduce((a,e)=>a+(Number(e.amount)||0),0),
+  }));
+
+  const totalShort         = rows.reduce((a,r)=>a+r.short,0);
+  const totalShortRecover  = rows.reduce((a,r)=>a+r.shortRecover,0);
+  const totalExcess        = rows.reduce((a,r)=>a+r.excess,0);
+  const totalExcessRecover = rows.reduce((a,r)=>a+r.excessRecover,0);
+  const shortBf  = parseFloat(shortBfInput)  || 0;
+  const excessBf = parseFloat(excessBfInput) || 0;
+  const shortBalanceCD  = shortBf  + totalShort  - totalShortRecover;
+  const excessBalanceCD = excessBf + totalExcess - totalExcessRecover;
+
+  async function saveBf() {
+    setSavingBf(true);
+    const existingShort  = stockSeEntries.find(e => e.category === "short_bf"  && e.date === periodFrom);
+    const existingExcess = stockSeEntries.find(e => e.category === "excess_bf" && e.date === periodFrom);
+    if (existingShort)  await deletePositionEntry(existingShort.id);
+    if (existingExcess) await deletePositionEntry(existingExcess.id);
+    await addPositionEntry(outlet, { date: periodFrom, categoryGroup:"stock_se", category:"short_bf",  direction:"in", amount: shortBf,  notes:"" });
+    await addPositionEntry(outlet, { date: periodFrom, categoryGroup:"stock_se", category:"excess_bf", direction:"in", amount: excessBf, notes:"" });
+    toast_("B/F saved ✓");
+    reload();
+    setSavingBf(false);
+  }
+
+   async function saveRecover() {
+    if (savingRec) return;
+    if (!recForm.amount || parseFloat(recForm.amount) <= 0) { toast_("Enter valid amount","err"); return; }
+    setSavingRec(true);
+    const amt = parseFloat(recForm.amount);
+    const isShort = recForm.kind === "short";
+    const label = isShort ? "BY SHORT" : "TO EXCESS";
+    const recId = await addPositionEntry(outlet, {
+      date: recForm.date,
+      categoryGroup: "stock_se",
+      category: isShort ? "short_recover" : "excess_recover",
+      direction: "in",
+      amount: amt,
+      notes: label,
+    });
+    if (!recId) { toast_("Failed to save recovery — check connection","err"); setSavingRec(false); return; }
+    const ref = `SE-REC-${recId}`;
+    const res = await addCashEntryOnce(outlet, {
+      date: recForm.date,
+      description: label,
+      type: isShort ? "in" : "out",
+      debit:  isShort ? amt : 0,
+      credit: isShort ? 0 : amt,
+      ref,
+    });
+    if (res === "inserted") {
+      await addGLEntry(outlet, {
+        date: recForm.date, account_id: "1001",
+        description: label,
+        debit:  isShort ? amt : 0,
+        credit: isShort ? 0 : amt,
+        source: "stock_se_recover",
+        ref,
+      });
+    }
+    toast_("Recovery entry saved ✓");
+    setRecForm(f => ({ ...f, amount:"" }));
+    reload();
+    if (onCashChanged) onCashChanged();
+    setSavingRec(false);
+  }
+  async function removeEntry(id) {
+    if (!window.confirm("Delete this entry?")) return;
+    await deletePositionEntry(id);
+    await deleteCashEntryByRef(outlet, `SE-REC-${id}`);
+    reload();
+    if (onCashChanged) onCashChanged();
+  }
+
+  const th = { padding:"6px 10px", fontSize:10, fontWeight:700, letterSpacing:".04em", textTransform:"uppercase", color:"var(--mut2,var(--mut))", background:"var(--s3)", borderBottom:"1px solid var(--bdr)", textAlign:"right" };
+  const td = { padding:"6px 10px", fontSize:12, textAlign:"right", borderBottom:"1px solid rgba(63,63,70,.15)" };
+
+  if (loading) return <div style={{padding:24,color:"var(--mut)"}}>Loading…</div>;
+
+  return (<>
+    <div className="card" style={{marginBottom:14}}>
+      <div className="chd"><h3>Period</h3></div>
+      <div style={{padding:14,display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
+        <div className="ff" style={{marginBottom:0}}><label>Period From</label><input type="date" value={periodFrom} onChange={e=>setPeriodFrom(e.target.value)}/></div>
+        <div className="ff" style={{marginBottom:0}}><label>Period To</label><input type="date" value={periodTo} onChange={e=>setPeriodTo(e.target.value)}/></div>
+      </div>
+    </div>
+
+    <div className="sg2">
+      <div className="card">
+        <div className="chd"><h3>Short B/F</h3><p>as of {periodFrom}</p></div>
+        <div style={{padding:14,display:"flex",gap:8,alignItems:"flex-end"}}>
+          <div className="ff" style={{marginBottom:0,flex:1}}><label>Short B/F (Rs.)</label><input type="number" value={shortBfInput} onChange={e=>setShortBfInput(e.target.value)}/></div>
+          <div className="ff" style={{marginBottom:0,flex:1}}><label>Excess B/F (Rs.)</label><input type="number" value={excessBfInput} onChange={e=>setExcessBfInput(e.target.value)}/></div>
+          <button className="btn btnd btnsm" onClick={saveBf} disabled={savingBf}>{I.check} Set</button>
+        </div>
+      </div>
+      <div className="card">
+        <div className="chd"><h3>Add Recovery</h3></div>
+        <div style={{padding:14}}>
+          <div className="fg">
+            <div className="ff"><label>Type</label>
+              <select value={recForm.kind} onChange={e=>setRecForm(f=>({...f,kind:e.target.value}))}>
+                <option value="short">Short Recover (BY SHORT)</option>
+                <option value="excess">Excess Recover (TO EXCESS)</option>
+              </select>
+            </div>
+            <div className="ff"><label>Date</label><input type="date" value={recForm.date} onChange={e=>setRecForm(f=>({...f,date:e.target.value}))}/></div>
+            <div className="ff"><label>Amount (Rs.)</label><input type="number" value={recForm.amount} onChange={e=>setRecForm(f=>({...f,amount:e.target.value}))}/></div>
+          </div>
+          <button className="btn btng" onClick={saveRecover} disabled={savingRec}>{I.check} {recForm.kind==="short" ? "Add Short Recover" : "Add Excess Recover"}</button>
+        </div>
+      </div>
+    </div>
+
+    <div className="card" style={{marginTop:14}}>
+      <div className="chd"><div><h3>Stock/Excess</h3><p>{outlet} &nbsp;|&nbsp; {periodFrom} to {periodTo}</p></div></div>
+      <div style={{padding:12,overflowX:"auto"}}>
+        <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+          <thead>
+            <tr>
+              <th style={{...th,textAlign:"left"}}>Date</th>
+              <th style={th}>Short</th>
+              <th style={th}>Short Recover</th>
+              <th style={th}>Excess</th>
+              <th style={th}>Excess Recover</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr style={{background:"var(--s3)"}}>
+              <td style={{...td,textAlign:"left",fontWeight:700}}>B/F ({periodFrom})</td>
+              <td style={td}>{shortBf ? fmt(shortBf) : "-"}</td>
+              <td style={td}>-</td>
+              <td style={td}>{excessBf ? fmt(excessBf) : "-"}</td>
+              <td style={td}>-</td>
+            </tr>
+            {rows.length === 0 && (
+              <tr><td colSpan={5} style={{padding:20,textAlign:"center",color:"var(--mut)"}}>No Short/Excess activity in this period.</td></tr>
+            )}
+            {rows.map(r => (
+              <tr key={r.date}>
+                <td style={{...td,textAlign:"left"}}>{r.date}</td>
+                <td style={td}>{r.short ? fmt(r.short) : "-"}</td>
+                <td style={td}>{r.shortRecover ? fmt(r.shortRecover) : "-"}</td>
+                <td style={td}>{r.excess ? fmt(r.excess) : "-"}</td>
+                <td style={td}>{r.excessRecover ? fmt(r.excessRecover) : "-"}</td>
+              </tr>
+            ))}
+            <tr style={{background:"var(--s3)",borderTop:"2px solid var(--bdr2)"}}>
+              <td style={{...td,textAlign:"left",fontWeight:700}}>Balance C/D</td>
+              <td style={{...td,fontWeight:700}} colSpan={2}>Short Balance C/D: Rs.{fmt(shortBalanceCD)}</td>
+              <td style={{...td,fontWeight:700}} colSpan={2}>Excess Balance C/D: Rs.{fmt(excessBalanceCD)}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {(shortRecoverRows.length > 0 || excessRecoverRows.length > 0) && (
+      <div className="card" style={{marginTop:14}}>
+        <div className="chd"><h3>Manual Recovery Entries</h3><p>Edit/Delete</p></div>
+        <div style={{padding:12,overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead>
+              <tr><th style={{...th,textAlign:"left"}}>Date</th><th style={{...th,textAlign:"left"}}>Type</th><th style={{...th,textAlign:"left"}}>Details</th><th style={th}>Amount</th><th style={th}></th></tr>
+            </thead>
+            <tbody>
+              {[...shortRecoverRows, ...excessRecoverRows].sort((a,b)=>a.date.localeCompare(b.date)).map(e => (
+                <tr key={e.id}>
+                  <td style={{...td,textAlign:"left"}}>{e.date}</td>
+                  <td style={{...td,textAlign:"left"}}>{e.category==="short_recover"?"Short Recover":"Excess Recover"}</td>
+                  <td style={{...td,textAlign:"left"}}>{e.notes}</td>
+                  <td style={td}>{fmt(e.amount)}</td>
+                  <td style={td}><button className="btndel" onClick={()=>removeEntry(e.id)}>{I.trash}</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    )}
   </>);
 }
 // ═══════════════════════════════════════════
