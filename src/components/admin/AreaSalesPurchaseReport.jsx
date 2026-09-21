@@ -151,15 +151,26 @@ function aspBrandKey(item) {
 
 const AREA_OPTIONS = ["ALL", ...AREAS];
 
+// Brand filter: derived from the item's existing type/description/name.
+// Change ONLY this function if the brand lives in a different field.
+const ASP_BRAND_OPTIONS = ["GIN", "VODKA", "WHISKY"];
+function itemBrand(item) {
+  const hay = `${item?.type ?? ""} ${item?.description ?? ""} ${item?.name ?? ""}`.toUpperCase();
+  if (/\bGIN\b/.test(hay)) return "GIN";
+  if (/\bVODKA\b/.test(hay)) return "VODKA";
+  if (/\bWHISK(?:E)?Y\b/.test(hay)) return "WHISKY";
+  return "";
+}
+
 export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
   const outletNames = outlets || [];
 
   const [reportType, setReportType] = useState("sales"); // "sales" | "purchase"
   const [areaSel, setAreaSel] = useState("ALL");
   const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7));
-  const [supplierId, setSupplierId] = useState("");
+  const [supplierId, setSupplierId] = useState(""); // "ALL" = All Suppliers
+  const [brandSel, setBrandSel] = useState("ALL");
   const [hideZero, setHideZero] = useState(false);
-
   const [masterInv, setMasterInv] = useState([]);
   const [invLoading, setInvLoading] = useState(true);
   const [outletsLoading, setOutletsLoading] = useState(false);
@@ -207,12 +218,21 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
   }, [outletNames, areaSel]);
 
     // ── Brands/items belonging to the selected Supplier ──
-  const supplierItems = useMemo(() => {
+    const supplierItems = useMemo(() => {
     if (!supplierId) return [];
     return masterInv
-      .filter((i) => i.supplier === supplierId && i.type !== "EM")
-      .sort((a, b) => (a.code || "").localeCompare(b.code || "", undefined, { numeric: true }));
-  }, [masterInv, supplierId]);
+      .filter(
+        (i) =>
+          (supplierId === "ALL" || i.supplier === supplierId) &&
+          i.type !== "EM" &&
+          (brandSel === "ALL" || itemBrand(i) === brandSel)
+      )
+      .sort(
+        (a, b) =>
+          (supplierId === "ALL" ? (a.supplier || "").localeCompare(b.supplier || "") : 0) ||
+          (a.code || "").localeCompare(b.code || "", undefined, { numeric: true })
+      );
+  }, [masterInv, supplierId, brandSel]);
 
   // Display-only: true at the index where the brand group changes,
   // used purely to draw a visual divider column. Does not affect data.
@@ -308,7 +328,11 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
 
   // ── Heading text (dynamic per filters) ──
   const areaLabel = areaSel === "ALL" ? "ALL AREAS" : areaSel.toUpperCase();
-  const supplierLabel = supplierOptions.find((s) => s.id === supplierId)?.name || "—";
+    const supplierLabel =
+    supplierId === "ALL"
+      ? "All Suppliers"
+      : supplierOptions.find((s) => s.id === supplierId)?.name || "—";
+  const brandLabel = brandSel === "ALL" ? "" : brandSel;
   const periodLabel = monthLabel(period);
   const reportTitle = reportType === "sales" ? "AREA SALES REPORT" : "AREA PURCHASE REPORT";
 
@@ -318,10 +342,16 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
     const ws = wb.addWorksheet("Area Report");
     ws.addRow([reportTitle]);
     ws.addRow([areaLabel]);
-    ws.addRow([`Supplier: ${supplierLabel}`]);
+     ws.addRow([`Supplier: ${supplierLabel}${brandLabel ? ` – ${brandLabel}` : ""}`]);
     ws.addRow([`Period: ${periodLabel}`]);
     ws.addRow([]);
-    const headerRow = ws.addRow(["Outlet", ...supplierItems.map((i) => i.name), "Total"]);
+    const headerRow = ws.addRow([
+      "Outlet",
+      ...supplierItems.map((i) =>
+        supplierId === "ALL" ? `${i.name} (${(i.supplier || "").replace(/^\d{4}-/, "")})` : i.name
+      ),
+      "Total",
+    ]);
     headerRow.font = { bold: true };
     displayRows.forEach((r) => {
       ws.addRow([r.outlet, ...r.values, r.total]);
@@ -487,9 +517,26 @@ const stickyTotalRow = {
             onChange={(e) => setSupplierId(e.target.value)}
             style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)", outline: "none", minWidth: 180 }}
           >
-            {supplierOptions.length === 0 && <option value="">No suppliers</option>}
+                      {supplierOptions.length === 0 && <option value="">No suppliers</option>}
+            {supplierOptions.length > 0 && <option value="ALL">All Suppliers</option>}
             {supplierOptions.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="ff" style={{ marginBottom: 0 }}>
+          <label style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut)", display: "block", marginBottom: 3 }}>
+            Brand
+          </label>
+          <select
+            value={brandSel}
+            onChange={(e) => setBrandSel(e.target.value)}
+            style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)", outline: "none", minWidth: 140 }}
+          >
+            <option value="ALL">All Brands</option>
+            {ASP_BRAND_OPTIONS.map((b) => (
+              <option key={b} value={b}>{b}</option>
             ))}
           </select>
         </div>
@@ -527,8 +574,16 @@ const stickyTotalRow = {
         className="asp-badge"
         style={{ "--asp-accent": supplierAccent(supplierId) }}
       >
-        {supplierLabel}
+             {supplierLabel}
       </span>
+      {brandLabel && (
+        <span
+          className="asp-badge"
+          style={{ "--asp-accent": supplierAccent(supplierId) }}
+        >
+          {brandLabel}
+        </span>
+      )}
       <span
         className="asp-badge"
         style={{ "--asp-accent": supplierAccent(supplierId) }}
@@ -561,7 +616,7 @@ const stickyTotalRow = {
                    ...stickyHeadCell,
                    ...(supplierItemGroupBreak[idx] ? { borderLeft: "2px solid rgba(255,255,255,.18)" } : {}),
                     }}
-                    title={item.code}
+                    title={supplierId === "ALL" ? `${item.code} — ${(item.supplier || "").replace(/^\d{4}-/, "")}` : item.code}
                      >
                     {item.name}
                      </th>
