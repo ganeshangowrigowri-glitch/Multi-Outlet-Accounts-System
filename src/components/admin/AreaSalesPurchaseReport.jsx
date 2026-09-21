@@ -108,11 +108,11 @@ function findOpeningAndEndStock(salesInRange, toDate, item) {
 // (same formula as computeCsData; currency/margin/transfers/returns are
 // intentionally omitted here — this report only needs the two bottle
 // quantities, and Sales/Purchase never touch those fields anyway)
-function computeItemCurrentStatus(item, salesForOutlet, purchasesForOutlet, invQty, fromDate, toDate) {
+  function computeItemCurrentStatus(item, salesForOutlet, purchasesForOutlet, invQty, fromDate, toDate) {
   const salesInRange = (salesForOutlet || [])
     .filter(
       (s) => s.date && s.date >= fromDate && s.date <= toDate && (s.items || []).some((r) => !r.isEmptyItem)
-    )
+    ) 
     .sort((a, b) => a.date.localeCompare(b.date));
 
   const { firstOpening, lastEndStock } = findOpeningAndEndStock(salesInRange, toDate, item);
@@ -130,7 +130,7 @@ function computeItemCurrentStatus(item, salesForOutlet, purchasesForOutlet, invQ
   const inHandStock = lastEndStock !== null ? lastEndStock : opening;
   const totalBottleSale = opening + totalPurchase - inHandStock;
 
-  return { totalBottleSale, totalPurchase };
+    return { totalBottleSale, totalPurchase, inHandStock };
 }
 
 // Purely cosmetic: stable colour per supplier so DCSL/UG/IDL/Rockland/Lion
@@ -294,8 +294,9 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
       });
 
       const values = supplierItems.map((item) => {
-        const invQty = invQtyMap[`${item.code}__${item.supplier}`] || 0;
-        const { totalBottleSale, totalPurchase } = computeItemCurrentStatus(
+        // Physical Stock: Current Status uses a fallback opening of 0 (not the outlet_inventory table qty)
+        const invQty = reportType === "physical" ? 0 : (invQtyMap[`${item.code}__${item.supplier}`] || 0);
+        const { totalBottleSale, totalPurchase, inHandStock } = computeItemCurrentStatus(
           item,
           sales,
           purchases,
@@ -303,6 +304,7 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
           from,
           to
         );
+        if (reportType === "physical") return inHandStock;
         return reportType === "sales" ? totalBottleSale : totalPurchase;
       });
 
@@ -334,7 +336,12 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
       : supplierOptions.find((s) => s.id === supplierId)?.name || "—";
   const brandLabel = brandSel === "ALL" ? "" : brandSel;
   const periodLabel = monthLabel(period);
-  const reportTitle = reportType === "sales" ? "AREA SALES REPORT" : "AREA PURCHASE REPORT";
+    const reportTitle =
+        reportType === "physical"
+      ? "AREA IN HAND STOCK REPORT"
+      : reportType === "sales"
+      ? "AREA SALES REPORT"
+      : "AREA PURCHASE REPORT";
 
   async function downloadExcel() {
     if (!matrix) return;
@@ -469,7 +476,7 @@ const stickyTotalRow = {
             Report Type
           </label>
           <div className="stabs">
-            {[["sales", "Sales"], ["purchase", "Purchase"]].map(([id, label]) => (
+             {[["sales", "Sales"], ["purchase", "Purchase"], ["physical", "In Hand Stock"]].map(([id, label]) => (
               <button
                 key={id}
                 className={`stab ${reportType === id ? "act" : ""}`}
@@ -517,7 +524,7 @@ const stickyTotalRow = {
             onChange={(e) => setSupplierId(e.target.value)}
             style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)", outline: "none", minWidth: 180 }}
           >
-                      {supplierOptions.length === 0 && <option value="">No suppliers</option>}
+             {supplierOptions.length === 0 && <option value="">No suppliers</option>}
             {supplierOptions.length > 0 && <option value="ALL">All Suppliers</option>}
             {supplierOptions.map((s) => (
               <option key={s.id} value={s.id}>{s.name}</option>
@@ -574,7 +581,7 @@ const stickyTotalRow = {
         className="asp-badge"
         style={{ "--asp-accent": supplierAccent(supplierId) }}
       >
-             {supplierLabel}
+      {supplierLabel}
       </span>
       {brandLabel && (
         <span

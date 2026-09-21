@@ -126,7 +126,7 @@ useEffect(() => {
       { id:"inv",     label:"Inventory",         icon:I.pkg,  cnt:inv.length },
       { id:"coa",     label:"Chart of Accounts", icon:I.coa  },
       { id:"reports", label:"Reports",           icon:I.print },
-      { id:"areaReport", label:"Area Sales & Purchase", icon:I.chart },
+         { id:"areaReport", label:"Area Sales & Purchase", icon:I.chart },
       { id:"bank",    label:"Bank",              icon:I.bank  },
     ]},
   ];

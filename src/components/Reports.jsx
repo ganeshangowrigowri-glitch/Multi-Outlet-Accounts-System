@@ -71,7 +71,6 @@ const LOAN_CRATE_TYPES = [
   "plastic_wh", "plastic_ug", "plastic_toddy", "plastic_beer",
   "wood_ugn", "wood_q", "wood_p", "wood_n",
 ];
-
 // First day of a given YYYY-MM string
 const monthStart = m => m ? `${m}-01` : null;
 // Last day of a given YYYY-MM string
@@ -3254,7 +3253,7 @@ function UGBook({ d, outlet, month }) {
 // Amount Different / Payment Different corrections). Used by Stock
 // Summary so its "Credit Outstanding" can never drift from what
 // Supplier Credit Ledger shows for the same supplier/month.
-async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, apPayments) {
+  async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, apPayments) {
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
   const isSupMatch = raw => normSup(raw) === normSup(supplierId);
