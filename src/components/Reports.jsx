@@ -780,14 +780,24 @@ Object.keys(cosByItem).forEach(code => {
       // multiple empty-bottle varieties from the same supplier (e.g. DCSL's
       // DEMP Q / DEMP P / DEMP N) get fully independent daily figures and
       // running balances, while still nesting under the supplier for display.
-      const empDailyData={};   // itemKey -> { day: {...} }
+          const empDailyData={};   // itemKey -> { day: {...} }
       const empItemMeta={};    // itemKey -> { supplier, code, label }
       sales.forEach(s=>{ const day=dayOf(s.date);
         (s.items||[]).filter(r=>r.isEmptyItem&&r.supplier!=="EMPTY PURCHASE").forEach(e=>{
           const supplier = e.supplier || "Empty";
           const itemCode = e.code || e.itemCode || e.name || "ITEM";
           const key = `${supplier}::${itemCode}`;
-          if(!empItemMeta[key]) empItemMeta[key] = { supplier, code: itemCode, label: e.name || itemCode };
+          // The size/type (Q/P/N) is already the last word of the item's
+          // own code (Empty Stock master shows codes like "DEMP Q",
+          // "DEMP P", "DEMP N" — confirmed against the inventory screen),
+          // and separate sale rows already exist per size (each with its
+          // own distinct code), so pulling it straight from itemCode here
+          // needs no separate master-table lookup and can't go stale.
+          // e.name on the saved sale row is generic ("DES EMP") for every
+          // size, which is why the label needs this suffix appended.
+          const codeParts = itemCode.trim().split(/\s+/);
+          const sizeSuffix = codeParts.length > 1 ? codeParts[codeParts.length - 1] : "";
+          if(!empItemMeta[key]) empItemMeta[key] = { supplier, code: itemCode, label: (e.name || itemCode) + (sizeSuffix ? ` - ${sizeSuffix}` : "") };
           if(!empDailyData[key]) empDailyData[key]={};
           if(!empDailyData[key][day]) empDailyData[key][day]={sold:0,return_:0,purchase:0,invPurchase:0,received:0,invIssue:0,issue:0,stkSE:0};
           empDailyData[key][day].sold+=parseFloat(e.sold)||0; empDailyData[key][day].return_+=parseFloat(e.return_)||0;
@@ -1208,12 +1218,16 @@ function BalanceSheet({ d, outlet, month }) {
 // Per PDF: Owner's Capital + Net Profit - Drawings - Commission = Total Capital
 // ══════════════════════════════════════════════════════
   function CapitalSheet({ d, outlet, month }) {
-   const {
+     const {
     cashBal, bankBal, endStockVal, coaCapital,
     capitalByParty = {}, totalCapitalIn = 0, totalCapitalOut = 0,
     personalDrawings = 0, otherCashPayments = 0, ocpByCategory = {},
-    sup6PctDiscBySup = {}, supVatDiscBySup = {},
   } = d;
+  // NOTE: sup6PctDiscBySup / supVatDiscBySup (UG & IDL Sales Commission)
+  // are no longer used on the Capital Sheet — both commissions have been
+  // removed from the Capital category per updated spec. They remain
+  // available on Income Statement (d.sup6PctDiscBySup / d.supVatDiscBySup)
+  // — this destructure change is local to CapitalSheet only.
     // NOT d.netProfit — that's computed from the old Daily-Sale-based
     // stock figures. Income Statement's ACTUAL displayed Net Profit/Loss
     // is a separate local calculation there, built from the IS-based
@@ -1273,11 +1287,7 @@ function BalanceSheet({ d, outlet, month }) {
     }
   }
 
-  // ── UG / IDL Sales Commissions — reuses the SAME sup6PctDiscBySup /
-  // supVatDiscBySup values already computed once in useReportData for the
-  // Income Statement fix (no duplicate calculation) — item 4.
-  const ugCommission  = (sup6PctDiscBySup["2003-UG"]  || 0) + (supVatDiscBySup["2003-UG"]  || 0);
-  const idlCommission = (sup6PctDiscBySup["2004-IDL"] || 0) + (supVatDiscBySup["2004-IDL"] || 0);
+
 
   // ── Capital Represented By — Stock Summary's own Net Position Total,
   // for the selected outlet/month (item 10) ──
@@ -1288,16 +1298,21 @@ function BalanceSheet({ d, outlet, month }) {
     return () => { cancelled = true; };
   }, [outlet, month, d]);
 
-  const parties = Object.keys(capitalByParty);
+   const parties = Object.keys(capitalByParty);
 
-  // Item 5: Owners' Capital + Net Profit/Loss − Personal Drawings − UG − IDL
-  const totalCapitalItem5 = ownersCapital + netProfit - personalDrawings - ugCommission - idlCommission;
+  // Total Capital (before Partner Contribution/Drawings) = Owners' Capital
+  // + Net Profit/Loss only. UG Sales Commission and Personal Drawings no
+  // longer reduce this figure — Personal Drawings now flows into
+  // Drawings (TO) below instead (per updated spec).
+  const totalCapitalBase = ownersCapital + netProfit;
 
-  // Item 9: Net Profit/Loss + Contributions − (Partner Drawings TO +
-  // applicable Other Cash Payment drawings — otherCashPayments already IS
-  // that total, month-scoped, from S_Expenses.jsx's Other Cash Payments)
-  const totalDrawingsTO = totalCapitalOut + otherCashPayments;
-  const totalCapitalItem9 = netProfit + totalCapitalIn - totalDrawingsTO;
+  // Drawings (TO) — unchanged Partner Drawings (totalCapitalOut) + Other
+  // Cash Payment drawings (otherCashPayments), now ALSO including Personal
+  // Drawings (personalDrawings), per updated spec.
+  const totalDrawingsTO = totalCapitalOut + otherCashPayments + personalDrawings;
+
+  // Final Total Capital = Total Capital + Contributions (BY) − Drawings (TO)
+  const finalTotalCapital = totalCapitalBase + totalCapitalIn - totalDrawingsTO;
 
   return (
     <ReportWrap title="Capital Sheet" outlet={outlet} month={month}>
@@ -1324,45 +1339,67 @@ function BalanceSheet({ d, outlet, month }) {
           </div>
         </td>
       </tr>
-
-      <SH>Capital Summary</SH>
+          <SH>Capital Summary</SH>
       <TR label="Owners' Capital" col2={ownersCapital} indent={1} />
-      <TR label="Net Profit / (Loss)" col2={netProfit} indent={1} />
-      {personalDrawings > 0 && <TR label="(-) Personal Drawings" col2={personalDrawings} neg indent={1} />}
-      {ugCommission > 0 && <TR label="(-) UG Sales Commission" col2={ugCommission} neg indent={1} />}
-      {idlCommission > 0 && <TR label="(-) IDL Sales Commission" col2={idlCommission} neg indent={1} />}
+       <TR label="Net Profit / (Loss)" col2={netProfit} indent={1} />
             {coaCapital
         .filter(a => a.id >= "3003")
-        // Exclude accounts that duplicate the real, calculated UG/IDL Sales
-        // Commission lines rendered above — those already show the actual
-        // amount; this fallback list is a placeholder-only list for OTHER
-        // 3003+ accounts and shouldn't repeat these two with a hardcoded 0.
-        .filter(a => !/UG Sales Commission/i.test(a.name || "") && !/IDL Sales Commission/i.test(a.name || ""))
+        // UG Sales Commission, IDL Sales Commission, and Personal Drawing
+        // are no longer part of this placeholder-only fallback list — UG/
+        // IDL Commission were removed from the Capital category entirely,
+        // and Personal Drawing already renders with its real computed
+        // value under Drawings (TO) below, so it must not also appear
+        // here as a second, zero-value placeholder row.
+        .filter(a => !/UG Sales Commission/i.test(a.name || "") && !/IDL Sales Commission/i.test(a.name || "") && !/Personal Drawing/i.test(a.name || ""))
         .map(a => (
           <TR key={a.id} label={`(-) ${a.name}`} col2={0} neg indent={1} />
         ))}
-      <TR label="Total Capital" val={totalCapitalItem5} bold total />
+      <TR label="Total" val={totalCapitalBase} bold total />
 
-      <SH>Partner Contributions (BY)</SH>
+      <SH>Contributions (BY)</SH>
       {parties.length === 0 && <TR label="No contributions/drawings recorded this period" col2="" indent={1} />}
       {parties.filter(p => capitalByParty[p].in > 0).map(p => (
         <TR key={`in-${p}`} label={`BY ${p}`} col2={capitalByParty[p].in} indent={1} />
       ))}
       <TR label="Total Contributions" val={totalCapitalIn} bold total />
 
-      <SH>Partner Drawings (TO)</SH>
+      <SH> Drawings (TO)</SH>
       {parties.filter(p => capitalByParty[p].out > 0).map(p => (
         <TR key={`out-${p}`} label={`TO ${p}`} col2={capitalByParty[p].out} neg indent={1} />
       ))}
         {Object.entries(ocpByCategory).filter(([, amt]) => amt > 0).map(([label, amt]) => (
         <TR key={`ocp-${label}`} label={label === "MR.KK LOAN" ? "K.K Loan" : label} col2={amt} neg indent={1} />
       ))}
+      <TR label="Personal Drawings" col2={personalDrawings} neg indent={1} />
       <TR label="Total Drawings" val={totalDrawingsTO} bold total neg />
 
-      <TR label="Total Capital (Net Profit + Contributions − Drawings)" val={totalCapitalItem9} bold total />
+      <TR label="Total Capital" val={finalTotalCapital} bold total />
 
       <SH>Capital Represented By</SH>
-      <TR label="Stock Summary — Net Position Total" val={netPositionTotal ?? 0} bold total />
+      <TR label="Balance Stock" val={netPositionTotal ?? 0} bold total />
+
+      {(() => {
+        // Difference = Final Total Capital − Balance Stock.
+        // Total Capital > Balance Stock → Short; Total Capital < Balance
+        // Stock → Excess; equal → No Difference. Display uses the absolute
+        // amount alongside the status label, per spec.
+        const balanceStock = netPositionTotal ?? 0;
+        const difference = finalTotalCapital - balanceStock;
+        const status = difference > 0 ? "Short" : difference < 0 ? "Excess" : "No Difference";
+        const statusColor = difference > 0 ? "var(--red)" : difference < 0 ? "var(--grn)" : "var(--mut)";
+        return (
+          <>
+            <TR label="Difference" val={Math.abs(difference)} bold total neg={difference > 0} />
+            <tr>
+              <td style={{ padding: "5px 12px", fontSize: 12, fontWeight: 700, color: "var(--mut)" }}>Status</td>
+              <td></td>
+              <td style={{ padding: "5px 14px", textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontSize: 12, fontWeight: 700, color: statusColor }}>
+                {status}
+              </td>
+            </tr>
+          </>
+        );
+      })()}
 
       <tr>
         <td colSpan={3} style={{ padding: "10px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
@@ -3322,25 +3359,34 @@ async function computeSupplierDiscountVAT(outlet, month, supplierId, apInvoices)
 // alter any state inside the StockSummary component itself.
 async function computeNetPositionTotal(outlet, month, d) {
   const stockVal = d.endStockValIS;
-  let bankTotal = d.bankBal;
+  // Bank total: use d.bankBal directly — the SAME value StockSummary's
+  // own totalPosition uses (`stockVal + d.emptyStockVal + d.cashBal +
+  // d.bankBal + cardTotal + extraAssetsTotal`). This used to be
+  // recomputed here from a separate per-account bank_accounts query,
+  // which could drift from d.bankBal (different account filtering / B/F
+  // source) and made "Balance Stock" on the Capital Sheet disagree with
+  // Stock Summary's own Net Position for the same outlet/month.
+    let bankTotal = d.bankBal;
   let cardTotal = 0;
 
   if (outlet !== "ALL") {
-    const [{ data: bankRows }, { data: cardRows }] = await Promise.all([
-      supabase.from("bank_accounts").select("*")
-        .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
-        .neq("account_type", "card"),
-      supabase.from("bank_accounts").select("*")
-        .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
-        .eq("account_type", "card"),
-    ]);
-    const excl = ["bf", "bf_monthly", "pending", "cd_manual", "different"];
-    bankTotal = 0;
-    for (const acc of (bankRows || [])) {
-      const bf = await getBankBF(outlet, acc.id);
-      const txns = (d.bankLedger || []).filter(r => r.bank_id === acc.id && !excl.includes(r.balance_type));
-      bankTotal += (Number(bf) || 0) + txns.reduce((a, r) => a + (Number(r.debit) || 0) - (Number(r.credit) || 0), 0);
+    // Same per-account bank total Stock Summary uses (active, non-hidden,
+    // non-card accounts: B/F + month's ledger txns, marker rows excluded).
+    const { data: bankRows } = await supabase.from("bank_accounts").select("*")
+      .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+      .neq("account_type", "card");
+    if (bankRows && bankRows.length) {
+      const excl = ["bf", "bf_monthly", "pending", "cd_manual", "different"];
+      bankTotal = 0;
+      for (const acc of bankRows) {
+        const bf = await getBankBF(outlet, acc.id);
+        const txns = (d.bankLedger || []).filter(r => r.bank_id === acc.id && !excl.includes(r.balance_type));
+        bankTotal += (Number(bf) || 0) + txns.reduce((a, r) => a + (Number(r.debit) || 0) - (Number(r.credit) || 0), 0);
+      }
     }
+    const { data: cardRows } = await supabase.from("bank_accounts").select("*")
+      .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
+      .eq("account_type", "card");
     for (const acc of (cardRows || [])) {
       cardTotal += Number(await getCardCD(outlet, acc.id, month)) || 0;
     }
@@ -3574,8 +3620,15 @@ const assetOthersEntries = assetOthersCat
     .filter(r => Math.abs(r.balance) > 0.5)
     .sort((a, b) => b.balance - a.balance);
 
-    const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
-  const totalPosition = stockVal + d.emptyStockVal + d.cashBal + d.bankBal + cardTotal + extraAssetsTotal;
+   const totalCredit = creditRows.reduce((a, r) => a + r.balance, 0);
+  // Bank total: sum of the SAME per-account rows shown above (bankAccountRows)
+  // instead of the separately-computed d.bankBal — these two figures could
+  // disagree (different B/F source / account filtering), which made this
+  // TOTAL row not match the sum of the individual bank rows displayed just
+  // above it. bankAccountRows already falls back to d.bankBal as a single
+  // combined row when outlet === "ALL", so behaviour there is unchanged.
+  const bankTotalForPosition = bankAccountRows.reduce((a, r) => a + r.balance, 0);
+  const totalPosition = stockVal + d.emptyStockVal + d.cashBal + bankTotalForPosition + cardTotal + extraAssetsTotal;
   const netPosition = totalPosition - totalCredit - otherCreditsTotal;
   // Display-only subtotal for the "Stock + Empty + Bank and Card" UI group —
   // derived purely from totalPosition/extraAssetsTotal (both already

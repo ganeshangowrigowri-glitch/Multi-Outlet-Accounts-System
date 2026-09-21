@@ -1511,7 +1511,7 @@ export async function getEmptyInventoryMaster() {
 // CRATE_TYPES values, e.g. "CRATE::plastic_wh").
 export const getEmptyLoanRegister = async (outlet, period) => {
   const { data, error } = await supabase
-    .from("empty_loan_bf").select("item_key,bf_loan,rate")
+    .from("empty_loan_bf").select("item_key,bf_loan,rate,actual_override")
     .eq("outlet_id", outlet).eq("period", period);
   if (error) { console.error("getEmptyLoanRegister:", error); return {}; }
   const map = {};
@@ -1519,6 +1519,7 @@ export const getEmptyLoanRegister = async (outlet, period) => {
     map[r.item_key] = {
       bfLoan: Number(r.bf_loan) || 0,
       rate: r.rate === null || r.rate === undefined ? null : Number(r.rate),
+      actualOverride: r.actual_override === null || r.actual_override === undefined ? null : Number(r.actual_override),
     };
   });
   return map;
@@ -1526,15 +1527,18 @@ export const getEmptyLoanRegister = async (outlet, period) => {
 
 // Upserts bf_loan and/or rate for one item/period. Merges with whatever is
 // already stored so saving just one field never clobbers the other.
-export const upsertEmptyLoanEntry = async (outlet, itemKey, period, { bfLoan, rate } = {}) => {
+export const upsertEmptyLoanEntry = async (outlet, itemKey, period, { bfLoan, rate, actualOverride } = {}) => {
   const { data: existing } = await supabase
-    .from("empty_loan_bf").select("bf_loan,rate")
+    .from("empty_loan_bf").select("bf_loan,rate,actual_override")
     .eq("outlet_id", outlet).eq("item_key", itemKey).eq("period", period)
     .maybeSingle();
   const row = {
     outlet_id: outlet, item_key: itemKey, period,
     bf_loan: bfLoan !== undefined ? (Number(bfLoan) || 0) : (existing?.bf_loan ?? 0),
     rate: rate !== undefined ? (rate === "" || rate === null ? null : Number(rate)) : (existing?.rate ?? null),
+    actual_override: actualOverride !== undefined
+      ? (actualOverride === "" || actualOverride === null ? null : Number(actualOverride))
+      : (existing?.actual_override ?? null),
     updated_at: new Date().toISOString(),
   };
   const { error } = await supabase.from("empty_loan_bf")
