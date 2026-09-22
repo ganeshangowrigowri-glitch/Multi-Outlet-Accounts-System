@@ -1504,7 +1504,7 @@ function BalanceSheet({ d, outlet, month }) {
 //   | PURCHASE | SOLD | OTHER
 // ══════════════════════════════════════════════════════════════════════════
 
-const BRAND_CONFIG = [
+export const BRAND_CONFIG = [
   {
     key: "IDL",
     label: "IDL",
@@ -1550,12 +1550,12 @@ const BRAND_CONFIG = [
 ];
 
 // Normalise supplier string: strip "XXXX-" numeric prefix, uppercase, trim
-function normSup(raw) {
+export function normSup(raw) {
   return (raw || "").replace(/^\d{4}-/, "").toUpperCase().trim();
 }
 
 // Return the brand key for a given raw supplier string, or null
-function brandOf(rawSupplier) {
+export function brandOf(rawSupplier) {
   const s = normSup(rawSupplier);
   for (const b of BRAND_CONFIG) {
     if (b.match(s)) return b.key;
@@ -3253,7 +3253,8 @@ function UGBook({ d, outlet, month }) {
 // Amount Different / Payment Different corrections). Used by Stock
 // Summary so its "Credit Outstanding" can never drift from what
 // Supplier Credit Ledger shows for the same supplier/month.
-  async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, apPayments) {
+  
+   export async function computeSupplierBalanceCD(outlet, month, supplierId, apInvoices, apPayments) {
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
   const isSupMatch = raw => normSup(raw) === normSup(supplierId);
@@ -3316,6 +3317,66 @@ function UGBook({ d, outlet, month }) {
 // never disagree with what Supplier Credit Ledger shows for the same
 // supplier/month. Read-only against apInvoices; does not touch or alter
 // any Supplier Credit Ledger state/calculation.
+// Per-supplier physical stock value for ONE outlet+month — copied
+// verbatim from the stockValBySupplier block inside useReportData
+// (endStockItemMap / endStockVal logic, unchanged), just made callable
+// standalone so Admin reports can reuse it without mounting the full
+// per-outlet report hook. Does NOT touch or duplicate any other
+// calculation — same getSales/getInventoryMaster reads useReportData
+// already uses. invMap can be passed in (precomputed once) when looping
+// many outlets; otherwise it's fetched here.
+export async function computeStockValBySupplier(outlet, month, invMap) {
+  const mEnd = monthEnd(month);
+  const mStart = monthStart(month);
+
+  if (!invMap) {
+    const inv = await getInventoryMaster();
+    invMap = {};
+    (inv || []).forEach(i => { invMap[i.code] = i; if (i.id) invMap[i.id] = i; });
+  }
+
+  const rawSales = await getSales(outlet);
+  const sales = mStart
+    ? (rawSales || []).filter(r => r.date >= mStart && r.date <= mEnd)
+    : (rawSales || []);
+
+  const stockValBySupplier = {};
+  const salesSorted = [...sales]
+    .filter(s => (s.items || []).some(r => !r.isEmptyItem))
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+
+  const endDateSales = mEnd ? salesSorted.filter(s => s.date === mEnd) : [];
+  const endSalesToUse = endDateSales.length > 0 ? endDateSales : salesSorted.slice(0, 1);
+
+  const endStockItemMap = {};
+  endSalesToUse.forEach(sale => {
+    (sale.items || []).filter(r => !r.isEmptyItem).forEach(r => {
+      const es = parseFloat(r.endStock);
+      if (isNaN(es)) return;
+      const existing = endStockItemMap[r.code];
+      const soldQty = parseFloat(r.sold) || 0;
+      if (!existing) {
+        endStockItemMap[r.code] = { ...r, _sold: soldQty };
+      } else if (soldQty > 0 && existing._sold === 0) {
+        endStockItemMap[r.code] = { ...r, _sold: soldQty };
+      } else if (es > parseFloat(existing.endStock)) {
+        endStockItemMap[r.code] = { ...r, _sold: soldQty };
+      }
+    });
+  });
+
+  Object.entries(endStockItemMap).forEach(([code, r]) => {
+    const item = invMap[code] || invMap[r.id];
+    const uc = Number(item?.unitCost) || Number(r.unitCost) || 0;
+    const q  = parseFloat(r.endStock) || 0;
+    if (q > 0 && uc > 0 && r.supplier) {
+      stockValBySupplier[r.supplier] = (stockValBySupplier[r.supplier] || 0) + q * uc;
+    }
+  });
+
+  return stockValBySupplier;
+}
+
 async function computeSupplierDiscountVAT(outlet, month, supplierId, apInvoices) {
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
@@ -3349,7 +3410,7 @@ async function computeSupplierDiscountVAT(outlet, month, supplierId, apInvoices)
 
   return { sixPctDis, vatDis };
 }
- 
+
   // Computes the SAME "Net Position" total Stock Summary shows, for one
 // outlet+month, by calling the exact same underlying functions Stock
 // Summary uses (getBankBF, getCardCD, computeSupplierBalanceCD) — so

@@ -10,6 +10,7 @@ import InventoryAdmin from "./InventoryAdmin";
 import ChartOfAccounts from "../ChartOfAccounts";
 import A_Bank from "./AdminBank";
 import AreaSalesPurchaseReport from "./AreaSalesPurchaseReport";
+import PhysicalStockAreaReport from "./PhysicalStockAreaReport";
 
 import {
   getClerks, saveClerks, addClerk, updateClerk, deleteClerk,
@@ -125,8 +126,9 @@ useEffect(() => {
     { label:"Financial", items:[
       { id:"inv",     label:"Inventory",         icon:I.pkg,  cnt:inv.length },
       { id:"coa",     label:"Chart of Accounts", icon:I.coa  },
-      { id:"reports", label:"Reports",           icon:I.print },
+          { id:"reports", label:"Reports",           icon:I.print },
          { id:"areaReport", label:"Area Sales & Purchase", icon:I.chart },
+         { id:"physicalStockArea", label:"Physical Stock – Area", icon:I.pkg },
       { id:"bank",    label:"Bank",              icon:I.bank  },
     ]},
   ];
@@ -135,7 +137,8 @@ useEffect(() => {
     dash:"Dashboard", odata:"Outlet Data Viewer",
     clerks:"Staff Management", outlets:"Outlets",
     access:"Access Control", inv:"Inventory",
-    coa:"Chart of Accounts", reports:"Reports", areaReport:"Area Sales & Purchase",
+       coa:"Chart of Accounts", reports:"Reports", areaReport:"Area Sales & Purchase",
+    physicalStockArea:"Physical Stock – Area Wise",
     bank:"Bank"
   };
 
@@ -309,6 +312,7 @@ useEffect(() => {
           {page==="coa"     && <ChartOfAccounts user={{...user,role:"admin"}}/>}
           {page==="reports" && <Reports user={user}/>}
           {page==="areaReport" && <AreaSalesPurchaseReport outlets={outlets} toast_={t_}/>}
+          {page==="physicalStockArea" && <PhysicalStockAreaReport outlets={outlets} toast_={t_}/>}
           {page==="bank"    && <A_Bank outlets={outlets} toast_={t_}/>}
         </div>
       </div>
