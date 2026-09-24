@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect,  useRef} from "react";
 import { ls, lss } from "../../utils/helpers";
-import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride } from "../../db";
+import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride } from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SEED_EMPTY, SUPPLIERS_LIST, SUP_COLOR, ITEM_TYPES, OUTLETS, OUTLET_INV_SEEDS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -924,14 +924,24 @@ async function saveEmpty(data) {
 }
   const [items,     setItems]     = useState(loadEmpty);
   useEffect(() => {
-  const existing = loadEmptyFromStorage();
-  if (existing && existing.length > 0) {
-    console.log("Syncing empty inventory to Supabase:", existing.length, "items");
-    saveEmptyInventoryMaster(existing).then(() => {
-      console.log("Sync done ✓");
-    });
-  }
-}, []); 
+  // ✅ Supabase is the source of truth (same pattern Tab 1's Main Stock
+  // already uses via loadInvFromSupabase). Fetch it first and use it —
+  // only fall back to pushing local data up when Supabase has nothing
+  // yet (first-time setup), so a stale/empty local cache can never
+  // silently overwrite real saved prices again.
+  getEmptyInventoryMaster().then(data => {
+    if (data && data.length > 0) {
+      setItems(data);
+      lss("inv_empty_v2", data);
+    } else {
+      const existing = loadEmptyFromStorage();
+      if (existing && existing.length > 0) {
+        console.log("Seeding Supabase from local empty inventory:", existing.length, "items");
+        saveEmptyInventoryMaster(existing).then(() => console.log("Seed done ✓"));
+      }
+    }
+  });
+}, []);
  
   const [supF,      setSupF]      = useState("ALL");
   const [search,    setSearch]    = useState("");
@@ -986,13 +996,23 @@ async function saveEmpty(data) {
     if (!form.code || !form.name || !form.supplier) {
       toast_("Fill code, name and supplier", "err"); return;
     }
+
+    // ── Dated price history (same logic as Outlet Empty Inventory Tab 4) ──
+    const pDate        = form.priceDate || today();
+    const unitCost      = Number(form.unitCost)     || 0;
+    const sellingPrice  = Number(form.sellingPrice) || 0;
+    const prevHistory   = (modal !== "add" && modal.priceHistory) ? modal.priceHistory : [];
+    const priceHistory  = [
+      ...prevHistory.filter(h => h.date !== pDate),
+      { date: pDate, unitCost, sellingPrice },
+    ].sort((a, b) => a.date.localeCompare(b.date));
+
     const item = {
   ...form,
   id: modal === "add" 
     ? `${form.supplier.replace(/\s/g,"_")}_${form.code.replace(/\s/g,"")}` 
     : form.id,
-  unitCost:     Number(form.unitCost)     || 0,
-  sellingPrice: Number(form.sellingPrice) || 0,
+  unitCost, sellingPrice, priceHistory,
   qty:          Number(form.qty)          || 0,
   type:         form.type || "",
 };
@@ -1012,8 +1032,18 @@ setModal(null);
 
 
 async function savePrice() {
+  //  Same dated priceHistory logic as saveItem() / Tab 4 saveEdit() —
+  // new price effective from pDate onward; earlier dates untouched.
+  const pDate        = pf.priceDate || today();
+  const unitCost     = Number(pf.unitCost)     || 0;
+  const sellingPrice = Number(pf.sellingPrice) || 0;
+  const prevHistory  = priceM.priceHistory || [];
+  const priceHistory = [
+    ...prevHistory.filter(h => h.date !== pDate),
+    { date: pDate, unitCost, sellingPrice },
+  ].sort((a, b) => a.date.localeCompare(b.date));
   await saveEmpty(items.map(i => i.id === priceM.id
-    ? { ...i, unitCost: Number(pf.unitCost) || 0, sellingPrice: Number(pf.sellingPrice) || 0 }
+    ? { ...i, unitCost, sellingPrice, priceHistory }
     : i
   ));
   toast_("Prices updated ✓");
@@ -1070,14 +1100,14 @@ async function savePrice() {
         {isAdmin && (
           <td>
             <div style={{display:"flex",gap:2}}>
-              <button className="btngh" title="Change Price"
-                onClick={()=>{ setPf({unitCost:item.unitCost, sellingPrice:item.sellingPrice}); setPriceM(item); }}>
+               <button className="btngh" title="Change Price"
+                onClick={()=>{ setPf({unitCost:item.unitCost, sellingPrice:item.sellingPrice, priceDate:today()}); setPriceM(item); }}>
                 {I.tag}
               </button>
               <button className="btngh" title="Edit"
-                onClick={()=>{ setForm({...item}); setModal(item); }}>
-                {I.edit}
-              </button>
+              onClick={()=>{setForm({...item,priceDate:today()});setModal(item);}}>
+             {I.edit}
+             </button>
               <button className="btndel" title="Delete" onClick={()=>deleteItem(item)}>
                 {I.trash}
               </button>
@@ -1120,14 +1150,15 @@ async function savePrice() {
         </div>
         {isAdmin && (
           <div style={{marginLeft:"auto"}}>
-            <button className="btn btng" onClick={()=>{
-              setForm({
-                code:"", name:"",
-                supplier: supF!=="ALL" ? supF : (getAllSups()[0] || "DCSL"),
-                unitCost:"", sellingPrice:"", qty:0,
-              });
-              setModal("add");
-            }}>{I.plus} Add Empty Item</button>
+           <button className="btn btng" onClick={()=>{
+  setForm({
+    code:"", name:"",
+    supplier: supF!=="ALL" ? supF : (getAllSups()[0] || "DCSL"),
+    unitCost:"", sellingPrice:"", qty:0,
+    priceDate: today(),
+  });
+  setModal("add");
+}}>{I.plus} Add Empty Item</button>
           </div>
         )}
       </div>
@@ -1214,17 +1245,23 @@ async function savePrice() {
         </select>
       </div>
     </div>
-    <div className="fg3">
-      <div className="ff"><label>Unit Cost (Rs.)</label>
-        <input type="number" value={form.unitCost}
-          onChange={e=>setForm({...form,unitCost:e.target.value})} placeholder="0.00"/>
-      </div>
-      <div className="ff"><label>Selling Price (Rs.)</label>
-        <input type="number" value={form.sellingPrice}
-          onChange={e=>setForm({...form,sellingPrice:e.target.value})} placeholder="0.00"/>
-      </div>
-      
-    </div>
+  <div className="fg3">
+  <div className="ff"><label>Unit Cost (Rs.)</label>
+    <input type="number" value={form.unitCost}
+      onChange={e=>setForm({...form,unitCost:e.target.value})} placeholder="0.00"/>
+  </div>
+  <div className="ff"><label>Selling Price (Rs.)</label>
+    <input type="number" value={form.sellingPrice}
+      onChange={e=>setForm({...form,sellingPrice:e.target.value})} placeholder="0.00"/>
+  </div>
+  <div className="ff"><label>Price Change Date</label>
+    <input type="date" value={form.priceDate || today()}
+      onChange={e=>setForm({...form,priceDate:e.target.value})}/>
+  </div>
+</div>
+<div style={{fontSize:11,color:"var(--mut)",marginTop:-6,marginBottom:8}}>
+  New cost/price apply from this date onward, until the next change. Past dates are never overwritten.
+</div>
     {form.unitCost && form.sellingPrice && Number(form.unitCost) > 0 && (
       <div style={{background:"var(--s2)",borderRadius:6,padding:"7px 11px",fontSize:11.5,
         border:"1px solid var(--bdr)",marginTop:4}}>
@@ -1250,7 +1287,7 @@ async function savePrice() {
             Current — Cost: <strong style={{color:"var(--txt)"}}>Rs.{fmt(priceM.unitCost)}</strong>
             &nbsp;&nbsp;Price: <strong style={{color:"var(--txt)"}}>Rs.{fmt(priceM.sellingPrice)}</strong>
           </div>
-          <div className="fg">
+            <div className="fg">
             <div className="ff"><label>New Unit Cost (Rs.)</label>
               <input type="number" value={pf.unitCost}
                 onChange={e=>setPf({...pf,unitCost:e.target.value})}/>
@@ -1258,6 +1295,14 @@ async function savePrice() {
             <div className="ff"><label>New Selling Price (Rs.)</label>
               <input type="number" value={pf.sellingPrice}
                 onChange={e=>setPf({...pf,sellingPrice:e.target.value})}/>
+            </div>
+          </div>
+          <div className="ff" style={{marginBottom:10}}>
+            <label>Price Change Date</label>
+            <input type="date" value={pf.priceDate || today()}
+              onChange={e=>setPf({...pf,priceDate:e.target.value})}/>
+            <div style={{fontSize:11,color:"var(--mut)",marginTop:3}}>
+              New cost/price apply from this date onward, until the next change. Past dates are never overwritten.
             </div>
           </div>
           {pf.unitCost && pf.sellingPrice && Number(pf.unitCost) > 0 && (
@@ -1608,9 +1653,20 @@ useEffect(() => {
   function saveItem() {
     if (!iForm.code||!iForm.name){toast_("Fill code and name","err");return;}
     const finalType = typeInput.trim() || iForm.type || "Q";
+
+    // ── Dated price history (same logic as Outlet Inventory Tab 3) ──
+    const pDate       = iForm.priceDate || today();
+    const unitCost     = Number(iForm.unitCost)     || 0;
+    const sellingPrice = Number(iForm.sellingPrice) || 0;
+    const prevHistory  = (iModal !== "add" && iModal.priceHistory) ? iModal.priceHistory : [];
+    const priceHistory = [
+      ...prevHistory.filter(h => h.date !== pDate),
+      { date: pDate, unitCost, sellingPrice },
+    ].sort((a, b) => a.date.localeCompare(b.date));
+
     const item = { ...iForm, type:finalType, id:iForm.code,
-      qty:Number(iForm.qty)||0, unitCost:Number(iForm.unitCost)||0,
-      sellingPrice:Number(iForm.sellingPrice)||0 };
+      qty:Number(iForm.qty)||0, unitCost, sellingPrice, priceHistory };
+
     if (iModal==="add") {
     if (inv.find(i=>i.code===iForm.code && i.supplier===iForm.supplier)){toast_("Code already exists for this supplier","err");return;}
       si([...inv, item]); toast_("Added ✓");
@@ -1703,14 +1759,16 @@ async function saveSupplier() {
           {isAdmin && (
             <td>
               <div style={{display:"flex",gap:2}}>
-                <button className="btngh" title="Change Price"
-                  onClick={()=>{setPf({unitCost:item.unitCost,sellingPrice:item.sellingPrice});setPriceM(item);}}>
+                   <button className="btngh" title="Change Price"
+                  onClick={()=>{setPf({unitCost:item.unitCost,sellingPrice:item.sellingPrice,priceDate:today()});setPriceM(item);}}>
                   {I.tag}
                 </button>
+                       
                 <button className="btngh" title="Edit"
-                  onClick={()=>{setIForm({...item});setTypeInput(item.type||"");setIModal(item);}}>
-                  {I.edit}
-                </button>
+                onClick={()=>{ setIForm({...item, priceDate: today()}); setIModal(item); }}>
+                {I.edit}
+               </button>
+              
                 <button className="btndel" title="Delete"
                   onClick={()=>{if(!confirm(`Remove ${item.code}?`))return;si(inv.filter(i=>i.id!==item.id));toast_("Removed");}}>
                   {I.trash}
@@ -1823,11 +1881,12 @@ async function saveSupplier() {
             </div>
             {isAdmin && (
               <div style={{marginLeft:"auto"}}>
-                <button className="btn btng" onClick={()=>{
-                  setIForm({code:"",name:"",description:"",type:"Q",
-                    supplier:supF!=="ALL"?supF:"2001-DCSL",unitCost:"",sellingPrice:"",qty:0});
-                  setTypeInput("Q"); setIModal("add");
-                }}>{I.plus} Add Item</button>
+              <button className="btn btng" onClick={()=>{
+              setIForm({code:"",name:"",description:"",type:"Q",
+              supplier:supF!=="ALL"?supF:"2001-DCSL",unitCost:"",sellingPrice:"",qty:0,
+              priceDate:today()});
+               setTypeInput("Q"); setIModal("add");
+                 }}>{I.plus} Add Item</button>
               </div>
             )}
           </div>
@@ -2137,25 +2196,42 @@ async function saveSupplier() {
               </select>
             </div>
           </div>
-          <div className="fg">
-            <div className="ff"><label>Unit Cost (Rs.)</label>
-              <input type="number" value={iForm.unitCost} onChange={e=>setIForm({...iForm,unitCost:e.target.value})} placeholder="0.00"/>
-            </div>
-            <div className="ff"><label>Selling Price (Rs.)</label>
-              <input type="number" value={iForm.sellingPrice} onChange={e=>setIForm({...iForm,sellingPrice:e.target.value})} placeholder="0.00"/>
-            </div>
-            
-          </div>
+         <div className="fg">
+  <div className="ff"><label>Unit Cost (Rs.)</label>
+    <input type="number" value={iForm.unitCost} onChange={e=>setIForm({...iForm,unitCost:e.target.value})} placeholder="0.00"/>
+  </div>
+  <div className="ff"><label>Selling Price (Rs.)</label>
+    <input type="number" value={iForm.sellingPrice} onChange={e=>setIForm({...iForm,sellingPrice:e.target.value})} placeholder="0.00"/>
+  </div>
+</div>
+<div className="ff" style={{marginBottom:10}}>
+  <label>Price Change Date</label>
+  <input type="date" value={iForm.priceDate || today()}
+    onChange={e=>setIForm({...iForm,priceDate:e.target.value})}/>
+  <div style={{fontSize:11,color:"var(--mut)",marginTop:3}}>
+    New cost/price apply from this date onward, until the next change. Past dates are never overwritten.
+  </div>
+</div>
         </Modal>
       )}
 
       {/* ── PRICE CHANGE MODAL (main inventory) ── */}
-      {priceM && isAdmin && (
+           {priceM && isAdmin && (
         <Modal title={`Change Prices — ${priceM.code} ${priceM.name}`} onClose={()=>setPriceM(null)}
           footer={<>
             <button className="btn btnd" onClick={()=>setPriceM(null)}>Cancel</button>
             <button className="btn btng" onClick={()=>{
-              si(inv.map(i=>i.id===priceM.id?{...i,unitCost:Number(pf.unitCost),sellingPrice:Number(pf.sellingPrice)}:i));
+              // ✅ Same dated priceHistory logic as saveItem() / Tab 3 saveEdit() —
+              // new price effective from pDate onward; earlier dates untouched.
+              const pDate        = pf.priceDate || today();
+              const unitCost     = Number(pf.unitCost)     || 0;
+              const sellingPrice = Number(pf.sellingPrice) || 0;
+              const prevHistory  = priceM.priceHistory || [];
+              const priceHistory = [
+                ...prevHistory.filter(h => h.date !== pDate),
+                { date: pDate, unitCost, sellingPrice },
+              ].sort((a, b) => a.date.localeCompare(b.date));
+              si(inv.map(i=>i.id===priceM.id?{...i,unitCost,sellingPrice,priceHistory}:i));
               toast_("Main prices updated ✓"); setPriceM(null);
             }}>{I.check} Update Main Price</button>
           </>}>
@@ -2170,6 +2246,14 @@ async function saveSupplier() {
             </div>
             <div className="ff"><label>New Selling Price (Rs.)</label>
               <input type="number" value={pf.sellingPrice} onChange={e=>setPf({...pf,sellingPrice:e.target.value})}/>
+            </div>
+          </div>
+          <div className="ff" style={{marginBottom:10}}>
+            <label>Price Change Date</label>
+            <input type="date" value={pf.priceDate || today()}
+              onChange={e=>setPf({...pf,priceDate:e.target.value})}/>
+            <div style={{fontSize:11,color:"var(--mut)",marginTop:3}}>
+              New cost/price apply from this date onward, until the next change. Past dates are never overwritten.
             </div>
           </div>
           {pf.unitCost&&pf.sellingPrice&&Number(pf.unitCost)>0&&(

@@ -238,6 +238,7 @@ export const getInventoryMaster = async () => {
     id: i.id, code: i.code, name: i.name, type: i.type,
     description: i.description, supplier: i.supplier_id,
     unitCost: Number(i.unit_cost), sellingPrice: Number(i.selling_price),
+    priceHistory: i.price_history || [],
   }));
 };
  
@@ -246,6 +247,7 @@ export const saveInventoryMaster = async (items) => {
     id: i.id, code: i.code, name: i.name, type: i.type,
     description: i.description, supplier_id: i.supplier,
     unit_cost: i.unitCost, selling_price: i.sellingPrice,
+    price_history: i.priceHistory || [],
   }));
   const { error } = await supabase.from("inventory_master").upsert(rows);
   if (error) console.error("saveInventoryMaster:", error);
@@ -1469,6 +1471,7 @@ export async function saveEmptyInventoryMaster(items) {
         unit_cost:     Number(i.unitCost)     || 0,
         selling_price: Number(i.sellingPrice) || 0,
         qty:           Number(i.qty)          || 0,
+        price_history: i.priceHistory || [],
       })),
       { onConflict: "id" }
     );
@@ -1490,6 +1493,7 @@ export async function getEmptyInventoryMaster() {
     unitCost:     Number(i.unit_cost)     || 0,
     sellingPrice: Number(i.selling_price) || 0,
     qty:          Number(i.qty)           || 0,
+    priceHistory: i.price_history || [],
   }));
 }
 // ─── EMPTY / CRATE LOAN REGISTER ────────────────────────────────────────

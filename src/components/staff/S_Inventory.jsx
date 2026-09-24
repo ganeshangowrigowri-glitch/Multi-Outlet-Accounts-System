@@ -44,11 +44,16 @@ const EMPTY_RECEIVED_AUTO_MAP = [
       const ovKey = `${item.code}__${item.supplier}`;
       return item.type !== "EM" && !overrides[ovKey]?.hidden;
     })
-    // AFTER
-.map(item => {
+        .map(item => {
   const ovKey = `${item.code}__${item.supplier}`;
   const ov    = overrides[ovKey];
-  const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, item.unitCost, item.sellingPrice);
+  //  Resolve the MASTER price effective on this date first — same dated
+  // priceHistory logic already used for outlet overrides — so a Main
+  // Stock price change (Tab 1) never applies retroactively to earlier
+  // dates here either. This becomes the fallback for outlet pricing,
+  // exactly as item.unitCost/sellingPrice did before.
+  const base = resolveOutletPrice(item, d, item.unitCost, item.sellingPrice);
+  const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, base.unitCost, base.sellingPrice);
   return {
     ...item,
     unitCost,
@@ -57,6 +62,7 @@ const EMPTY_RECEIVED_AUTO_MAP = [
   };
 });
 }
+
 
 // ─────────────────────────────────────────────────────────────
 //  EMPTY STOCK SEED
@@ -106,12 +112,16 @@ const master =
     const overrides = overridesMap || {};
     const d = dateStr || today()
 
-      const result = master
+     const result = master
     .filter(item => item.supplier !== "EMPTY PURCHASE" && !overrides[`${item.code}__${item.supplier}`]?.hidden)
     .map(item => {
       const ovKey = `${item.code}__${item.supplier}`;
       const ov = overrides[ovKey];
-      const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, item.unitCost, item.sellingPrice);
+      // ✅ Resolve the MASTER empty price effective on this date first —
+      // same dated priceHistory logic as outlet overrides — before
+      // layering any outlet-specific override on top.
+      const base = resolveOutletPrice(item, d, item.unitCost, item.sellingPrice);
+      const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, base.unitCost, base.sellingPrice);
       return {
         ...item,
         id:           item.id || `${item.supplier}__${item.code}`.replace(/\s/g, "_"),
