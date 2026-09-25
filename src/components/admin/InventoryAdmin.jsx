@@ -963,8 +963,8 @@ async function saveEmpty(data) {
     return extra ? extra.color : (BASE_SUP_COLORS[sup] || "#94a3b8");
   }
 
-  function getAllSups() {
-    const base = [...new Set(EMPTY_SEED.map(i => i.supplier))];
+ function getAllSups() {
+  const base = [...new Set(EMPTY_SEED.map(i => i.supplier)), "EMPTY PURCHASE"];
     const extraIds = extraSups.map(s => s.id);
     const filtered = base.filter(id => !extraIds.includes(id));
     return [...filtered, ...extraSups.map(s => s.id)];

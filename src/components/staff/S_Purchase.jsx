@@ -5,6 +5,7 @@ import { uid } from "../../utils/helpers";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SUPPLIERS_LIST, COA_DEF } from "../../data/seeds";
 import { loadEmptyFromStorage, resolveOutletPrice, loadOutletOverridesFromDB } from "../admin/InventoryAdmin";
+import { sortEmptyItems } from "./S_Inventory";
 import {
   addPurchase, addAPInvoice, addGLEntry,
   addCashEntry, addTransfer, addAREntry, addReturn,
@@ -108,6 +109,10 @@ const inv = useMemo(
   const [supId,      setSupId]      = useState(mergedSuppliers[0]?.id || "");
   const [invNo,      setInvNo]      = useState("");
   const [lateCharge, setLateCharge] = useState("");
+  const [damage,     setDamage]     = useState("");
+  const [damageSign, setDamageSign] = useState("-");
+  const [purRet,     setPurRet]     = useState("");
+  const [purRetSign, setPurRetSign] = useState("+");
   const [lines,      setLines]      = useState([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", unitCost: "", discount: "", amount: 0 }]);
 
   const [trDate,  setTrDate]  = useState(today());
@@ -128,8 +133,9 @@ const inv = useMemo(
       const u = { ...l, [f]: v };
       if (f === "itemCode") {
         const isEmptySup = supId === "EMPTY PURCHASE";
-        const it = isEmptySup
-  ? emptyInv.find(i => i.code === v && i.supplier === "EMPTY PURCHASE")
+       const it = isEmptySup
+  ? (emptyInv.find(i => i.code === v && i.supplier === "EMPTY PURCHASE")
+     || emptyInv.find(i => i.code === v))
   : inv.find(i => i.code === v && i.supplier === supId)
     || emptyInv.find(i =>
         i.code === v && (
@@ -175,7 +181,9 @@ const inv = useMemo(
 
   const subtotal   = lines.reduce((a, l) => a + (l.amount || 0), 0);
   const totalDisc  = lines.reduce((a, l) => a + (parseFloat(l.discount) || 0), 0);
-  const grandTotal = subtotal - (parseFloat(lateCharge) || 0);
+  const damageVal  = Math.abs(parseFloat(damage) || 0) * (damageSign === "+" ? -1 : 1);
+  const returnVal  = Math.abs(parseFloat(purRet) || 0) * (purRetSign === "-" ? -1 : 1);
+  const grandTotal = subtotal - (parseFloat(lateCharge) || 0) - damageVal + returnVal;
 
   async function savePurchase() {
     if (saving) return;
@@ -183,9 +191,11 @@ const inv = useMemo(
     setSaving(true);
 
   try {
-      const rec = { id: uid(), date, supId, invoiceNo: invNo, lines, subtotal, totalDisc, lateCharge: parseFloat(lateCharge) || 0, grandTotal, outlet, by: user.username };
+    const rec = { id: uid(), date, supId, invoiceNo: invNo, lines, subtotal, totalDisc, lateCharge: parseFloat(lateCharge) || 0, damage: damageVal, damageSign, purRet: returnVal, purRetSign, grandTotal, outlet, by: user.username };
 
-      await addPurchase(outlet, { date, supplier: supId, items: lines, total: grandTotal, status: "received", notes: `Inv:${invNo}` });
+   await addPurchase(outlet, { date, supplier: supId, items: lines, total: grandTotal, status: "received",
+  notes: `Inv:${invNo}${damageVal ? `|damage:${damageVal}` : ""}${returnVal ? `|return:${returnVal}` : ""}` });
+    
       await addAPInvoice(outlet, { supplier: supId, date, amount: grandTotal, paid: 0, status: "unpaid", ref: invNo });
       await addGLEntry(outlet, { date, account_id: "1300", description: `Purchase ${supId} Inv:${invNo}`, debit: grandTotal, credit: 0, source: "purchase" });
       await addGLEntry(outlet, { date, account_id: "2000", description: `AP ${supId} Inv:${invNo}`,       debit: 0, credit: grandTotal, source: "purchase" });
@@ -194,6 +204,10 @@ const inv = useMemo(
       setLines([{ id: uid(), itemCode: "", itemName: "", type: "Q", qty: "", unitCost: "", discount: "", amount: 0 }]);
       setInvNo("");
       setLateCharge("");
+      setDamage("");
+      setDamageSign("-");
+      setPurRet("");
+      setPurRetSign("+");
     } finally {
       setSaving(false);
     }
@@ -295,11 +309,10 @@ const inv = useMemo(
                           <option value="">Select…</option>
                         {(() => {
                       let items = [];
-                      if (supId === "EMPTY PURCHASE") {
-                      const seen = new Set();
-                      items = emptyInv
-                      .filter(it => it.supplier === "EMPTY PURCHASE")
-                      .filter(it => {
+                        if (supId === "EMPTY PURCHASE") {
+                        const seen = new Set();
+                        items = sortEmptyItems(emptyInv)
+                        .filter(it => {
                       if (seen.has(it.code)) return false;
                       seen.add(it.code);
                       return true;
@@ -353,8 +366,28 @@ const inv = useMemo(
               <div className="totr"><span className="totl">Total</span><span className="totv">Rs.{fmt(subtotal)}</span></div>
               <div className="totr"><span className="totl">Discount Received</span><span className="totv cg">- Rs.{fmt(totalDisc)}</span></div>
               <div className="ff" style={{ marginTop: 8, maxWidth: 180 }}>
-                <label>Late Payment Charge</label>
-                <input type="number" placeholder="0.00" value={lateCharge} onChange={e => setLateCharge(e.target.value)} />
+              <label>Late Payment Charge</label>
+              <input type="number" placeholder="0.00" value={lateCharge} onChange={e => setLateCharge(e.target.value)} />
+              </div>
+              <div className="ff" style={{ marginTop: 8, maxWidth: 180 }}>
+              <label>Damage</label>
+              <div style={{ display: "flex", gap: 6 }}>
+              <select value={damageSign} onChange={e => setDamageSign(e.target.value)} style={{ width: 90 }}>
+              <option value="+">+ Plus</option>
+              <option value="-">- Minus</option>
+              </select>
+              <input type="number" placeholder="0.00" value={damage} onChange={e => setDamage(e.target.value)} />
+              </div>
+              </div>
+              <div className="ff" style={{ marginTop: 8, maxWidth: 180 }}>
+             <label>Return</label>
+              <div style={{ display: "flex", gap: 6 }}>
+               <select value={purRetSign} onChange={e => setPurRetSign(e.target.value)} style={{ width: 90 }}>
+                <option value="+">+ Plus</option>
+               <option value="-">- Minus</option>
+               </select>
+              <input type="number" placeholder="0.00" value={purRet} onChange={e => setPurRet(e.target.value)} />
+              </div>
               </div>
               <div className="totr grand"><span>Balance</span><span className="totv cr">Rs.{fmt(grandTotal)}</span></div>
             </div>

@@ -97,8 +97,22 @@ const EMPTY_SEED_STAFF = [
 //  OUTLET EMPTY INVENTORY
 //  Override key is item.id (unique) NOT item.code, because the
 //  same code can exist under different empty suppliers.
-// ─────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+// Fixed display order for the Empty tab: supplier first, then size Q → P → N.
+const EMPTY_SUP_ORDER  = ["DCSL", "UG", "LION BREWERY", "DCSL BEER", "TODDY"];
+const EMPTY_SIZE_ORDER = ["Q", "P", "N"];
+export function sortEmptyItems(arr) {
+  const supOf  = it => (it.supplier || "").replace(/^\d{4}-/, "").toUpperCase().trim();
+  const sizeOf = it => (it.code || "").trim().split(/\s+/).pop().toUpperCase();
+  const rank   = (list, v) => { const i = list.indexOf(v); return i === -1 ? 999 : i; };
+  return [...arr].sort((a, b) =>
+    rank(EMPTY_SUP_ORDER, supOf(a)) - rank(EMPTY_SUP_ORDER, supOf(b)) ||
+    rank(EMPTY_SIZE_ORDER, sizeOf(a)) - rank(EMPTY_SIZE_ORDER, sizeOf(b))
+  );
+}
+
 function getOutletEmptyInventory(outlet, masterOverride, emptyMasterData, overridesMap, dateStr) {
+  
 const master = 
     (emptyMasterData && emptyMasterData.length > 0)
       ? emptyMasterData.filter(i => i.supplier !== "EMPTY PURCHASE")
@@ -130,14 +144,14 @@ const master =
         qty: ov?.qty !== undefined ? ov.qty : 0,
       };
     });
-  // Deduplicate by code__supplier
+   // Deduplicate by code__supplier
   const seen = new Set();
-  return result.filter(item => {
+  return sortEmptyItems(result.filter(item => {
     const key = `${item.code}__${item.supplier}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  });
+  }));
 }
 
 
@@ -893,10 +907,32 @@ if (field === "endStock") {
 return { ...r, [field]: val };
 }));
 
+  // ── Auto Sold Total (DCSL only): Main "Sold" fields → Empty "Sold" field.
+  // Same lookup pattern as EMPTY_RECEIVED_AUTO_MAP above, applied to the
+  // live Main Sold values instead of saved purchase qty. Only touches the
+  // Empty row's "sold" field for DEMP P / DEMP N under DCSL — nothing else.
+  const DCSL_EMP_SOLD_MAP = [
+    { emptyCode: "DEMP P", supplier: "2001-DCSL", names: ["DES P", "DCA P"] },
+    { emptyCode: "DEMP N", supplier: "2001-DCSL", names: ["DES N", "DCA N", "DEC N", "DDB N"] },
+  ];
+  useEffect(() => {
+    setER(prev => prev.map(r => {
+      if (r.supplier !== "DCSL") return r;
+      const cfg = DCSL_EMP_SOLD_MAP.find(c => c.emptyCode === r.code);
+      if (!cfg) return r;
+      const sum = mainRows
+        .filter(m => m.supplier === cfg.supplier && cfg.names.includes(m.name))
+        .reduce((a, m) => a + (parseFloat(m.sold) || 0), 0);
+      const sumStr = String(sum);
+      if (r.sold === sumStr) return r;
+      return { ...r, sold: sumStr, endStock: null };
+    }));
+  }, [mainRows]);
+
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
   // ─────────────────────────────────────────────────────────
-   async function saveMainSale() {
+  async function saveMainSale() {
   if (savingMainRef.current) return;
   savingMainRef.current = true;
   try {

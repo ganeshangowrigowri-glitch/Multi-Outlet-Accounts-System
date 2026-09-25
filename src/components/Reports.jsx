@@ -506,6 +506,7 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       // ── Purchases by supplier ──
       const purBySup={};
       let totalPurchase=0;
+      let totalPurchaseEmpty=0; // Empty Stock purchase total — kept separate from Main Stock
       purchases.forEach(p => {
         const sid=p.supplier_id||p.supplier||"Unknown";
         if (!purBySup[sid]) purBySup[sid]={supId:sid,total:0,records:[]};
@@ -513,6 +514,8 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
           .reduce((a,l)=>a+(Number(l.amount)||(Number(l.qty)*Number(l.unitCost))||0),0);
         const amt=Number(p.total)||Number(p.grand_total)||lt||0;
         purBySup[sid].total+=amt; purBySup[sid].records.push(p); totalPurchase+=amt;
+        totalPurchaseEmpty += (p.items||[]).filter(l=>l.isEmptyItem)
+          .reduce((a,l)=>a+(Number(l.amount)||(Number(l.qty)*Number(l.unitCost))||0),0);
       });
 
       // ── Transfers ──
@@ -984,7 +987,7 @@ Object.keys(cosByItem).forEach(code => {
       // Only commit this response if no newer load() has started since —
      // otherwise an older, slower call would clobber a newer, faster one.
      if (requestId !== loadIdRef.current) return;
-         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS, endStockByCodeIS,endStockOrderIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
+         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS, endStockByCodeIS,endStockOrderIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -2145,7 +2148,9 @@ function ExpenseSummary({ d, outlet, month }) {
 // PURCHASE SUMMARY 
 // ══════════════════════════════════════════════════════
 function PurchaseSummary({ d, outlet, month }) {
-  const { purBySup, totalPurchase } = d;
+  const { purBySup, totalPurchase, totalPurchaseEmpty = 0 } = d;
+  // Purchase Summary Total = Main Stock Purchase Total + Empty Stock Purchase Total
+  const grandTotalPurchase = totalPurchase + totalPurchaseEmpty;
 
   return (
     <ReportWrap title="Purchase Summary" outlet={outlet} month={month}>
@@ -2198,9 +2203,9 @@ function PurchaseSummary({ d, outlet, month }) {
       {Object.keys(purBySup).length === 0 && (
         <tr><td colSpan={5} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No purchases recorded.</td></tr>
       )}
-      <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+            <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
         <td colSpan={4} style={{ padding: "7px 10px", fontWeight: 700, fontSize: 12, textAlign: "right" }}>Total Purchase:</td>
-        <td style={{ padding: "7px 10px", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, fontSize: 13, color: "var(--grn)", textAlign: "right" }}>Rs.{fmt(totalPurchase)}</td>
+        <td style={{ padding: "7px 10px", fontFamily: "'JetBrains Mono',monospace", fontWeight: 700, fontSize: 13, color: "var(--grn)", textAlign: "right" }}>Rs.{fmt(grandTotalPurchase)}</td>
       </tr>
     </ReportWrap>
   );
@@ -3931,7 +3936,7 @@ const assetOthersEntries = assetOthersCat
 }
 
 function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, applyDiscount, setApplyDiscount }) {
-  const { apInvoices, apPayments } = d;
+ const { apInvoices, apPayments, purchases } = d;
   
 
   // ── Manual B/F state (DB-backed) ──
@@ -4073,7 +4078,26 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
       isOrphanPayment: true,
     }));
 
-  const allRows = [...rows, ...orphanPaymentRows]
+    // Purchase Window Return → IDL ledger only. Derived from the saved purchase
+  // (notes: "Inv:xxx|return:25000"), so date/invoice/amount are exactly what
+  // staff entered, and it can never be duplicated on reload.
+  const returnRows = normSup(supplierId) !== "IDL" ? [] : (purchases || [])
+    .filter(p => isSup(p.supplier_id || p.supplier))
+    .filter(p => !mStart || (p.date >= mStart && p.date <= mEnd))
+    .filter(p => !useManualBF || p.date >= bfEffectiveDate)
+    .map(p => {
+      const notes = String(p.notes || "");
+      const m = notes.match(/\|return:(-?\d+(?:\.\d+)?)/);
+      const amt = m ? parseFloat(m[1]) : 0;
+      if (!amt) return null;
+      const invNo = (notes.match(/^Inv:([^|]*)/) || [])[1] || p.ref || p.invoice_no || "—";
+      return { invNo, date: p.date, amount: amt, payDate: "", paid: amt, chq: "",
+               sixPctDis: 0, vatDis: 0, outstanding: 0, discount: 0,
+               isOrphanPayment: false, isReturn: true };
+    })
+    .filter(Boolean);
+
+  const allRows = [...rows, ...orphanPaymentRows, ...returnRows]
     .sort((a, b) => (a.date || a.payDate || "").localeCompare(b.date || b.payDate || ""));
 
     // "Total" here matches the Excel sheet's Total row: the Amount column
@@ -4083,7 +4107,8 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   // and is already folded into bfBalance. Using only `rows` for either of
   // these undercounts both, since orphan payments live in allRows/
   // orphanPaymentRows, not `rows`.
-  const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.vatDis, 0);
+  const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.vatDis, 0)  
+  + returnRows.reduce((a, r) => a + r.amount, 0);
   const totalPaid        = allRows.reduce((a, r) => a + r.paid, 0);
   const totalSixPctDis   = rows.reduce((a, r) => a + r.sixPctDis, 0);
   const totalVatDis      = rows.reduce((a, r) => a + r.vatDis, 0);
@@ -4229,7 +4254,7 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                     <td style={{ ...td(false), textAlign: "left" }}>{r.isOrphanPayment ? `${r.invNo} (prior period)` : r.invNo}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.amount)}</td>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.payDate || "—"}</td>
-                    <td style={td(false)}>{r.paid > 0 ? fmt(r.paid) : "-"}</td>
+                    <td style={td(false)}>{r.paid !== 0 ? fmt(r.paid) : "-"}</td>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.chq || "—"}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.sixPctDis)}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.vatDis)}</td>
