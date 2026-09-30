@@ -7,6 +7,7 @@ import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
 import { resolveOutletPrice, loadOutletOverridesFromDB } from "../admin/InventoryAdmin";
 import S_PriceHistory from "./S_PriceHistory";
+import S_Crates from "./S_Crates";
 const EMPTY_PURCHASE_SUP_ID = "EMPTY_PURCHASE"; // adjust to match your actual Supabase ID
 
 const MAIN_EMPTY_SUP_IDS = new Set([
@@ -1575,20 +1576,22 @@ if (salesInRange.length > 0) {
                 </table>
               </div>
               <div style={{ flexShrink:0, background:"var(--s3)", borderTop:"1px solid var(--bdr)", padding:"6px 14px", display:"flex", flexWrap:"wrap", alignItems:"center", justifyContent:"flex-end", gap:24, fontWeight:700, fontSize:12 }}>
-                 <div>Total Sale: <span className="mono cg">Rs.{fmt(
-  mainRows.reduce((a, r) => a + deriveMain(r).amount, 0)
-  + (saleDiffSign === "-" ? -1 : 1) * Math.abs(parseFloat(saleDiffAmt) || 0)
-)}</span></div>
-<div style={{ display:"flex", alignItems:"center", gap:6 }}>
-  Total Sales Difference:
-  <select value={saleDiffSign} onChange={e => setSaleDiffSign(e.target.value)} style={{ ...iS, width:52 }}>
-    <option value="+">+</option>
-    <option value="-">−</option>
-  </select>
-  <input type="number" min="0" value={saleDiffAmt}
-    onChange={e => setSaleDiffAmt(e.target.value)}
-    style={{ ...iS, width:100, borderColor:"var(--gld)" }} />
-</div>
+                <div>Total Sale: <span className="mono cg">Rs.{fmt(
+                filteredMain.reduce((a, r) => a + deriveMain(r).amount, 0)
+                + (mainSupFilter === "ALL" && !mainSearch.trim()
+                 ? (saleDiffSign === "-" ? -1 : 1) * Math.abs(parseFloat(saleDiffAmt) || 0)
+                 : 0)
+               )}</span></div>
+              <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+               Total Sales Difference:
+              <select value={saleDiffSign} onChange={e => setSaleDiffSign(e.target.value)} style={{ ...iS, width:52 }}>
+               <option value="+">+</option>
+               <option value="-">−</option>
+               </select>
+               <input type="number" min="0" value={saleDiffAmt}
+                onChange={e => setSaleDiffAmt(e.target.value)}
+               style={{ ...iS, width:100, borderColor:"var(--gld)" }} />
+               </div>
               </div>
             </div>
           )}
@@ -1713,6 +1716,13 @@ if (salesInRange.length > 0) {
                   </tbody>
                 </table>
               </div>
+            </div>
+           )}
+
+          {/* ── PLASTIC CRATE TAB (reuses existing Crate Ledger) ── */}
+          {dailyTab === "plastic" && (
+            <div style={{ flex:1, overflowY:"auto", minHeight:0 }}>
+             <S_Crates outlet={outlet} toast_={toast_} />
             </div>
           )}
         </div>

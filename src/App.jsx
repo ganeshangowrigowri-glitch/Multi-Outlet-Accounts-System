@@ -824,7 +824,6 @@ function StaffPortal({ user, onLogout }) {
     { id:"card",    label:"Card Settlement",      icon:I.bank },
     { id:"capital", label:"Capital Ledger",       icon:I.users },
     { id:"position", label:"Other Credits / Liabilities", icon:I.users },
-    { id:"crates",  label:"Crate Ledger",         icon:I.pkg },
     { id:"reports", label:"Reports",              icon:I.print},
     { id:"coa",     label:"Chart of Accounts",    icon:I.coa  },
   ];
@@ -892,7 +891,7 @@ function StaffPortal({ user, onLogout }) {
               ))}
               {invSubTab==="daily" && (<>
                 <div style={{width:1,background:"var(--s3)",margin:"8px 8px"}}/>
-                {[["main","📦 Main"],["empty","🧴 Empty"]].map(([id,lbl])=>(
+                {[["main","📦 Main"],["empty","🧴 Empty"],["plastic","🧺 Plastic Crate"]].map(([id,lbl])=>(
                   <button key={id} onClick={()=>setInvDailyTab(id)}
                     style={{height:"100%",padding:"0 12px",fontSize:11.5,fontWeight:600,background:invDailyTab===id?"var(--s2,#1a1a30)":"transparent",color:invDailyTab===id?"var(--acc,#f59e0b)":"var(--mut2)",border:"none",borderBottom:invDailyTab===id?"2px solid var(--acc,#f59e0b)":"2px solid transparent",cursor:"pointer",whiteSpace:"nowrap",transition:"all .15s"}}
                   >{lbl}</button>

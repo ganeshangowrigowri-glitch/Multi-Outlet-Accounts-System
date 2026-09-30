@@ -116,7 +116,7 @@ export default function S_Crates({ outlet, toast_ }) {
           <div className="ff" style={{ minWidth: 200 }}>
             <label>Crate Type *</label>
             <select value={crateType} onChange={e => setCrateType(e.target.value)}>
-              {["Plastic Crates", "Wood Crates"].map(g => (
+                {["Plastic Crates", "Wood Crates"].map(g => (
                 <optgroup key={g} label={g}>
                   {CRATE_TYPES.filter(t => t.group === g).map(t => (
                     <option key={t.value} value={t.value}>{t.label}</option>
