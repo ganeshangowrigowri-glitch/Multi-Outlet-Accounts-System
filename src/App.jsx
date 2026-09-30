@@ -349,16 +349,48 @@ function S_GL({ outlet }) {
   );
   // Fold any entries dated before "From" into the opening balance shown,
   // so the running balance in the filtered view stays correct.
-  const displayBF = filterFrom
-    ? bfBal + dedupedLedger
-        .filter(e => e.date < filterFrom)
-        .reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0)
-    : bfBal;
+  // Staff-entered Day Sheet Balances (one per date, ascending)
+  const daySheetRows = ledger
+    .filter(e => e.balance_type === "daysheet")
+    .map(e => ({ date: e.date, amt: (Number(e.debit)||0) - (Number(e.credit)||0) }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
+  // Opening balance at the start of `date`: latest EARLIER Day Sheet wins,
+  // otherwise the normal B/F behaviour.
+  const openingOn = (date) => {
+    const prev = [...daySheetRows].reverse().find(d => d.date < date);
+    return (prev ? prev.amt : bfBal) + dedupedLedger
+      .filter(e => e.date < date && (!prev || e.date > prev.date))
+      .reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
+  };
+
+  const displayBF = filterFrom ? openingOn(filterFrom) : bfBal;
+
+  // Display-only rows so the ledger's running balance restarts from the
+  // Day Sheet Balance on the next day. Not used for Cash In/Out totals.
+  const ledgerView = (() => {
+    const out = []; let run = displayBF;
+    const pending = daySheetRows.filter(d =>
+      (!filterFrom || d.date >= filterFrom) && (!filterTo || d.date <= filterTo));
+    const flush = (before) => {
+      while (pending.length && (before === null || pending[0].date < before)) {
+        const d = pending.shift();
+        const adj = d.amt - run;
+        if (adj) out.push({ id:`ds-adj-${d.date}`, date:d.date,
+          description:"Day Sheet Different",
+          debit: adj > 0 ? adj : 0, credit: adj < 0 ? -adj : 0 });
+        run = d.amt;
+      }
+    };
+    rangedLedger.forEach(e => { flush(e.date); out.push(e); run += (e.debit||0) - (e.credit||0); });
+    flush(null);
+    return out;
+  })();
 
   // ── Cash In / Cash Out totals for the currently filtered period ──
   const cashInTotal  = rangedLedger.reduce((a, e) => a + (Number(e.debit)  || 0), 0);
   const cashOutTotal = rangedLedger.reduce((a, e) => a + (Number(e.credit) || 0), 0);
-  const periodBalanceCD = displayBF + cashInTotal - cashOutTotal;
+  const periodBalanceCD = displayBF + ledgerView.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
 
   // ── Day Sheet Balance: staff-entered actual cash count for one date ──
   const [daySheetDate, setDaySheetDate] = useState(today());
@@ -375,14 +407,15 @@ function S_GL({ outlet }) {
   async function saveDaySheet() {
     const amt = parseFloat(daySheetAmt) || 0;
     const ok = await setCashDaySheetBalance(outlet, amt, daySheetDate);
-    if (ok) { setDaySheetSaved(amt); toast_("Day Sheet Balance saved ✓"); }
+    if (ok) { setDaySheetSaved(amt); getCashLedger(outlet).then(setL); toast_("Day Sheet Balance saved ✓"); }
     else toast_("Failed to save — check connection", "err");
   }
 
   // Running Balance C/D as of the Day Sheet date specifically (not the
   // From/To filter range) — this is what "Different" compares against.
-  const balanceAsOfDaySheetDate = bfBal + dedupedLedger
-    .filter(e => e.date <= daySheetDate)
+const prevDS = [...daySheetRows].reverse().find(d => d.date < daySheetDate);
+const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
+    .filter(e => e.date <= daySheetDate && (!prevDS || e.date > prevDS.date))
     .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
          return (<>
     <div className="no-print" style={{display:"flex",gap:8,marginBottom:14}}>
@@ -442,7 +475,7 @@ function S_GL({ outlet }) {
         {(filterFrom || filterTo) &&
           <button className="btn btnd btnsm" onClick={()=>{setFilterFrom("");setFilterTo("");}}>Clear</button>}
       </div>
-       <div style={{padding:12}}><Ledger rows={rangedLedger} bfBal={displayBF} bfDate={filterFrom || bfDate} cdDate={filterTo || today()}/></div>
+       <div style={{padding:12}}><Ledger rows={ledgerView} bfBal={displayBF} bfDate={filterFrom || bfDate} cdDate={filterTo || today()}/></div>
 
       {/* ── Totals + Day Sheet Balance / Different ── */}
       <div style={{ padding:"0 14px 14px" }}>
@@ -477,7 +510,12 @@ function S_GL({ outlet }) {
                        : (daySheetSaved - balanceAsOfDaySheetDate) > 0 ? "var(--grn)"
                        : "var(--txt)"
                 }}>
-                  Rs.{fmt(daySheetSaved - balanceAsOfDaySheetDate)}
+                    {(() => {
+                     const d = Math.round((balanceAsOfDaySheetDate - daySheetSaved) * 100) / 100;
+                     return d > 0 ? `SHORT: Rs.${fmt(d)}`
+                     : d < 0 ? `EXCESS: Rs.${fmt(-d)}`
+                     : `Rs.${fmt(0)}`;
+                     })()}
                 </div>
               </div>
             </div>
@@ -544,21 +582,21 @@ function S_GL({ outlet }) {
   // day-sheet date is counted; otherwise one shortfall would repeat every day.
   const daySheetSE = {};
   {
-    let prevDiff = 0;
+    let prevDS = null; // previous Day Sheet {date, amt} - same chain as Tab 1
     ledger.filter(e => e.balance_type === "daysheet")
       .sort((a, b) => a.date.localeCompare(b.date))
       .forEach(row => {
         const dsAmt = Number(row.debit) - Number(row.credit);
-        const balanceAsOf = bfBal + dedupedLedger
-          .filter(e => e.date <= row.date)
+        const balanceAsOf = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
+          .filter(e => e.date <= row.date && (!prevDS || e.date > prevDS.date))
           .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
-        const diff = dsAmt - balanceAsOf;
-        const change = diff - prevDiff;
-        prevDiff = diff;
-        if (row.date < periodFrom || row.date > periodTo || !change) return;
+        // Same formula as Tab 1: Balance C/D - Day Sheet Balance
+        const diff = Math.round((balanceAsOf - dsAmt) * 100) / 100;
+        prevDS = { date: row.date, amt: dsAmt };
+        if (row.date < periodFrom || row.date > periodTo || !diff) return;
         if (!daySheetSE[row.date]) daySheetSE[row.date] = { short:0, excess:0 };
-        if (change < 0) daySheetSE[row.date].short += Math.abs(change);
-        else daySheetSE[row.date].excess += change;
+        if (diff > 0) daySheetSE[row.date].short  += diff;   // C/D > Day Sheet → SHORT
+        else          daySheetSE[row.date].excess += -diff;  // C/D < Day Sheet → EXCESS
       });
   }
 

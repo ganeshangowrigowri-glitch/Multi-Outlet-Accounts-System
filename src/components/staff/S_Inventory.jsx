@@ -327,6 +327,9 @@ useEffect(() => {
   const [empSearch,     setEmpSearch]     = useState("");
   const [justSaved,     setJustSaved]     = useState(false);
   const [justSavedEmp,  setJustSavedEmp]  = useState(false);
+  const [saleDiffSign,  setSaleDiffSign]  = useState("+");
+  const [saleDiffAmt,   setSaleDiffAmt]   = useState("");
+  const saleDiffKeyRef = useRef("");
   const [csFrom,        setCsFrom]        = useState(() => today().slice(0, 7) + "-01");
   const [csTo,          setCsTo]          = useState(today);
   const [physStock,     setPhysStock]     = useState({});
@@ -569,9 +572,23 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       }
     }
     const resolvedOpening = { main: mergedMain, emp: opening?.emp || {} };
-    const todaySale = dbSalesRef.current.find(
+        const todaySale = dbSalesRef.current.find(
     s => s.date === mainDate && (s.items || []).some(r => !r.isEmptyItem)
     );
+      const diffKey = `${outlet}|${mainDate}|${todaySale ? 1 : 0}`;
+    if (mainDateRef.current === mainDate && saleDiffKeyRef.current !== diffKey) {
+      saleDiffKeyRef.current = diffKey;
+      if (todaySale) {
+        const baseSaved = (todaySale.items || []).filter(r => !r.isEmptyItem)
+          .reduce((a, r) => a + (parseFloat(r.sold) || 0) * (Number(r.rate) || Number(r.adminSellingPrice) || 0), 0);
+        const d = Math.round(((Number(todaySale.total) || 0) - baseSaved) * 100) / 100;
+        setSaleDiffSign(d < 0 ? "-" : "+");
+        setSaleDiffAmt(d ? String(Math.abs(d)) : "");
+      } else {
+        setSaleDiffSign("+");
+        setSaleDiffAmt("");
+      }
+    }
   const savedMap = todaySale
   ? Object.fromEntries(
       (todaySale.items || [])
@@ -938,7 +955,9 @@ return { ...r, [field]: val };
   try {
   skipNextReloadRef.current = true;
   skipNextReloadDateRef.current = mainDate;
-  const totalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
+   const baseTotalSale = mainRows.reduce((a, r) => a + deriveMain(r).amount, 0);
+  const saleDiff = (saleDiffSign === "-" ? -1 : 1) * Math.abs(parseFloat(saleDiffAmt) || 0);
+  const totalSale = baseTotalSale + saleDiff;   // Final Total Sale
   const mainRowsWithDerived = mainRows.map(r => {
     const { stkSE, endStock } = deriveMain(r);
     return { 
@@ -1552,13 +1571,24 @@ if (salesInRange.length > 0) {
                         </tr>
                       );
                     })}
-                    <tr style={{ background:"var(--s3)", fontWeight:700 }}>
-                      <td colSpan={13} style={{ textAlign:"right", paddingRight:10, fontSize:12 }}>Total Sale:</td>
-                      <td className="mono cg">Rs.{fmt(filteredMain.reduce((a, r) => a + deriveMain(r).amount, 0))}</td>
-                      <td colSpan={3} />
-                    </tr>
-                  </tbody>
+                </tbody>
                 </table>
+              </div>
+              <div style={{ flexShrink:0, background:"var(--s3)", borderTop:"1px solid var(--bdr)", padding:"6px 14px", display:"flex", flexWrap:"wrap", alignItems:"center", justifyContent:"flex-end", gap:24, fontWeight:700, fontSize:12 }}>
+                 <div>Total Sale: <span className="mono cg">Rs.{fmt(
+  mainRows.reduce((a, r) => a + deriveMain(r).amount, 0)
+  + (saleDiffSign === "-" ? -1 : 1) * Math.abs(parseFloat(saleDiffAmt) || 0)
+)}</span></div>
+<div style={{ display:"flex", alignItems:"center", gap:6 }}>
+  Total Sales Difference:
+  <select value={saleDiffSign} onChange={e => setSaleDiffSign(e.target.value)} style={{ ...iS, width:52 }}>
+    <option value="+">+</option>
+    <option value="-">−</option>
+  </select>
+  <input type="number" min="0" value={saleDiffAmt}
+    onChange={e => setSaleDiffAmt(e.target.value)}
+    style={{ ...iS, width:100, borderColor:"var(--gld)" }} />
+</div>
               </div>
             </div>
           )}
