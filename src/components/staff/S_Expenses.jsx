@@ -67,9 +67,12 @@ export default function S_Expenses({ outlet, user, toast_ }) {
   // Split card accounts by network so "Visa Card" only offers Visa
   // accounts and "Amex Card" only offers Amex accounts — keeps card
   // transactions card-wise as required.
-  const visaCards = cardAccounts.filter(c => /visa/i.test(c.bank || ""));
+  // Admin assigns card accounts with a bank name (e.g. "Sampath Bank"), so
+  // "visa" never appears in `bank`. Amex accounts are identified by "AMEX"
+  // in the bank name; every other assigned card account is a Visa account.
+  
+  const vizaCards = cardAccounts.filter(c => !/amex/i.test(c.bank || ""));
   const amexCards = cardAccounts.filter(c => /amex/i.test(c.bank || ""));
-
   const [bankId, setBankId] = useState("");
   const [cardId, setCardId] = useState("");
 
@@ -83,7 +86,8 @@ export default function S_Expenses({ outlet, user, toast_ }) {
   // Default the Card Account field to the right network's list once it
   // loads / method switches between Visa Card and Amex Card.
   useEffect(() => {
-    const list = payMethod === "Visa Card" ? visaCards : payMethod === "Amex Card" ? amexCards : [];
+  
+    const list = payMethod === "Viza Card" ? vizaCards : payMethod === "Amex Card" ? amexCards : [];
     if (!list.find(c => c.id === cardId)) {
       setCardId(list[0]?.id || "");
     }
@@ -92,7 +96,7 @@ export default function S_Expenses({ outlet, user, toast_ }) {
   async function submit() {
   if (!amount || parseFloat(amount) <= 0) { toast_("Enter valid amount", "err"); return; }
   if (payMethod === "Bank" && !bankId) { toast_("Select a bank account", "err"); return; }
-  if (payMethod === "Visa Card" && !cardId) { toast_("Select a Visa card account", "err"); return; }
+  if (payMethod === "Viza Card" && !cardId) { toast_("Select a Viza card account", "err"); return; }
   if (payMethod === "Amex Card" && !cardId) { toast_("Select an Amex card account", "err"); return; }
 
   const amt = parseFloat(amount);
@@ -109,7 +113,7 @@ export default function S_Expenses({ outlet, user, toast_ }) {
   // below regardless of whether these columns exist on `expenses`.
   const extraRec = {
     ...(payMethod === "Bank" ? { bank_id: bankId } : {}),
-    ...((payMethod === "Visa Card" || payMethod === "Amex Card") ? { card_id: cardId } : {}),
+    ...((payMethod === "Viza Card" || payMethod === "Amex Card") ? { card_id: cardId } : {}),
     ...(chequeNo ? { cheque_no: chequeNo } : {}),
   };
 
@@ -145,7 +149,7 @@ export default function S_Expenses({ outlet, user, toast_ }) {
       checkNo: chequeNo,
       type: "out", debit: 0, credit: amt,
     });
-  } else if (payMethod === "Visa Card" || payMethod === "Amex Card") {
+  } else if (payMethod === "Viza Card" || payMethod === "Amex Card") {
     // Selected Visa/Amex card account only — Card Settlement Ledger,
     // Debit side (same pattern as the Card → Bank transfer in S_Card.jsx,
     // which also reduces a card account's balance via debit).
@@ -280,7 +284,7 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             <div className="ff">
               <label>Payment Method</label>
               <select value={payMethod} onChange={e => setPayMethod(e.target.value)}>
-                {["Cash", "Bank", "Visa Card", "Amex Card","Pending"].map(m => <option key={m}>{m}</option>)}
+                {["Cash", "Bank", "Viza Card", "Amex Card","Pending"].map(m => <option key={m}>{m}</option>)}
               </select>
             </div>
             <div className="ff full">
@@ -302,12 +306,12 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             )}
 
             {/* ── Card Account — Visa/Amex only, required, admin-assigned accounts only ── */}
-            {(payMethod === "Visa Card" || payMethod === "Amex Card") && (
+              {(payMethod === "Viza Card" || payMethod === "Amex Card") && (
               <div className="ff">
                 <label>{payMethod} Account *</label>
                 <select value={cardId} onChange={e => setCardId(e.target.value)}>
                   <option value="">Select card account…</option>
-                  {(payMethod === "Visa Card" ? visaCards : amexCards).map(c => (
+                  {(payMethod === "Viza Card" ? vizaCards : amexCards).map(c => (
                     <option key={c.id} value={c.id}>{c.bank} — {c.account_no || c.accountNo}</option>
                   ))}
                 </select>
@@ -331,7 +335,8 @@ export default function S_Expenses({ outlet, user, toast_ }) {
               ⚠ {selectedBank ? <>Will deduct from <strong>{selectedBank.bank} — {selectedBank.account_no || selectedBank.accountNo}</strong> and appear on the Debit side of its Bank Ledger.</> : "Select a bank account — the expense will deduct from that account's Bank Ledger."}
             </div>
           )}
-          {(payMethod === "Visa Card" || payMethod === "Amex Card") && (
+         
+           {(payMethod === "Viza Card" || payMethod === "Amex Card") && (
             <div className="nbox nb-a" style={{ marginBottom: 10 }}>
               ⚠ {selectedCard ? <>Will deduct from <strong>{selectedCard.bank} — {selectedCard.account_no || selectedCard.accountNo}</strong> and appear on the Debit side of the Card Settlement Ledger.</> : `Select a ${payMethod} account — the expense will deduct from that card's Settlement Ledger.`}
             </div>

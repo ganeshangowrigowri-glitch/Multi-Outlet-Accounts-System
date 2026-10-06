@@ -382,7 +382,24 @@ function S_GL({ outlet }) {
         run = d.amt;
       }
     };
-    rangedLedger.forEach(e => { flush(e.date); out.push(e); run += (e.debit||0) - (e.credit||0); });
+     // Display order within each date:
+    // Cash In  → Sales, Other Cash In
+    // Cash Out → Bank, Card Settlement, Expenses, Other Cash Out
+    const cashRank = (e) => {
+      const txt = `${e.description || ""} ${e.ref || ""} ${e.source || ""}`.toLowerCase();
+      if ((Number(e.debit) || 0) > 0) {
+        return e.description === "Daily Sale" ? 0 : 1;      // Sales, then other cash in
+      }
+      if (txt.includes("bank"))                              return 2;
+      if (txt.includes("card"))                              return 3;
+      if (txt.includes("expense") || txt.includes("exp-"))   return 4;
+      return 5;                                              // other cash out
+    };
+    const orderedLedger = [...rangedLedger].sort((a, b) =>
+      a.date.localeCompare(b.date) || cashRank(a) - cashRank(b)
+    );
+
+    orderedLedger.forEach(e => { flush(e.date); out.push(e); run += (e.debit||0) - (e.credit||0); });
     flush(null);
     return out;
   })();

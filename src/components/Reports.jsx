@@ -4576,6 +4576,69 @@ function CardStatement({ d, outlet, month }) {
 }
 
 
+// ══════════════════════════════════════════════════════
+// CASH PAYMENT SUMMARY — lists the Other Cash Payment / Personal Drawing
+// entries saved from the Expenses window (cash_ledger rows tagged
+// balance_type "other_cash" / "drawing"). Read-only; uses d.cashLedger,
+// which useReportData already loads month-scoped for the selected outlet.
+// ══════════════════════════════════════════════════════
+function CashPaymentSummary({ d, outlet, month }) {
+  const rows = (d.cashLedger || [])
+    .filter(r => r.balance_type === "other_cash" || r.balance_type === "drawing")
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  const total = rows.reduce((a, r) => a + (Number(r.credit) || 0), 0);
+
+  const th = { padding: "6px 9px", fontSize: 9.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
+  const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
+  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
+
+  return (
+    <div>
+      <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+      </div>
+      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Cash Payment Summary</div>
+          <div style={{ fontSize: 11, color: "var(--mut)" }}>
+            {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
+          </div>
+        </div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 480 }}>
+            <thead>
+              <tr>
+                <th style={{ ...th, textAlign: "left" }}>Date</th>
+                <th style={{ ...th, textAlign: "left" }}>Type</th>
+                <th style={{ ...th, textAlign: "left" }}>Description</th>
+                <th style={th}>Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr><td colSpan={4} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No Other Cash Payment entries for this period.</td></tr>
+              )}
+              {rows.map((r, i) => (
+                <tr key={r.id || i}>
+                  <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>
+                  <td style={{ ...td(false), textAlign: "left" }}>{r.balance_type === "drawing" ? "Personal Drawing" : "Other Cash"}</td>
+                  <td style={{ ...td(false), textAlign: "left" }}>{r.description || "—"}</td>
+                  <td style={td(false)}>Rs.{fmt(r.credit)}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+                <td style={{ ...td(true), textAlign: "left" }} colSpan={3}>Total</td>
+                <td style={td(true)}>Rs.{fmt(total)}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Reports({ user }) {
   const isAdmin    = user?.role === "admin";
   const userOutlet = user?.outlet || OUTLETS[0];
@@ -4620,8 +4683,7 @@ export default function Reports({ user }) {
     { id: "ugbook",    label: "UG Book",               icon: "📒" },
     { id: "supledger", label: "Supplier Credit Ledger", icon: "🧾" },
     { id: "stocksum",  label: "Stock Summary",          icon: "📦" },
-   { id: "bankstmt",  label: "Bank Statement (Per Account)", icon: "🏦" },
-   { id: "cardstmt",  label: "Card Statement (Per Terminal)", icon: "💳" }
+    { id: "cashpay",   label: "Cash Payment Summary",   icon: "💵" },
   ];
 
   const iS  = { width: "100%", padding: "5px 8px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11.5, fontFamily: "'Inter',sans-serif", color: "var(--txt)", outline: "none" };
@@ -4686,8 +4748,7 @@ export default function Reports({ user }) {
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={handleSupplierChange} applyDiscount={applyDiscount} setApplyDiscount={val => { setApplyDiscount(val); setDiscountTouched(true); }}/>}
             {report==="stocksum"  && <StockSummary d={d} outlet={effectiveOutlet} month={month}/>}
-            {report==="bankstmt"  && <BankStatement d={d} outlet={effectiveOutlet} month={month}/>}
-            {report==="cardstmt"  && <CardStatement d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="cashpay"   && <CashPaymentSummary d={d} outlet={effectiveOutlet} month={month}/>}
           </>
         )}
       </div>
