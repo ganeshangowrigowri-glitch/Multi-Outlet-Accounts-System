@@ -171,8 +171,15 @@ function txnDate(rec) {
   return (rec.date || "").slice(0, 10);
 }
 
+
 function txnItems(rec) {
   return rec.items || rec.lines || [];
+}
+
+function lineMatchesItem(l, item) {
+  if (l.itemCode !== item.code) return false;
+  if (l.supplier && item.supplier && l.supplier !== item.supplier) return false;
+  return true;
 }
 
 function isTransferIn(rec, outlet) {
@@ -282,6 +289,7 @@ function ScrollArrows({ scrollBy }) {
         <td className="col-num" />
         <td className="col-code" />
         <td className="rt" style={{ paddingRight:11, fontSize:11.5 }}>Totals:</td>
+        <td />
         <td className="col-type" />
         <td className="rt mono bold">{totOpening}</td>
         <td className="rt mono bold">{totPurchase || "—"}</td>
@@ -511,7 +519,8 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
     .filter(r => txnDate(r) === mainDate && isTransferIn(r, outlet))
     .forEach(rec => txnItems(rec).forEach(l => {
       if (!l.itemCode) return;
-      tiV[l.itemCode] = (tiV[l.itemCode] || 0) + (parseFloat(l.qty) || 0);
+        { const k = l.supplier ? `${l.itemCode}__${l.supplier}` : l.itemCode;
+        tiV[k] = (tiV[k] || 0) + (parseFloat(l.qty) || 0); }
     }));
 
   dbTransfers
@@ -612,10 +621,9 @@ lsMain.forEach(i => { baseMain[i.code] = baseQtyByCode[i.code] || 0; });
       ?? 0;
       const saved = savedMap[i.id] || savedMap[`${i.code}__${i.supplier}`];
       const purchase    = pV[`${i.code}__${i.supplier}`]  || 0;
-      const transferIn  = tiV[i.code] || 0;
-      const transferOut = toV[i.code] || 0;
-      const returns     = rV[i.code]  || 0;
-
+      const transferIn  = (tiV[`${i.code}__${i.supplier}`] ?? tiV[i.code]) || 0;
+      const transferOut = (toV[`${i.code}__${i.supplier}`] ?? toV[i.code]) || 0;
+      const returns     = (rV[`${i.code}__${i.supplier}`]  ?? rV[i.code])  || 0;
       if (saved) {
         return {
           ...i,
@@ -1207,7 +1215,7 @@ if (salesInRange.length > 0) {
   dbTransfers
     .filter(t => txnDate(t) >= fromDate && txnDate(t) <= toDate && isTransferIn(t, outlet))
     .forEach(t => txnItems(t).forEach(l => {
-      if (l.itemCode === item.code) transferIn += parseFloat(l.qty) || 0;
+      if (lineMatchesItem(l, item)) transferIn += parseFloat(l.qty) || 0;
     }));
 
   // ── Transfers Out ──
@@ -1215,7 +1223,7 @@ if (salesInRange.length > 0) {
   dbTransfers
     .filter(t => txnDate(t) >= fromDate && txnDate(t) <= toDate && isTransferOut(t, outlet))
     .forEach(t => txnItems(t).forEach(l => {
-      if (l.itemCode === item.code) transferOut += parseFloat(l.qty) || 0;
+       if (lineMatchesItem(l, item)) transferOut += parseFloat(l.qty) || 0;
     }));
 
   // ── Returns ──
@@ -1223,7 +1231,8 @@ if (salesInRange.length > 0) {
   dbReturns
     .filter(r => r.date >= fromDate && r.date <= toDate)
     .forEach(r => (r.items || []).forEach(l => {
-      if (l.itemCode === item.code) totalReturn += parseFloat(l.qty) || 0;
+    if (lineMatchesItem(l, item)) totalReturn += parseFloat(l.qty) || 0;    
+    
     }));
   const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
   const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
@@ -1296,10 +1305,11 @@ if (salesInRange.length > 0) {
       { key: "transferIn",     width: 11 },
       { key: "transferOut",    width: 11 },
       { key: "totalReturn",    width: 10 },
-      { key: "adjStock",       width: 12 },
+          { key: "adjStock",       width: 12 },
+      { key: "supplier",       width: 20 },
     ];
 
-    ws.mergeCells("A1:O1");
+    ws.mergeCells("A1:P1");
     ws.getCell("A1").value = `Current Status Report  |  ${outlet}  |  ${csFrom} to ${csTo}`;
     ws.getCell("A1").font = { bold: true, size: 13 };
     ws.addRow([]);
@@ -1307,7 +1317,7 @@ if (salesInRange.length > 0) {
     const headerRow = ws.addRow([
       "Item Code","Description","Item Type","Opening Stk","Total Purchase",
       "In Hand Stk","Total Bottle Sale","Phy Stock (Rs.)","Total Sale (Rs.)",
-      "Profit (Rs.)","Margin (Rs.)","Trans.In","Trans.Out","Return","Adj to Stock",
+      "Profit (Rs.)","Margin (Rs.)","Trans.In","Trans.Out","Return","Adj to Stock","Supplier",
     ]);
     headerRow.eachCell(cell => {
       cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
@@ -1324,13 +1334,14 @@ if (salesInRange.length > 0) {
         Number(row.totalBottleSale) || 0, phys, row.totalSaleAmt, row.profit, row.margin,
         Number(row.transferIn) || 0, Number(row.transferOut) || 0, Number(row.totalReturn) || 0,
         Number(row.adjStock) || 0,
+        (row.supplier || "").replace(/^\d{4}-/, ""),
       ]);
       r.eachCell((cell, col) => {
         cell.border = {
           top:{style:"thin",color:{argb:"FFCCCCCC"}}, left:{style:"thin",color:{argb:"FFCCCCCC"}},
           bottom:{style:"thin",color:{argb:"FFCCCCCC"}}, right:{style:"thin",color:{argb:"FFCCCCCC"}},
         };
-        if (col === 2) cell.alignment = { horizontal: "left", wrapText: true };
+         if (col === 2 || col === 16) cell.alignment = { horizontal: "left", wrapText: true };
         else if (col === 1 || col === 3) cell.alignment = { horizontal: "center" };
         else {
           cell.alignment = { horizontal: "right" };
@@ -1345,8 +1356,8 @@ if (salesInRange.length > 0) {
       sum(r => r.opening), sum(r => r.totalPurchase), sum(r => r.inHandStock),
       sum(r => r.totalBottleSale),
       sum(r => Number(r.physicalStockOverride !== "" ? r.physicalStockOverride : r.physicalStock)),
-      sum(r => r.totalSaleAmt), sum(r => r.profit), "",
-      sum(r => r.transferIn), sum(r => r.transferOut), sum(r => r.totalReturn), "",
+     sum(r => r.totalSaleAmt), sum(r => r.profit), "",
+      sum(r => r.transferIn), sum(r => r.transferOut), sum(r => r.totalReturn), "", "",
     ]);
     totalsRow.eachCell(cell => {
       cell.font = { bold: true };
@@ -1925,6 +1936,7 @@ if (salesInRange.length > 0) {
             <th className="col-num" style={{ width:30 }}>#</th>
             <th className="col-code" style={{ width:72 }}>Item Code</th>
             <th>Description</th>
+            <th style={{ width:90 }}>Supplier</th>
             <th className="col-type" style={{ width:70 }}>Item Type</th>
             <th className="rt" style={{ width:82 }}>Opening Stk</th>
             <th className="rt" style={{ width:82 }}>Total Pur</th>
@@ -1942,13 +1954,16 @@ if (salesInRange.length > 0) {
         </thead>
         <tbody>
           {csData.length === 0 && (
-            <tr><td colSpan={16}><div className="empty">No activity for this period.</div></td></tr>
+           
+            <tr><td colSpan={17}><div className="empty">No activity for this period.</div></td></tr>
+            
           )}
           {csData.map((row, idx) => (
             <tr key={row.id}>
               <td className="col-num" style={{ color:"var(--mut2)", fontSize:11, fontFamily:"monospace" }}>{idx + 1}</td>
               <td className="col-code"><span className="ctag">{row.code}</span></td>
               <td className="bold">{row.name}</td>
+              <td style={{ fontSize:10, whiteSpace:"nowrap" }}>{(row.supplier || "").replace(/^\d{4}-/, "")}</td>
               <td className="col-type"><span className="tpill">{row.type}</span></td>
               <td className="rt mono">{row.opening ?? "—"}</td>
               <td className="rt mono">{row.totalPurchase || "—"}</td>

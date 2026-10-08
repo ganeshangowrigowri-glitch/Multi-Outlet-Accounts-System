@@ -1664,14 +1664,17 @@ useEffect(() => {
       { date: pDate, unitCost, sellingPrice },
     ].sort((a, b) => a.date.localeCompare(b.date));
 
-    const item = { ...iForm, type:finalType, id:iForm.code,
-      qty:Number(iForm.qty)||0, unitCost, sellingPrice, priceHistory };
+    
+  const item = { ...iForm, type:finalType,
+  id: iModal==="add" ? `${iForm.supplier}__${iForm.code}` : iModal.id,
+  qty:Number(iForm.qty)||0, unitCost, sellingPrice, priceHistory };
 
     if (iModal==="add") {
     if (inv.find(i=>i.code===iForm.code && i.supplier===iForm.supplier)){toast_("Code already exists for this supplier","err");return;}
       si([...inv, item]); toast_("Added ✓");
     } else {
-      si(inv.map(i=>i.id===iModal.id?{...i,...item}:i)); toast_("Updated ✓");
+     
+      si(inv.map(i=>(i.id===iModal.id && i.supplier===iModal.supplier)?{...i,...item}:i)); toast_("Updated ✓");
     }
     setIModal(null); setTypeInput("");
   }
@@ -1721,9 +1724,8 @@ async function saveSupplier() {
   toast_(`${supForm.name.toUpperCase()} added ✓`);
   setSupModal(false); setIR(prev=>[...prev]);
 }
-  
 
-  function getRowNum(item) { return inv.findIndex(i=>i.id===item.id)+1; }
+  function getRowNum(item) { return inv.findIndex(i=>i.id===item.id && i.supplier===item.supplier)+1; }
 
   function renderRows(items) {
     return items.map(item => {
@@ -1770,7 +1772,7 @@ async function saveSupplier() {
                </button>
               
                 <button className="btndel" title="Delete"
-                  onClick={()=>{if(!confirm(`Remove ${item.code}?`))return;si(inv.filter(i=>i.id!==item.id));toast_("Removed");}}>
+                  onClick={()=>{if(!confirm(`Remove ${item.code}?`))return;si(inv.filter(i=>!(i.id===item.id && i.supplier===item.supplier)));toast_("Removed");}}>
                   {I.trash}
                 </button>
               </div>
@@ -2231,7 +2233,8 @@ async function saveSupplier() {
                 ...prevHistory.filter(h => h.date !== pDate),
                 { date: pDate, unitCost, sellingPrice },
               ].sort((a, b) => a.date.localeCompare(b.date));
-              si(inv.map(i=>i.id===priceM.id?{...i,unitCost,sellingPrice,priceHistory}:i));
+              
+              si(inv.map(i=>(i.id===priceM.id && i.supplier===priceM.supplier)?{...i,unitCost,sellingPrice,priceHistory}:i));
               toast_("Main prices updated ✓"); setPriceM(null);
             }}>{I.check} Update Main Price</button>
           </>}>

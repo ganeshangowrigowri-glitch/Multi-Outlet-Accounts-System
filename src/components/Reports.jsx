@@ -383,10 +383,17 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
         // drives openingStockOrderIS / endStockOrderIS push order) iterates
         // items in the exact same supplier-grouped sequence Current Status
         // shows — getOutletInventory's filter/map preserves input order.
-        const oInv       = getOutletInventory(o, invOrderedForDisplay, overridesByOutlet[o], mEnd);
+         const oInv       = getOutletInventory(o, invOrderedForDisplay, overridesByOutlet[o], mEnd);
+        // Opening Stock is valued at the price effective on the 1st day of the
+        // selected month. Same getOutletInventory / resolveOutletPrice logic, only
+        // the date differs, so no second price-history system is created.
+        const openingDateInv = getOutletInventory(o, invOrderedForDisplay, overridesByOutlet[o], mStart || mEnd);
+        const openingUcByKey = {};
+        openingDateInv.forEach(i => { openingUcByKey[`${i.code}__${i.supplier}`] = Number(i.unitCost) || 0; });
         oInv.forEach(item => {
           const sp = Number(item.sellingPrice) || 0;
           const uc = Number(item.unitCost) || 0;
+          const ucOpen = uc;
 
           const salesInRange = oSales
             .filter(s => (s.items || []).some(r => !r.isEmptyItem))
@@ -447,12 +454,12 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
           totalSalesAmt += totalBottleSale * sp;
 
           // Income Statement — Current Status-based Opening/Purchase/End Stock
-          openingStockValIS += opening * uc;
+          openingStockValIS += opening * ucOpen;
           totalPurchaseIS   += totalPurchase * uc;
           endStockValIS     += inHandStock * uc;
                    if (opening > 0) {
             if (!openingStockByCodeIS[item.code]) {
-              openingStockByCodeIS[item.code] = { name: item.name || item.code, qty: 0, unitCost: uc };
+              openingStockByCodeIS[item.code] = { name: item.name || item.code, qty: 0, unitCost: ucOpen };
               openingStockOrderIS.push(item.code); // Current Status (oInv) order, recorded once
             }
             openingStockByCodeIS[item.code].qty += opening;
@@ -4659,7 +4666,7 @@ export default function Reports({ user }) {
     if (!discountTouched) setApplyDiscount(DISCOUNT_SUPPLIERS.includes(id));
   }
 
-  const effectiveOutlet = isAdmin ? outlet : userOutlet;
+   const effectiveOutlet = isAdmin ? outlet : userOutlet;
 
   // Load outlet list from Supabase
   useEffect(() => {
@@ -4686,7 +4693,7 @@ export default function Reports({ user }) {
     { id: "cashpay",   label: "Cash Payment Summary",   icon: "💵" },
   ];
 
-  const iS  = { width: "100%", padding: "5px 8px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11.5, fontFamily: "'Inter',sans-serif", color: "var(--txt)", outline: "none" };
+    const iS  = { width: "100%", padding: "5px 8px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 11.5, fontFamily: "'Inter',sans-serif", color: "var(--txt)", outline: "none" };
   const lbl = { fontSize: 9, fontWeight: 700, letterSpacing: ".1em", textTransform: "uppercase", color: "var(--mut2)", marginBottom: 3 };
 
         return (
@@ -4724,13 +4731,13 @@ export default function Reports({ user }) {
         <button className="btn btnd btnsm" style={{ marginLeft:"auto" }} onClick={refresh} disabled={loading}>
           {I.refresh || "↻"} Refresh
         </button>
-
-        {/* Print */}
+              {/* Print */}
         <button className="btn btng btnsm" onClick={()=>window.print()}>{I.print} Print</button>
+        
       </div>
 
       {/* ── Report Content ── */}
-      <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", padding:"24px 32px 40px" }}>
+       <div style={{ flex:1, overflowY:"auto", overflowX:"hidden", padding:"24px 32px 40px" }}>
         {loading ? <Spinner /> : !d ? (
           <div style={{ padding:40, textAlign:"center", color:"var(--mut)" }}>No data loaded.</div>
         ) : (
