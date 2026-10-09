@@ -307,6 +307,12 @@ function ScrollArrows({ scrollBy }) {
     </tfoot>
   );
 }
+// Unit cost / selling price effective on a given date
+// (same dated priceHistory logic already used by getOutletInventory)
+function priceOnDate(masterItem, ov, date) {
+  const base = resolveOutletPrice(masterItem, date, masterItem.unitCost, masterItem.sellingPrice);
+  return resolveOutletPrice(ov, date, base.unitCost, base.sellingPrice);
+}
 export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) {
   const [supOrder, setSupOrder] = useState([
   "2001-DCSL","2003-UG","2005-ROCKLAND","2004-IDL","2006-DCSL BEER",
@@ -1240,8 +1246,43 @@ if (salesInRange.length > 0) {
 
   const totalBottleSale = opening + totalPurchase - inHandStock;
   const physicalStock   = inHandStock * uc;
-  const totalSaleAmt    = totalBottleSale * sp;   
-  const profit          = mg * totalBottleSale;
+
+  // ── Day-wise Total Sale & Profit ──
+  // Each day's sold qty uses the price / margin effective on THAT day.
+  const masterItem = masterInv.find(m => m.code === item.code && m.supplier === item.supplier) || item;
+  const ovItem     = outletOverridesMain[`${item.code}__${item.supplier}`];
+
+  // one sold qty per date (duplicate sale records can exist; keep the larger)
+  const soldByDate = {};
+  salesInRange.forEach(s => {
+    const row = (s.items || []).find(r =>
+      !r.isEmptyItem && (
+        (r.id && r.id === item.id) ||
+        (r.code === item.code && r.supplier === item.supplier)
+      )
+    );
+    if (!row) return;
+    const q = parseFloat(row.sold) || 0;
+    if (soldByDate[s.date] === undefined || q > soldByDate[s.date]) soldByDate[s.date] = q;
+  });
+
+  let totalSaleAmt = 0;
+  let profit       = 0;
+  let soldTracked  = 0;
+  Object.entries(soldByDate).forEach(([date, q]) => {
+    const dp = priceOnDate(masterItem, ovItem, date);
+    const daySP = Number(dp.sellingPrice) || 0;
+    const dayUC = Number(dp.unitCost)     || 0;
+    totalSaleAmt += q * daySP;
+    profit       += q * (daySP - dayUC);
+    soldTracked  += q;
+  });
+
+  // Bottles in the stock equation not covered by saved daily "sold"
+  // (adjustments / missing saves) fall back to the latest price & margin
+  const untracked = totalBottleSale - soldTracked;
+  totalSaleAmt += untracked * sp;
+  profit       += untracked * mg;
 
   // ── Adj to stock (stock short/excess) ──
   // Last saved stkSE for this item in range, or 0

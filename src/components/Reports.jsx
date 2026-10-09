@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from "react";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 import { I } from "../utils/icons";
 import { printFull, printA4 } from "../utils/printMode";
 import { supabase } from "../supabase";
@@ -2076,9 +2078,69 @@ function ExpenseSummary({ d, outlet, month }) {
   const dayTotal = day => rows.reduce((a, r) => a + (r.byDay[day] || 0), 0);
   const cardInterestTotal = cardInterestRows.reduce((a, r) => a + r.total, 0)
     + unmatchedInterestRows.reduce((a, r) => a + r.total, 0);
-  const filteredTotal = methodFilter === "All"
+    const filteredTotal = methodFilter === "All"
     ? totalExp + cardInterestTotal
     : rows.reduce((a, r) => a + r.total, 0);
+
+  // Excel export — uses the SAME rows / dayTotal / filteredTotal shown on screen
+  async function downloadExpenseExcel() {
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Expense Summary");
+    const lastCol = days.length + 2; // Description + 31 days + Total
+
+    ws.getColumn(1).width = 38;
+    for (let c = 2; c <= days.length + 1; c++) ws.getColumn(c).width = 11;
+    ws.getColumn(lastCol).width = 15;
+
+    ws.mergeCells(1, 1, 1, lastCol);
+    ws.getCell(1, 1).value =
+      `Expense Summary  |  ${outlet === "ALL" ? "All Outlets" : outlet}  |  ${mo}` +
+      (methodFilter !== "All" ? `  |  ${methodFilter} only` : "");
+    ws.getCell(1, 1).font = { bold: true, size: 13 };
+    ws.addRow([]);
+
+    const border = { top:{style:"thin",color:{argb:"FFCCCCCC"}}, left:{style:"thin",color:{argb:"FFCCCCCC"}}, bottom:{style:"thin",color:{argb:"FFCCCCCC"}}, right:{style:"thin",color:{argb:"FFCCCCCC"}} };
+
+    const headerRow = ws.addRow(["Description", ...days, "Total"]);
+    headerRow.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2B2B4A" } };
+      cell.alignment = { horizontal: "center", vertical: "middle" };
+      cell.border = border;
+    });
+
+    rows.forEach(r => {
+      const row = ws.addRow([
+        r.name,
+        ...days.map(day => (r.byDay[day] > 0 ? r.byDay[day] : null)),
+        r.total,
+      ]);
+      row.eachCell((cell, col) => {
+        cell.border = border;
+        if (col === 1) cell.alignment = { horizontal: "left" };
+        else { cell.alignment = { horizontal: "right" }; cell.numFmt = "#,##0.00"; }
+      });
+      row.getCell(lastCol).font = { bold: true };
+    });
+
+    const totalRow = ws.addRow([
+      methodFilter === "All" ? "Total" : `Total (${methodFilter})`,
+      ...days.map(day => (dayTotal(day) > 0 ? dayTotal(day) : null)),
+      filteredTotal,
+    ]);
+    totalRow.eachCell((cell, col) => {
+      cell.font = { bold: true };
+      cell.border = { ...border, top: { style: "double" } };
+      if (col === 1) cell.alignment = { horizontal: "left" };
+      else { cell.alignment = { horizontal: "right" }; cell.numFmt = "#,##0.00"; }
+    });
+
+    ws.views = [{ state: "frozen", xSplit: 1, ySplit: 3 }];
+
+    const buf = await wb.xlsx.writeBuffer();
+    const safeOutlet = (outlet === "ALL" ? "All_Outlets" : outlet).replace(/[^\w-]+/g, "_");
+    saveAs(new Blob([buf]), `Expense_Summary_${safeOutlet}_${month || "All"}.xlsx`);
+  }
   const th = { padding: "6px 7px", fontSize: 9, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", borderRight: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "center", position: "sticky", top: 0, zIndex: 2 };
   const tdName = { padding: "5px 10px", fontSize: 11.5, fontWeight: 600, color: "var(--txt)", borderBottom: "1px solid rgba(63,63,70,.15)", borderRight: "1px solid var(--bdr)", whiteSpace: "nowrap", minWidth: 180, position: "sticky", left: 0, zIndex: 1, background: "var(--s1)" };
   const tdCell = (val) => ({
@@ -2110,8 +2172,9 @@ function ExpenseSummary({ d, outlet, month }) {
       <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <select value={methodFilter} onChange={e => setMethodFilter(e.target.value)}
           style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
-          {methods.map(m => <option key={m} value={m}>{m === "All" ? "All Payment Methods" : m}</option>)}
+                  {methods.map(m => <option key={m} value={m}>{m === "All" ? "All Payment Methods" : m}</option>)}
         </select>
+        <button className="btn btng btnsm" onClick={downloadExpenseExcel}>Download Excel</button>
         <button className="btn btnd btnsm" onClick={printA4}>{I.print} Print (A4)</button>
         <button className="btn btnd btnsm" onClick={printFull}>{I.print} Print (8K)</button>
       </div>
