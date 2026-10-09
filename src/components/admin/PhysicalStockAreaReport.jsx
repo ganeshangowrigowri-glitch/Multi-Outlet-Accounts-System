@@ -23,7 +23,7 @@ import { computeStockValBySupplier, computeSupplierBalanceCD, brandOf } from "..
 //  area mapping is introduced.
 // ─────────────────────────────────────────────────────────────────────────
 
-const fmt = n => Number(n || 0).toLocaleString("en-LK", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+const fmt = n => Number(n || 0).toLocaleString("en-LK", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 // Same 7 columns the report spec asks for. "OTHER" catches every supplier
 // brandOf() doesn't recognise (TODDY, ROYAL CASK, USW, etc.) — identical

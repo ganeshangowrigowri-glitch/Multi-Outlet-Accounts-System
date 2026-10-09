@@ -3417,58 +3417,92 @@ function UGBook({ d, outlet, month }) {
 // calculation — same getSales/getInventoryMaster reads useReportData
 // already uses. invMap can be passed in (precomputed once) when looping
 // many outlets; otherwise it's fetched here.
+
 export async function computeStockValBySupplier(outlet, month, invMap) {
   const mEnd = monthEnd(month);
   const mStart = monthStart(month);
 
-  if (!invMap) {
-    const inv = await getInventoryMaster();
-    invMap = {};
-    (inv || []).forEach(i => { invMap[i.code] = i; if (i.id) invMap[i.id] = i; });
-  }
+  // Same algorithm as useReportData's stockValBySupplierIS (= Current Status
+  // physical stock): in-hand stock × outlet unit cost effective on month-end,
+  // keyed by the full supplier id. invMap is accepted only for call compatibility.
+  const [inv, rawSales, overrides] = await Promise.all([
+    getInventoryMaster(),
+    getSales(outlet),
+    loadOutletOverridesFromDB(outlet, false),
+  ]);
 
-  const rawSales = await getSales(outlet);
-  const sales = mStart
-    ? (rawSales || []).filter(r => r.date >= mStart && r.date <= mEnd)
-    : (rawSales || []);
-
-  const stockValBySupplier = {};
-  const salesSorted = [...sales]
-    .filter(s => (s.items || []).some(r => !r.isEmptyItem))
-    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
-
-  const endDateSales = mEnd ? salesSorted.filter(s => s.date === mEnd) : [];
-  const endSalesToUse = endDateSales.length > 0 ? endDateSales : salesSorted.slice(0, 1);
-
-  const endStockItemMap = {};
-  endSalesToUse.forEach(sale => {
-    (sale.items || []).filter(r => !r.isEmptyItem).forEach(r => {
-      const es = parseFloat(r.endStock);
-      if (isNaN(es)) return;
-      const existing = endStockItemMap[r.code];
-      const soldQty = parseFloat(r.sold) || 0;
-      if (!existing) {
-        endStockItemMap[r.code] = { ...r, _sold: soldQty };
-      } else if (soldQty > 0 && existing._sold === 0) {
-        endStockItemMap[r.code] = { ...r, _sold: soldQty };
-      } else if (es > parseFloat(existing.endStock)) {
-        endStockItemMap[r.code] = { ...r, _sold: soldQty };
-      }
-    });
+  const supOrderRaw = await getSuppliers().catch(() => null);
+  const supOrderList = (supOrderRaw && supOrderRaw.length)
+    ? supOrderRaw.map(s => s.id)
+    : DEFAULT_SUP_ORDER;
+  const invOrdered = [...(inv || [])].sort((a, b) => {
+    const oi = supOrderList.indexOf(a.supplier);
+    const oj = supOrderList.indexOf(b.supplier);
+    const supCmp = (oi === -1 ? 999 : oi) - (oj === -1 ? 999 : oj);
+    if (supCmp !== 0) return supCmp;
+    const numA = parseInt((a.code || "").replace(/\D/g, "")) || 0;
+    const numB = parseInt((b.code || "").replace(/\D/g, "")) || 0;
+    return numA - numB;
   });
 
-  Object.entries(endStockItemMap).forEach(([code, r]) => {
-    const item = invMap[code] || invMap[r.id];
-    const uc = Number(item?.unitCost) || Number(r.unitCost) || 0;
-    const q  = parseFloat(r.endStock) || 0;
-    if (q > 0 && uc > 0 && r.supplier) {
-      stockValBySupplier[r.supplier] = (stockValBySupplier[r.supplier] || 0) + q * uc;
+  const oSales = mStart
+    ? (rawSales || []).filter(r => r.date >= mStart && r.date <= mEnd)
+    : (rawSales || []);
+  const salesInRange = oSales
+    .filter(s => (s.items || []).some(r => !r.isEmptyItem))
+    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+
+  const oInv = getOutletInventory(outlet, invOrdered, overrides, mEnd);
+  const stockValBySupplier = {};
+
+  oInv.forEach(item => {
+    const uc = Number(item.unitCost) || 0;
+    const matchRow = r => !r.isEmptyItem && (
+      (r.id && r.id === item.id) ||
+      (r.code && r.code === item.code && r.supplier === item.supplier)
+    );
+    const hasEnd = r => r && r.endStock !== null && r.endStock !== "" && r.endStock !== undefined;
+
+    let lastEndStock = null;
+    const endRows = [];
+    salesInRange.filter(s => s.date === mEnd).forEach(sale => {
+      const row = (sale.items || []).find(matchRow);
+      if (hasEnd(row)) endRows.push(row);
+    });
+    if (endRows.length > 0) {
+      const soldRow = endRows.find(r => parseFloat(r.sold) > 0);
+      lastEndStock = soldRow ? parseFloat(soldRow.endStock)
+        : Math.max(...endRows.map(r => parseFloat(r.endStock)));
     }
+    if (lastEndStock === null) {
+      for (let i = salesInRange.length - 1; i >= 0; i--) {
+        const row = (salesInRange[i].items || []).find(matchRow);
+        if (hasEnd(row) && parseFloat(row.endStock) > 0) {
+          lastEndStock = parseFloat(row.endStock);
+          break;
+        }
+      }
+    }
+
+    let firstOpening = null;
+    if (salesInRange.length > 0) {
+      const firstDate = salesInRange[0].date;
+      salesInRange.filter(s => s.date === firstDate).forEach(sale => {
+        const row = (sale.items || []).find(matchRow);
+        if (row && row.openingStock !== null && row.openingStock !== undefined) {
+          const op = Number(row.openingStock);
+          if (firstOpening === null || op > firstOpening) firstOpening = op;
+        }
+      });
+    }
+
+    const opening = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+    const inHandStock = lastEndStock !== null ? lastEndStock : opening;
+    stockValBySupplier[item.supplier] = (stockValBySupplier[item.supplier] || 0) + inHandStock * uc;
   });
 
   return stockValBySupplier;
 }
-
 async function computeSupplierDiscountVAT(outlet, month, supplierId, apInvoices) {
   const mStart = monthStart(month);
   const mEnd   = monthEnd(month);
