@@ -339,8 +339,9 @@ useEffect(() => {
   const [saleDiffSign,  setSaleDiffSign]  = useState("+");
   const [saleDiffAmt,   setSaleDiffAmt]   = useState("");
   const saleDiffKeyRef = useRef("");
-  const [csFrom,        setCsFrom]        = useState(() => today().slice(0, 7) + "-01");
+    const [csFrom,        setCsFrom]        = useState(() => today().slice(0, 7) + "-01");
   const [csTo,          setCsTo]          = useState(today);
+  const [csSupFilter,   setCsSupFilter]   = useState("ALL");   // full supplier id, e.g. "2004-IDL"
   const [physStock,     setPhysStock]     = useState({});
   const [dbPurchases, setDbPurchases] = useState([]);
 const [dbTransfers, setDbTransfers] = useState([]);
@@ -1286,7 +1287,8 @@ if (salesInRange.length > 0) {
 );
 }, [outlet, masterInv, outletOverridesMain, physStock, dbSales, dbPurchases, dbTransfers, dbReturns]);
    async function downloadCsExcel() {
-    const data = computeCsData(csFrom, csTo); // mirrors exactly what's on screen right now
+     const allCs = computeCsData(csFrom, csTo);
+    const data = csSupFilter === "ALL" ? allCs : allCs.filter(r => r.supplier === csSupFilter); // mirrors exactly what's on screen right now
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Current Status");
 
@@ -1374,10 +1376,10 @@ if (salesInRange.length > 0) {
     saveAs(new Blob([buf]), `Current_Status_${csFrom}_to_${csTo}.xlsx`);
   }
 
-  const csData = useMemo(
-    () => computeCsData(csFrom, csTo),
-    [computeCsData, csFrom, csTo]
-  );
+  const csData = useMemo(() => {
+    const all = computeCsData(csFrom, csTo);
+    return csSupFilter === "ALL" ? all : all.filter(r => r.supplier === csSupFilter);
+  }, [computeCsData, csFrom, csTo, csSupFilter]);
   // ─────────────────────────────────────────────────────────
   //  FILTERED VIEWS
   // ─────────────────────────────────────────────────────────
@@ -1874,9 +1876,18 @@ if (salesInRange.length > 0) {
         <label style={lbl}>From Date</label>
         <input type="date" value={csFrom} onChange={e => setCsFrom(e.target.value)} style={iS} />
       </div>
-      <div>
+             <div>
         <label style={lbl}>To Date</label>
         <input type="date" value={csTo} onChange={e => setCsTo(e.target.value)} style={iS} />
+      </div>
+      <div>
+        <label style={lbl}>Supplier</label>
+        <select value={csSupFilter} onChange={e => setCsSupFilter(e.target.value)} style={{ ...iS, minWidth:150 }}>
+          <option value="ALL">All Suppliers</option>
+          {supOrder.map(id => (
+            <option key={id} value={id}>{id.replace(/^\d{4}-/, "")}</option>
+          ))}
+        </select>
       </div>
             <button
         className="btn btnd btnsm no-print"

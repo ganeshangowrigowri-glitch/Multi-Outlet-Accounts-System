@@ -369,8 +369,11 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
            let openingStockValIS = 0;
       let totalPurchaseIS   = 0;
       let endStockValIS     = 0;
-      const openingStockByCodeIS = {};
+            const openingStockByCodeIS = {};
       const endStockByCodeIS     = {};
+      // Per-supplier split of the SAME inHandStock × unitCost used for endStockValIS
+      // (identical to Current Status supplier-wise Physical Stock total).
+      const stockValBySupplierIS = {};
       // Insertion-order arrays — kept separate from the objects above
       const openingStockOrderIS = [];
       const endStockOrderIS     = [];
@@ -390,10 +393,12 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
         const openingDateInv = getOutletInventory(o, invOrderedForDisplay, overridesByOutlet[o], mStart || mEnd);
         const openingUcByKey = {};
         openingDateInv.forEach(i => { openingUcByKey[`${i.code}__${i.supplier}`] = Number(i.unitCost) || 0; });
-        oInv.forEach(item => {
+          oInv.forEach(item => {
           const sp = Number(item.sellingPrice) || 0;
           const uc = Number(item.unitCost) || 0;
-          const ucOpen = uc;
+          // Opening Stock must be valued at the price effective on the 1st day
+          // of the selected month (openingUcByKey), not the month-end price.
+          const ucOpen = openingUcByKey[`${item.code}__${item.supplier}`] ?? uc;
 
           const salesInRange = oSales
             .filter(s => (s.items || []).some(r => !r.isEmptyItem))
@@ -447,7 +452,7 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
             .forEach(p => (p.items || []).forEach(l => {
               if (l.itemCode === item.code && !l.isEmptyItem) totalPurchase += parseFloat(l.qty) || 0;
             }));
-                      const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+            const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
           const inHandStock = lastEndStock !== null ? lastEndStock : opening;
           const totalBottleSale = opening + totalPurchase - inHandStock;
 
@@ -456,7 +461,8 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
           // Income Statement — Current Status-based Opening/Purchase/End Stock
           openingStockValIS += opening * ucOpen;
           totalPurchaseIS   += totalPurchase * uc;
-          endStockValIS     += inHandStock * uc;
+         endStockValIS     += inHandStock * uc;
+          stockValBySupplierIS[item.supplier] = (stockValBySupplierIS[item.supplier] || 0) + inHandStock * uc;
                    if (opening > 0) {
             if (!openingStockByCodeIS[item.code]) {
               openingStockByCodeIS[item.code] = { name: item.name || item.code, qty: 0, unitCost: ucOpen };
@@ -649,7 +655,18 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       // total (e.g. Rs.30,767,158 instead of the real Rs.566,206).
       const cashUpToMonthEnd = mEnd ? cashLedgerAllTime.filter(r => r.date <= mEnd) : cashLedgerAllTime;
       const cashUpToMonthEndTxns = cashUpToMonthEnd.filter(r => !CASH_NON_TXN_TYPES.includes(r.balance_type));
-      const cashBal=cashBF+cashUpToMonthEndTxns.reduce((a,r)=>a+(Number(r.debit)||0),0)-cashUpToMonthEndTxns.reduce((a,r)=>a+(Number(r.credit)||0),0);
+            // Same rule as S_Cash's ledger: the latest Day Sheet Balance (counted cash) on/before
+      // month-end replaces the running balance; only later transactions are added after it.
+      // Single outlet only (day sheets are per outlet); "ALL" keeps the old behaviour.
+      const lastDaySheet = outlet === "ALL" ? null : cashUpToMonthEnd
+        .filter(r => r.balance_type === "daysheet")
+        .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
+        .map(r => ({ date: r.date, amt: (Number(r.debit)||0) - (Number(r.credit)||0) }))
+        .pop() || null;
+      const cashTxnsForBal = lastDaySheet
+        ? cashUpToMonthEndTxns.filter(r => r.date > lastDaySheet.date)
+        : cashUpToMonthEndTxns;
+      const cashBal=(lastDaySheet ? lastDaySheet.amt : cashBF)+cashTxnsForBal.reduce((a,r)=>a+(Number(r.debit)||0),0)-cashTxnsForBal.reduce((a,r)=>a+(Number(r.credit)||0),0);
       // marker row (bankBF already covers "bf" separately) so a B/F,
       // monthly B/F, Pending, manual C/D, or Different row dated inside
       // the selected month doesn't get summed twice into bankBal.
@@ -994,7 +1011,7 @@ Object.keys(cosByItem).forEach(code => {
       // Only commit this response if no newer load() has started since —
      // otherwise an older, slower call would clobber a newer, faster one.
      if (requestId !== loadIdRef.current) return;
-         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS, endStockByCodeIS,endStockOrderIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
+         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -3490,7 +3507,7 @@ async function computeNetPositionTotal(outlet, month, d) {
 }
 
    function StockSummary({ d, outlet, month }) {
-    const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplier = {}, positionLedgerAll = [], coa = [],
+      const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplierIS: stockValBySupplier = {}, positionLedgerAll = [], coa = [],
           bankLedger = [], cardLedgerAll = [] } = d;
   // Stock Summary's "Stock" must equal Current Status's Total Physical
   // Stock for the selected period. endStockValIS already replicates that
