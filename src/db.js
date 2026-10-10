@@ -1592,7 +1592,8 @@ export async function setSupplierBF(supplierId, outlet = "ALL", date, amount, pe
 export async function getSupplierDiff(supplierId, outlet = "ALL", period = null) {
   const { data, error } = await supabase
     .from("supplier_diff")
-    .select("amount_diff, payment_diff, apply_discount, period")
+     // AFTER
+    .select("amount_diff, payment_diff, apply_discount, damage_amount, damage_payment, period")
     .eq("supplier_id", supplierId)
     .eq("outlet", outlet)
     .eq("period", period)
@@ -1602,14 +1603,16 @@ export async function getSupplierDiff(supplierId, outlet = "ALL", period = null)
   return {
     amountDiff: Number(data.amount_diff) || 0,
     paymentDiff: Number(data.payment_diff) || 0,
+    damageAmount: Number(data.damage_amount) || 0,
+    damagePayment: Number(data.damage_payment) || 0,
     // null/undefined means "never saved for this outlet+supplier+month" —
     // callers use this to fall back to the default-supplier-list rule.
     applyDiscount: data.apply_discount === null || data.apply_discount === undefined ? null : !!data.apply_discount,
     period: data.period,
   };
 }
-
-export async function setSupplierDiff(supplierId, outlet = "ALL", period = null, amountDiff, paymentDiff, applyDiscount) {
+// AFTER
+export async function setSupplierDiff(supplierId, outlet = "ALL", period = null, amountDiff, paymentDiff, applyDiscount, damageAmount, damagePayment) {
   const payload = {
     supplier_id: supplierId,
     outlet,
@@ -1622,7 +1625,13 @@ export async function setSupplierDiff(supplierId, outlet = "ALL", period = null,
   // passed something — so existing callers that still call this with
   // just (supplierId, outlet, period, amountDiff, paymentDiff) behave
   // exactly as before and never blank out a previously saved value.
+  
+  // AFTER
   if (applyDiscount !== undefined) payload.apply_discount = !!applyDiscount;
+  // Same guard as apply_discount: callers that don't pass damage values
+  // never blank out previously saved ones.
+  if (damageAmount  !== undefined) payload.damage_amount  = Number(damageAmount)  || 0;
+  if (damagePayment !== undefined) payload.damage_payment = Number(damagePayment) || 0;
 
   const { data, error } = await supabase
     .from("supplier_diff")
@@ -1630,9 +1639,12 @@ export async function setSupplierDiff(supplierId, outlet = "ALL", period = null,
     .select()
     .maybeSingle();
   if (error) { console.error("setSupplierDiff error:", error); return null; }
+  // AFTER
   return data ? {
     amountDiff: Number(data.amount_diff) || 0,
     paymentDiff: Number(data.payment_diff) || 0,
+    damageAmount: Number(data.damage_amount) || 0,
+    damagePayment: Number(data.damage_payment) || 0,
     applyDiscount: data.apply_discount === null || data.apply_discount === undefined ? null : !!data.apply_discount,
     period: data.period,
   } : null;

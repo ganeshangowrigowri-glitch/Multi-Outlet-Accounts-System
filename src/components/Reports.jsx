@@ -2791,12 +2791,12 @@ const UG_FIXED_PRODUCTS = [
   "UOW Q", "UOW P", "UOW N",
   "UGS Q", "UGS P", "UGS N",
   "UV6 Q", "UV6 P",
-  "UISW Q", "UISW P",
+  "USW Q", "USW P",
   "UPV Q", "UPV P",
   "UMDG Q",
-  "UPA N",
+  "UAP N",
   "ULE N",
-  "UGAV Q",
+  "UPVGA Q",
 ];
 
 // Normalises a raw name/code string for matching: uppercase, trim, collapse
@@ -2877,11 +2877,23 @@ function UGBook({ d, outlet, month }) {
   const [bfSaving, setBfSaving]           = useState(false);
     useEffect(() => {
     let cancelled = false;
-    getSupplierBF(UG_SUPPLIER_ID, outlet, month).then(entry => {
+        getSupplierBF(UG_SUPPLIER_ID, outlet, month).then(entry => {
       if (cancelled) return;
       setManualBFState(entry);
       setBfDateInput(entry?.date || today());
       setBfAmountInput(entry?.amount ?? "");
+    });
+    return () => { cancelled = true; };
+  }, [outlet, month]);
+
+  const [ugAmtDiff, setUgAmtDiff] = useState(0);
+  const [ugDamage, setUgDamage]   = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    getSupplierDiff(UG_SUPPLIER_ID, outlet, month).then(entry => {
+      if (cancelled) return;
+      setUgAmtDiff(entry?.amountDiff || 0);
+      setUgDamage(entry?.damageAmount || 0);
     });
     return () => { cancelled = true; };
   }, [outlet, month]);
@@ -2998,10 +3010,13 @@ function UGBook({ d, outlet, month }) {
   });
 
   // ── 7. Footer calculations ────────────────────────────────────────────
+ 
   const grossBalance = bfBalance + totalPurchase - totalPayment;
-   const ugDiscount   = (totalPurchase / 1.18) * 0.06;      // UG 6% trade discount 
-  const vatDiscount  = (totalPurchase * 0.06) - ugDiscount; // VAT on the discount 
-  const netBalance   = grossBalance - ugDiscount - vatDiscount;
+  // Excel rule: discount base includes Damage + DIFF, and both are added to the balance.
+  const discountBase = totalPurchase + ugDamage + ugAmtDiff;
+  const ugDiscount   = (discountBase / 1.18) * 0.06;      // UG 6% trade discount
+  const vatDiscount  = (discountBase * 0.06) - ugDiscount; // VAT on the discount
+  const netBalance   = grossBalance + ugDamage + ugAmtDiff - ugDiscount - vatDiscount;
 
       // P/Stock: END-of-month stock value for UG SUPPLIER items — filtered
     // by supplier (via the existing isUG check, same as Current Status's
@@ -3269,16 +3284,17 @@ function UGBook({ d, outlet, month }) {
             {footRow("UG 6% Discount", ugDiscount, "var(--grn)")}
             {footRow("VAT Discount",   vatDiscount, "var(--grn)")}
 
-            {/* Damage — manual field, read-only placeholder */}
-            <div style={{
-              display: "flex", justifyContent: "space-between", alignItems: "center",
-              padding: "6px 0", borderBottom: "1px solid var(--bdr)",
-            }}>
-              <span style={{ fontSize: 12, color: "var(--mut)" }}>Damage</span>
-              <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12.5, color: "var(--mut2)" }}>
-                —
-              </span>
-            </div>
+             {[["DIFF", ugAmtDiff], ["Damage", ugDamage]].map(([label, v]) => (
+              <div key={label} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                padding: "6px 0", borderBottom: "1px solid var(--bdr)",
+              }}>
+                <span style={{ fontSize: 12, color: "var(--mut)" }}>{label}</span>
+                <span style={{ fontFamily: "'JetBrains Mono',monospace", fontSize: 12.5, color: v ? "var(--txt)" : "var(--mut2)" }}>
+                  {v ? `Rs.${fmt(v)}` : "—"}
+                </span>
+              </div>
+            ))}
 
             {/* Net Balance */}
             <div style={{
@@ -3371,6 +3387,8 @@ function UGBook({ d, outlet, month }) {
   const diffEntry      = await getSupplierDiff(supplierId, outlet, month);
   const balanceAmtDiff = diffEntry?.amountDiff  || 0;
   const paymentDiff    = diffEntry?.paymentDiff || 0;
+  const damageAmount   = diffEntry?.damageAmount  || 0;
+  const damagePayment  = diffEntry?.damagePayment || 0;
 
   // Read the EXACT outlet/supplier/month discount choice staff made in
   // Supplier Credit Ledger (persisted via the same supplier_diff row) —
@@ -3396,8 +3414,10 @@ function UGBook({ d, outlet, month }) {
   const totalAmount = bfBalance + rowsAmount;
   const totalPaid = payThisMonth.reduce((a, p) => a + (Number(p.amount) || 0), 0);
 
-  const totalAmountAdj = totalAmount + balanceAmtDiff;
-  const totalPaidAdj   = totalPaid   + paymentDiff;
+ 
+  
+  const totalAmountAdj = totalAmount + balanceAmtDiff + damageAmount;
+  const totalPaidAdj   = totalPaid   + paymentDiff   + damagePayment;
 
   return totalAmountAdj - totalPaidAdj; // Balance C/D
 }
@@ -3733,7 +3753,7 @@ async function computeNetPositionTotal(outlet, month, d) {
   // category's balance is a running total across every entry, so there's no
   // single "the" note; showing the latest one mirrors how B/F values work
   // elsewhere in the app (most recent entry wins).
-  // AFTER — Reports.jsx, inside StockSummary()
+ 
 const categoryNote = key => {
     const rows = positionUpToMonthEnd.filter(r => r.category === key && r.notes);
     if (!rows.length) return "";
@@ -3750,12 +3770,12 @@ const categoryNote = key => {
   const assetRows       = coaAssetCats.map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) })).filter(r => r.balance !== 0);
   // "Damage" removed from Other Credit Outstanding — filtered here so
   // POSITION_CATEGORIES itself (and any other consumer of it) is untouched.
-  // AFTER
+
 const otherCreditRows = POSITION_CATEGORIES.other_credit
   .filter(c => c.key !== "damage" && !/damage/i.test(c.label))
   .map(c => ({ ...c, balance: categoryBalance(c.key), notes: categoryNote(c.key) }));
 
-// AFTER
+
 const othersCat = POSITION_CATEGORIES.other_credit.find(c => /^others$/i.test(c.label));
 const othersEntries = othersCat
   ? positionUpToMonthEnd.filter(r => r.category === othersCat.key)
@@ -4240,8 +4260,11 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   // adjustment to Balance C/D). Persisted per supplier/outlet/month via
   // supplier_diff (same load/save pattern as manualBF above), so the value
   // survives reloads and reappears when this exact month is reselected.
-    const [balanceAmtDiff, setBalanceAmtDiff] = useState(0);
+ 
+  const [balanceAmtDiff, setBalanceAmtDiff] = useState(0);
   const [paymentDiff, setPaymentDiff]       = useState(0);
+  const [damageAmt, setDamageAmt]           = useState(0);
+  const [damagePay, setDamagePay]           = useState(0);
   const [diffSaving, setDiffSaving] = useState(false);
   const [diffError, setDiffError]   = useState(null);
 
@@ -4249,8 +4272,11 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
     let cancelled = false;
     getSupplierDiff(supplierId, outlet, month).then(entry => {
       if (cancelled) return;
+    
       setBalanceAmtDiff(entry?.amountDiff || 0);
       setPaymentDiff(entry?.paymentDiff || 0);
+      setDamageAmt(entry?.damageAmount  || 0);
+      setDamagePay(entry?.damagePayment || 0);
       // Persisted per outlet/supplier/month, same row as amountDiff/paymentDiff.
       // Falls back to the existing default-supplier-list rule only when no
       // saved value exists yet for this outlet+supplier+month (e.g. never
@@ -4263,13 +4289,13 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
     return () => { cancelled = true; };
   }, [supplierId, outlet, month]);
 
-  async function saveDiff(nextAmountDiff, nextPaymentDiff, nextApplyDiscount = applyDiscount) {
+  async function saveDiff(nextAmountDiff, nextPaymentDiff, nextApplyDiscount = applyDiscount, nextDamageAmt = damageAmt, nextDamagePay = damagePay) {
     setDiffSaving(true);
     setDiffError(null);
     // 4th arg persists the checkbox in the SAME supplier_diff row as
     // amountDiff/paymentDiff — additive column only, no other columns
     // touched, no other table involved.
-    const result = await setSupplierDiff(supplierId, outlet, month, nextAmountDiff, nextPaymentDiff, nextApplyDiscount);
+    const result = await setSupplierDiff(supplierId, outlet, month, nextAmountDiff, nextPaymentDiff, nextApplyDiscount, nextDamageAmt, nextDamagePay);
     setDiffSaving(false);
     if (!result) {
       setDiffError("Could not save — check that supplier_diff exists with correct permissions.");
@@ -4283,13 +4309,14 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
     setApplyDiscount(val);
     saveDiff(balanceAmtDiff, paymentDiff, val);
   }
-const totalAmountAdj = totalAmount + balanceAmtDiff;
-const totalPaidAdj   = totalPaid + paymentDiff;
+
+const totalAmountAdj = totalAmount + balanceAmtDiff + damageAmt;
+const totalPaidAdj   = totalPaid + paymentDiff + damagePay;
 // Balance C/D = Total Amount − Total Payment (using the adjusted totals
 // above — no extra term added/subtracted here)
 const balanceCD = totalAmountAdj - totalPaidAdj;
 
-  const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
+    const th = { padding: "8px 9px", fontSize: 10.5, fontWeight: 600, letterSpacing: ".08em", textTransform: "uppercase", color: "#f3f4f6", background: "#1f2937", borderBottom: "2px solid #4b5563", whiteSpace: "nowrap", textAlign: "right" };
   const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
 
   const supplierName = (SUPPLIERS_LIST.find(s => s.id === supplierId) || {}).name || supplierId;
@@ -4342,15 +4369,30 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
         </div>
 
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+             <style>{`
+            .scl-row:hover { background: rgba(31,41,55,.5) !important; }
+          `}</style>
+                    <table style={{ width: "100%", minWidth: 1080, tableLayout: "fixed", borderCollapse: "collapse", fontSize: 11 }}>
+              <colgroup>
+              <col style={{ width: 90 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 130 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 90 }} />
+              <col style={{ width: 120 }} />
+              <col style={{ width: 120 }} />
+            </colgroup>
             <thead>
               <tr>
                 <th style={{ ...th, textAlign: "left" }}>Date</th>
+                <th style={{ ...th, textAlign: "left" }}>Chq No</th>
                 <th style={{ ...th, textAlign: "left" }}>Invoice No</th>
                 <th style={th}>Amount</th>
-                <th style={{ ...th, textAlign: "left" }}>Pay Date</th>
+                <th style={{ ...th, textAlign: "left", paddingLeft: 24 }}>Pay Date</th>
                 <th style={th}>Payment</th>
-                <th style={{ ...th, textAlign: "left" }}>Chq No</th>
                 <th style={th}>6% Dis</th>
                 <th style={th}>VAT Dis</th>
                 <th style={th}>Outstanding</th>
@@ -4368,15 +4410,16 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                             {allRows.map((r, i) => {
                 // Balance = Amount Total − Payment Total (orphan payment
                 // rows have amount 0, so they only ever reduce the balance)
-                runBal += r.amount - r.paid;
+                                runBal += r.amount - r.paid;
                 return (
-                  <tr key={i}>
+                  <tr key={i} className="scl-row" style={{ background: i % 2 === 1 ? "rgba(63,63,70,.15)" : "transparent" }}>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.isOrphanPayment ? "—" : r.date}</td>
+              
+                    <td title={r.chq || ""} style={{ ...td(false), textAlign: "left" }}>{(r.chq || "").split(",").map(c => c.trim().slice(-3)).filter(Boolean).join(", ") || "—"}</td>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.isOrphanPayment ? `${r.invNo} (prior period)` : r.invNo}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.amount)}</td>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.payDate || "—"}</td>
+                     <td style={{ ...td(false), textAlign: "left", paddingLeft: 24 }}>{r.payDate || "—"}</td>
                     <td style={td(false)}>{r.paid !== 0 ? fmt(r.paid) : "-"}</td>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.chq || "—"}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.sixPctDis)}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.vatDis)}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.outstanding)}</td>
@@ -4385,10 +4428,10 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                 );
               })}
 
-              {/* Staff-entered corrections — shown before TOTAL */}
+                            {/* Staff-entered corrections — shown before TOTAL */}
               <tr className="no-print-input-labels">
-                <td style={{ ...td(false), textAlign: "left" }} colSpan={2}>Amount Different</td>
-                  <td style={td(false)}>
+                <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Amount Different</td>
+                <td style={td(false)}>
                   <input type="number" step="0.01" value={balanceAmtDiff}
                     onChange={e => setBalanceAmtDiff(parseFloat(e.target.value) || 0)}
                     onBlur={e => saveDiff(parseFloat(e.target.value) || 0, paymentDiff)}
@@ -4400,14 +4443,13 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                 <td style={td(false)}></td>
                 <td style={td(false)}></td>
                 <td style={td(false)}></td>
-                <td style={td(false)}></td>
               </tr>
               <tr>
-                <td style={{ ...td(false), textAlign: "left" }} colSpan={2}>Payment Different</td>
+                <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Payment Different</td>
                 <td style={td(false)}></td>
                 <td style={td(false)}></td>
                 <td style={td(false)}>
-                    <input type="number" step="0.01" value={paymentDiff}
+                  <input type="number" step="0.01" value={paymentDiff}
                     onChange={e => setPaymentDiff(parseFloat(e.target.value) || 0)}
                     onBlur={e => saveDiff(balanceAmtDiff, parseFloat(e.target.value) || 0)}
                     style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
@@ -4416,15 +4458,46 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                 <td style={td(false)}></td>
                 <td style={td(false)}></td>
                 <td style={td(false)}></td>
+              </tr>
+
+              {/* Damage — Amount column */}
+              <tr>
+                <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Damage Amount</td>
+                <td style={td(false)}>
+                  <input type="number" step="0.01" value={damageAmt}
+                    onChange={e => setDamageAmt(parseFloat(e.target.value) || 0)}
+                    onBlur={e => saveDiff(balanceAmtDiff, paymentDiff, applyDiscount, parseFloat(e.target.value) || 0, damagePay)}
+                    style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
+                </td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+              </tr>
+              {/* Damage — Payment column */}
+              <tr>
+                <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Damage Payment</td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}>
+                  <input type="number" step="0.01" value={damagePay}
+                    onChange={e => setDamagePay(parseFloat(e.target.value) || 0)}
+                    onBlur={e => saveDiff(balanceAmtDiff, paymentDiff, applyDiscount, damageAmt, parseFloat(e.target.value) || 0)}
+                    style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
+                </td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
+                <td style={td(false)}></td>
                 <td style={td(false)}></td>
               </tr>
 
                 <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
-                <td style={td(true)} colSpan={2}>TOTAL</td>
+                <td style={td(true)} colSpan={3}>TOTAL</td>
                 <td style={td(true)}>{fmt(totalAmountAdj)}</td>
                 <td style={td(true)}></td>
                 <td style={td(true)}>{fmt(totalPaidAdj)}</td>
-                <td style={td(true)}></td>
                 <td style={td(true)}>{fmt(totalSixPctDis)}</td>
                 <td style={td(true)}>{fmt(totalVatDis)}</td>
                 <td style={td(true)}></td>
@@ -4444,257 +4517,7 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
   );
 }
 
-// ══════════════════════════════════════════════════════
-// BANK STATEMENT (Per Account) — mirrors Excel's "BANK 1".."BANK 4" sheets.
-// Reuses the already-loaded, month-scoped d.bankLedger (every account's
-// rows come through in one array, each tagged with bank_id) and the
-// existing getBankBF(outlet, bankId) helper — no new data-layer code.
-// ══════════════════════════════════════════════════════
-function BankStatement({ d, outlet, month }) {
-  const [accounts, setAccounts] = useState([]);
-  const [bankId, setBankId]     = useState("");
-  const [openingBF, setOpeningBF] = useState(0);
 
-  // Same bank_accounts query S_Bank.jsx already uses for its own dropdown.
-  useEffect(() => {
-    if (outlet === "ALL") { setAccounts([]); setBankId(""); return; }
-    supabase.from("bank_accounts").select("*")
-      .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
-      .neq("account_type", "card")
-      .order("bank")
-      .then(({ data }) => setAccounts(data || []));
-  }, [outlet]);
-
-  useEffect(() => {
-    if (accounts.length && !accounts.find(a => a.id === bankId)) setBankId(accounts[0].id);
-  }, [accounts]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    if (!bankId || outlet === "ALL") { setOpeningBF(0); return; }
-    getBankBF(outlet, bankId).then(v => setOpeningBF(v || 0));
-  }, [outlet, bankId, month]);
-
-  const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
-  const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
-
-  if (outlet === "ALL") {
-    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>Select a specific outlet to view a per-account Bank Statement.</div>;
-  }
-  if (!accounts.length) {
-    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>No bank accounts set up for this outlet.</div>;
-  }
-
-  // Same balance_type exclusions S_Bank.jsx's own Ledger tab uses — keeps
-  // month-scoped B/F, Pending, and manual C/D rows out of the transaction list.
-  const rows = (d.bankLedger || [])
-    .filter(r => r.bank_id === bankId &&
-      r.balance_type !== "bf" && r.balance_type !== "bf_monthly" &&
-      r.balance_type !== "pending" && r.balance_type !== "cd_manual" &&
-      r.balance_type !== "different")
-    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-
-  let running = Number(openingBF) || 0;
-  const totalDebit  = rows.reduce((a, r) => a + (Number(r.debit)  || 0), 0);
-  const totalCredit = rows.reduce((a, r) => a + (Number(r.credit) || 0), 0);
-  const closingBal  = running + totalDebit - totalCredit;
-
-  const acc = accounts.find(a => a.id === bankId);
-  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
-
-  return (
-    <div>
-      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
-        <select value={bankId} onChange={e => setBankId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
-          {accounts.map(a => <option key={a.id} value={a.id}>{a.bank} — {a.account_no || a.accountNo}</option>)}
-        </select>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
-      </div>
-
-      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
-        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>
-            Bank Statement — {acc?.bank}{acc?.account_no ? ` (${acc.account_no})` : ""}
-          </div>
-          <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet} &nbsp;·&nbsp; {mo}</div>
-        </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
-            <thead>
-              <tr>
-                <th style={{ ...th, textAlign: "left" }}>Date</th>
-                <th style={{ ...th, textAlign: "left" }}>Description</th>
-                <th style={th}>Cheque No</th>
-                <th style={th}>Debit</th>
-                <th style={th}>Credit</th>
-                <th style={th}>Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td style={{ ...td(true), textAlign: "left" }}>—</td>
-                <td style={{ ...td(true), textAlign: "left" }}>Balance B/F</td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(true)}>{fmt(running)}</td>
-              </tr>
-              {rows.map((r, i) => {
-                running += (Number(r.debit) || 0) - (Number(r.credit) || 0);
-                return (
-                  <tr key={r.id || i}>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.description}</td>
-                    <td style={td(false)}>{r.check_no || ""}</td>
-                    <td style={td(false)}>{r.debit  ? fmt(r.debit)  : ""}</td>
-                    <td style={td(false)}>{r.credit ? fmt(r.credit) : ""}</td>
-                    <td style={td(true)}>{fmt(running)}</td>
-                  </tr>
-                );
-              })}
-              <tr>
-                <td style={{ ...td(true), textAlign: "left" }} colSpan={3}>Total / Closing Balance</td>
-                <td style={td(true)}>{fmt(totalDebit)}</td>
-                <td style={td(true)}>{fmt(totalCredit)}</td>
-                <td style={td(true)}>{fmt(closingBal)}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ══════════════════════════════════════════════════════
-// CARD STATEMENT (Per Terminal) — mirrors Excel's "VIZA CARD" /
-// "VIZA CARD 2" sheets. Reuses d.cardLedgerAll (already loaded,
-// already month-scoped, already tagged with card_id per row) and
-// the existing getCardBF(outlet, cardId, period) helper — no new
-// data-layer code, no changes to S_Card.jsx's own ledger/interest logic.
-// ══════════════════════════════════════════════════════
-function CardStatement({ d, outlet, month }) {
-  const [cards, setCards]   = useState([]);
-  const [cardId, setCardId] = useState("");
-  const [openingBF, setOpeningBF] = useState(0);
-
-  // Same bank_accounts query S_Card.jsx already uses (account_type = "card").
-  useEffect(() => {
-    if (outlet === "ALL") { setCards([]); setCardId(""); return; }
-    supabase.from("bank_accounts").select("*")
-      .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
-      .eq("account_type", "card")
-      .order("bank")
-      .then(({ data }) => setCards(data || []));
-  }, [outlet]);
-
-  useEffect(() => {
-    if (cards.length && !cards.find(c => c.id === cardId)) setCardId(cards[0].id);
-  }, [cards]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // getCardBF is period-scoped (month string) — same "month" value already
-  // driving this whole Reports screen, so it lines up with no conversion.
-  useEffect(() => {
-    if (!cardId || outlet === "ALL") { setOpeningBF(0); return; }
-    getCardBF(outlet, cardId, month).then(v => setOpeningBF(v || 0));
-  }, [outlet, cardId, month]);
-
-  const th = { padding: "6px 9px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
-  const td = (bold) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, whiteSpace: "nowrap" });
-
-  if (outlet === "ALL") {
-    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>Select a specific outlet to view a per-terminal Card Statement.</div>;
-  }
-  if (!cards.length) {
-    return <div style={{ padding: 40, textAlign: "center", color: "var(--mut)" }}>No card accounts set up for this outlet.</div>;
-  }
-
-  // Same balance_type exclusions S_Card.jsx's own Ledger tab uses.
-  const netOf = e => Number(e.net ?? (Number(e.credit || 0) - Number(e.interest || 0)));
-  const rows = (d.cardLedgerAll || [])
-    .filter(r => r.card_id === cardId &&
-      r.balance_type !== "bf" && r.balance_type !== "pending" &&
-      r.balance_type !== "cd_manual" && r.balance_type !== "different")
-    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-
-  let running = Number(openingBF) || 0;
-  const totalGross    = rows.reduce((a, r) => a + (Number(r.credit) || 0), 0);
-  const totalInterest = rows.reduce((a, r) => a + (Number(r.interest) || 0), 0);
-  const totalNet       = rows.reduce((a, r) => a + netOf(r), 0);
-  const totalDebit    = rows.reduce((a, r) => a + (Number(r.debit) || 0), 0);
-  const closingBal    = running + totalNet - totalDebit;
-
-  const card = cards.find(c => c.id === cardId);
-  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
-
-  return (
-    <div>
-      <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
-        <select value={cardId} onChange={e => setCardId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
-          {cards.map(c => <option key={c.id} value={c.id}>{c.bank} — {c.account_no || c.accountNo}</option>)}
-        </select>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
-      </div>
-
-      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
-        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>
-            Card Statement — {card?.bank}{card?.account_no ? ` (${card.account_no})` : ""}
-            {card?.fee_pct ? ` · ${card.fee_pct}% fee` : ""}
-          </div>
-          <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet} &nbsp;·&nbsp; {mo}</div>
-        </div>
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
-            <thead>
-              <tr>
-                <th style={{ ...th, textAlign: "left" }}>Date</th>
-                <th style={{ ...th, textAlign: "left" }}>Description</th>
-                <th style={th}>Gross</th>
-                <th style={th}>Interest</th>
-                <th style={th}>Net</th>
-                <th style={th}>Debit</th>
-                <th style={th}>Balance</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td style={{ ...td(true), textAlign: "left" }}>—</td>
-                <td style={{ ...td(true), textAlign: "left" }}>Balance B/F</td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(true)}>{fmt(running)}</td>
-              </tr>
-              {rows.map((r, i) => {
-                running += netOf(r) - (Number(r.debit) || 0);
-                return (
-                  <tr key={r.id || i}>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.date}</td>
-                    <td style={{ ...td(false), textAlign: "left" }}>{r.description}</td>
-                    <td style={td(false)}>{r.credit   ? fmt(r.credit)   : ""}</td>
-                    <td style={td(false)}>{r.interest ? fmt(r.interest) : ""}</td>
-                    <td style={td(false)}>{netOf(r) ? fmt(netOf(r)) : ""}</td>
-                    <td style={td(false)}>{r.debit    ? fmt(r.debit)    : ""}</td>
-                    <td style={td(true)}>{fmt(running)}</td>
-                  </tr>
-                );
-              })}
-              <tr>
-                <td style={{ ...td(true), textAlign: "left" }} colSpan={2}>Total / Closing Balance</td>
-                <td style={td(true)}>{fmt(totalGross)}</td>
-                <td style={td(true)}>{fmt(totalInterest)}</td>
-                <td style={td(true)}>{fmt(totalNet)}</td>
-                <td style={td(true)}>{fmt(totalDebit)}</td>
-                <td style={td(true)}>{fmt(closingBal)}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 
 // ══════════════════════════════════════════════════════
