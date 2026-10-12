@@ -204,7 +204,15 @@ export default function S_Expenses({ outlet, user, toast_ }) {
       .then(({ data }) => setOcpRecords(data || []));
   }, [outlet]);
 
+   
    const [ocpSaving, setOcpSaving] = useState(false);
+   const [ocpMethod, setOcpMethod] = useState("Cash"); // "Cash" | "Bank" (Personal Drawing only)
+   const [ocpBankId, setOcpBankId] = useState("");
+   useEffect(() => {
+     if (ocpMethod === "Bank" && !outletBanks.find(b => b.id === ocpBankId)) {
+       setOcpBankId(outletBanks[0]?.id || "");
+     }
+   }, [ocpMethod, outletBanks]); // eslint-disable-line react-hooks/exhaustive-deps
 
     async function submitOtherCashPayment() {
     if (ocpSaving) return; // prevents a double-click (or double-fire) from inserting twice
@@ -212,8 +220,11 @@ export default function S_Expenses({ outlet, user, toast_ }) {
     // Other Cash Payment: use the preset unless "CUSTOM" is picked, in
     // which case the free-text field is required. Personal Drawing keeps
     // using the free-text field as before.
-    if (ocpType === "other_cash" && ocpPreset === "CUSTOM" && !ocpDesc.trim()) {
+     if (ocpType === "other_cash" && ocpPreset === "CUSTOM" && !ocpDesc.trim()) {
       toast_("Enter a description for the custom entry", "err"); return;
+    }
+    if (ocpType === "drawing" && ocpMethod === "Bank" && !ocpBankId) {
+      toast_("Select a bank account", "err"); return;
     }
     setOcpSaving(true);
     try {
@@ -221,12 +232,23 @@ export default function S_Expenses({ outlet, user, toast_ }) {
       const label = ocpType === "drawing"
         ? "Personal Drawing"
         : (ocpPreset === "CUSTOM" ? ocpDesc.trim() : ocpPreset);
-      const finalDesc = ocpType === "drawing" ? (ocpDesc || label) : label;
-      await addCashEntry(outlet, {
-        date: ocpDate, description: finalDesc,
-        type: ocpType, debit: 0, credit: amt,
-      });
-      setOcpRecords(prev => [{ date: ocpDate, description: finalDesc, credit: amt, balance_type: ocpType, id: `tmp_${Date.now()}` }, ...prev]);
+            const finalDesc = ocpType === "drawing" ? (ocpDesc || label) : label;
+      if (ocpType === "drawing" && ocpMethod === "Bank") {
+        // Bank Ledger money-out (credit = out, same as expense Bank method).
+        // Description MUST start with "Personal Drawing" — Capital Sheet reads it.
+        await addBankEntry(outlet, {
+          date: ocpDate, bankId: ocpBankId,
+          description: `Personal Drawing${ocpDesc ? " - " + ocpDesc : ""}`,
+          checkNo: "",
+          type: "out", debit: 0, credit: amt,
+        });
+      } else {
+        await addCashEntry(outlet, {
+          date: ocpDate, description: finalDesc,
+          type: ocpType, debit: 0, credit: amt,
+        });
+        setOcpRecords(prev => [{ date: ocpDate, description: finalDesc, credit: amt, balance_type: ocpType, id: `tmp_${Date.now()}` }, ...prev]);
+      }
       toast_(`${label} saved ✓`);
       setOcpDesc(""); setOcpAmt("");
     } finally {
@@ -383,9 +405,29 @@ export default function S_Expenses({ outlet, user, toast_ }) {
               <label>Type</label>
               <select value={ocpType} onChange={e => setOcpType(e.target.value)}>
                 <option value="drawing">Personal Drawing</option>
-                <option value="other_cash">Other Cash Payment</option>
+                                <option value="other_cash">Other Cash Payment</option>
               </select>
             </div>
+            {ocpType === "drawing" && (
+              <div className="ff">
+                <label>Method</label>
+                <select value={ocpMethod} onChange={e => setOcpMethod(e.target.value)}>
+                  <option value="Cash">Cash</option>
+                  <option value="Bank">Bank</option>
+                </select>
+              </div>
+            )}
+            {ocpType === "drawing" && ocpMethod === "Bank" && (
+              <div className="ff">
+                <label>Bank Account *</label>
+                <select value={ocpBankId} onChange={e => setOcpBankId(e.target.value)}>
+                  <option value="">Select bank account…</option>
+                  {outletBanks.map(b => (
+                    <option key={b.id} value={b.id}>{b.bank} — {b.account_no || b.accountNo}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             {ocpType === "other_cash" && (
               <div className="ff">
                 <label>Category *</label>

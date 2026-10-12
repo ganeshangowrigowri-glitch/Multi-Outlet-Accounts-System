@@ -783,7 +783,14 @@ Object.keys(cosByItem).forEach(code => {
       // sheet, fed by cash_ledger rows tagged balance_type "drawing" /
       // "other_cash" (entered from S_Expenses.jsx's Other Cash Payments card).
          const personalDrawings = cashLedgerTxns.reduce((a,r)=> r.balance_type==="drawing" ? a+(Number(r.credit)||0) : a, 0);
-      const otherCashPayments = cashLedgerTxns.reduce((a,r)=> r.balance_type==="other_cash" ? a+(Number(r.credit)||0) : a, 0);
+              const otherCashPayments = cashLedgerTxns.reduce((a,r)=> r.balance_type==="other_cash" ? a+(Number(r.credit)||0) : a, 0);
+      // Personal Drawings paid from a bank account (Bank Ledger, in-month).
+      // Kept separate from personalDrawings so Cash Flow Statement (cash only) is unaffected.
+      const bankPersonalDrawings = (bankLedger||[]).reduce((a,r) => {
+        if (["bf","bf_monthly","pending","cd_manual","different"].includes(r.balance_type)) return a;
+        if (!(r.description||"").trim().toLowerCase().startsWith("personal drawing")) return a;
+        return a + (Number(r.credit)||0);
+      }, 0);
 
       // Other Cash Payment breakdown by category (BB CASH/BBB/UBB/DBB/
       // K.K Loan/UG Discount/Other) — same cashLedgerTxns source as
@@ -1013,7 +1020,7 @@ Object.keys(cosByItem).forEach(code => {
       // Only commit this response if no newer load() has started since —
      // otherwise an older, slower call would clobber a newer, faster one.
      if (requestId !== loadIdRef.current) return;
-         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
+         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, bankPersonalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -1246,11 +1253,12 @@ function BalanceSheet({ d, outlet, month }) {
 // Per PDF: Owner's Capital + Net Profit - Drawings - Commission = Total Capital
 // ══════════════════════════════════════════════════════
   function CapitalSheet({ d, outlet, month }) {
-     const {
+        const {
     cashBal, bankBal, endStockVal, coaCapital,
     capitalByParty = {}, totalCapitalIn = 0, totalCapitalOut = 0,
-    personalDrawings = 0, otherCashPayments = 0, ocpByCategory = {},
+    personalDrawings: cashPersonalDrawings = 0, bankPersonalDrawings = 0, otherCashPayments = 0, ocpByCategory = {},
   } = d;
+  const personalDrawings = cashPersonalDrawings + bankPersonalDrawings; // cash + bank
   // NOTE: sup6PctDiscBySup / supVatDiscBySup (UG & IDL Sales Commission)
   // are no longer used on the Capital Sheet — both commissions have been
   // removed from the Capital category per updated spec. They remain
@@ -2235,59 +2243,132 @@ function ExpenseSummary({ d, outlet, month }) {
 // PURCHASE SUMMARY 
 // ══════════════════════════════════════════════════════
 function PurchaseSummary({ d, outlet, month }) {
-  const { purBySup, totalPurchase, totalPurchaseEmpty = 0 } = d;
+  const { purBySup, totalPurchase, totalPurchaseEmpty = 0, purchases = [], sales = [] } = d;
   // Purchase Summary Total = Main Stock Purchase Total + Empty Stock Purchase Total
-  const grandTotalPurchase = totalPurchase + totalPurchaseEmpty;
+   const grandTotalPurchase = totalPurchase + totalPurchaseEmpty;
+
+  // UI-only regrouping: each line goes under its MAIN supplier.
+  const lineAmt = l => Number(l.amount) || (Number(l.qty) * Number(l.unitCost)) || 0;
+  const resolveSup = raw => {
+    if (!raw) return null;
+    const n = normSup(raw);
+    const hit = SUPPLIERS_LIST.find(s => s.id === raw || normSup(s.id) === n || normSup(s.name) === n);
+    return hit ? hit.id : null;
+  };
+  const UNASSIGNED = "__unassigned";
+  const groups = {};
+  const addLine = (k, bucket, p, l) => {
+    if (!groups[k]) groups[k] = { main: new Map(), empty: new Map() };
+    const m = groups[k][bucket];
+    if (!m.has(p)) m.set(p, []);
+    m.get(p).push(l);
+  };
+   // Empty item name/code -> main supplier, learned from existing Daily Sale empty rows
+  const emptyNameToSup = {};
+  (sales || []).forEach(s => (s.items || []).filter(r => r.isEmptyItem && r.supplier !== "EMPTY PURCHASE").forEach(r => {
+    const sid = resolveSup(r.supplier);
+    if (!sid) return;
+    [r.name, r.code, r.itemCode].forEach(k => { if (k) emptyNameToSup[normUGName(k)] = sid; });
+  }));
+  // Fallback keywords if an item isn't in this month's sales. Edit to suit.
+  // "BEER EMP" is not listed because it could be Lion Brewery or DCSL Beer.
+  const EMPTY_KEYWORD_SUP = [
+    [/^DES\b|^DEMP\b/, "2001-DCSL"],
+    [/^TOD\b/,         "2007-TODDY"],
+  ];
+  const resolveEmptyLine = l => {
+    const keys = [l.itemName, l.name, l.itemCode, l.code].map(normUGName).filter(Boolean);
+    for (const k of keys) if (emptyNameToSup[k]) return emptyNameToSup[k];
+    for (const k of keys) for (const [re, id] of EMPTY_KEYWORD_SUP) if (re.test(k)) return resolveSup(id) || id;
+    return null;
+  };
+
+  (purchases || []).forEach(p => {
+    const recSup = p.supplier_id || p.supplier || "Unknown";
+    const isEmptyRecord = normSup(recSup) === "EMPTY PURCHASE";
+    (p.items || []).forEach(l => {
+      if (!l.isEmptyItem && !isEmptyRecord) { addLine(recSup, "main", p, l); return; }
+      const target = resolveSup(l.supplier || l.supplier_id)
+        || resolveEmptyLine(l)
+        || (!isEmptyRecord && purBySup[recSup] && resolveSup(recSup) ? recSup : null)
+        || UNASSIGNED;
+      addLine(target, "empty", p, l);
+    });
+  });
+  const orderedKeys = [
+    ...Object.keys(purBySup).filter(k => groups[k]),
+    ...Object.keys(groups).filter(k => !(k in purBySup)),
+  ];
 
   return (
     <ReportWrap title="Purchase Summary" outlet={outlet} month={month}>
-      {Object.entries(purBySup).map(([supId, sup]) => (
-        <React.Fragment key={supId}>
-          <SH>{supId.replace(/^\d{4}-/, "")}</SH>
-          <tr style={{ background: "var(--s2)" }}>
-            {["Date", "Invoice No", "Description", "Qty", "Value"].map((h, i) => (
-              <td key={i} style={{ padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut2)", borderBottom: "1px solid var(--bdr)" }}>{h}</td>
-            ))}
-          </tr>
-          {sup.records.map(p => {
-  const items = p.items?.filter(l => !l.isEmptyItem) || [];
-  const invTotal = items.reduce((a, l) => a + (Number(l.amount) || (Number(l.qty) * Number(l.unitCost)) || 0), 0);
-  const invNo = p.ref || p.invoice_no || p.notes?.replace(/^Inv:/, "") || "—";
-  return (
-    <React.Fragment key={p.id || p.date}>
-      {items.map((l, i) => (
-        <tr key={`${p.id||p.date}_${i}`} style={{ borderBottom: "1px solid rgba(63,63,70,.3)" }}>
-          <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)", fontFamily: "'JetBrains Mono',monospace" }}>{i === 0 ? p.date : ""}</td>
-          <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)" }}>{i === 0 ? invNo : ""}</td>
-          <td style={{ padding: "5px 10px", fontSize: 11.5, fontWeight: 600 }}>{l.itemName || l.name || l.itemCode}</td>
-          <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{l.qty}</td>
-          <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--grn)" }}>Rs.{fmt(l.amount || (Number(l.qty) * Number(l.unitCost)) || 0)}</td>
-        </tr>
-      ))}
-         {items.length > 0 && (
-          <tr style={{ background: "rgba(63,63,70,.15)" }}>
-          <td colSpan={4} style={{ padding: "4px 10px", fontSize: 10.5, fontWeight: 600, color: "var(--mut)", textAlign: "right" }}>
-            Invoice {invNo} Total:
-          </td>
-          <td style={{ padding: "4px 10px", fontSize: 11, fontWeight: 700, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--txt)" }}>
-            Rs.{fmt(invTotal)}
-          </td>
-          </tr>
-         )}
-         </React.Fragment>
+               {orderedKeys.map(supId => {
+        const grp      = groups[supId];
+        const supName  = supId === UNASSIGNED ? "Empty Purchase (supplier not identified)" : supId.replace(/^\d{4}-/, "");
+        const hasMain  = grp.main.size > 0;
+        const hasEmpty = grp.empty.size > 0;
+        const mainLineSum = [...grp.main.values()].flat().reduce((a, l) => a + lineAmt(l), 0);
+        const mainTotal   = hasMain ? (purBySup[supId]?.total ?? mainLineSum) : 0;
+        const emptyTotal  = [...grp.empty.values()].flat().reduce((a, l) => a + lineAmt(l), 0);
+        const showSubs    = hasMain && hasEmpty;
+
+        const renderBucket = (bucket, tag) => [...bucket.entries()].map(([p, items]) => {
+          const invTotal = items.reduce((a, l) => a + lineAmt(l), 0);
+          const invNo = p.ref || p.invoice_no || p.notes?.replace(/^Inv:/, "") || "—";
+          return (
+            <React.Fragment key={`${tag}-${p.id || p.date}-${invNo}`}>
+              {items.map((l, i) => (
+                <tr key={`${tag}-${p.id || p.date}_${i}`} style={{ borderBottom: "1px solid rgba(63,63,70,.3)" }}>
+                  <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)", fontFamily: "'JetBrains Mono',monospace" }}>{i === 0 ? p.date : ""}</td>
+                  <td style={{ padding: "5px 10px", fontSize: 11, color: "var(--mut)" }}>{i === 0 ? invNo : ""}</td>
+                  <td style={{ padding: "5px 10px", fontSize: 11.5, fontWeight: 600 }}>{l.itemName || l.name || l.itemCode}</td>
+                  <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>{l.qty}</td>
+                  <td style={{ padding: "5px 10px", fontSize: 11.5, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--grn)" }}>Rs.{fmt(lineAmt(l))}</td>
+                </tr>
+              ))}
+              <tr style={{ background: "rgba(63,63,70,.15)" }}>
+                <td colSpan={4} style={{ padding: "4px 10px", fontSize: 10.5, fontWeight: 600, color: "var(--mut)", textAlign: "right" }}>Invoice {invNo} Total:</td>
+                <td style={{ padding: "4px 10px", fontSize: 11, fontWeight: 700, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color: "var(--txt)" }}>Rs.{fmt(invTotal)}</td>
+              </tr>
+            </React.Fragment>
+          );
+        });
+        const subHead = (text, color) => (
+          <tr><td colSpan={5} style={{ padding: "6px 10px 4px", fontSize: 10, fontWeight: 700, letterSpacing: ".08em", textTransform: "uppercase", color, borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>{text}</td></tr>
         );
-        })}
-          <tr style={{ background: "var(--gd2)" }}>
-            <td colSpan={4} style={{ padding: "5px 10px", fontSize: 11, fontWeight: 700, color: "var(--gld2)", textAlign: "right" }}>
-              Subtotal {supId.replace(/^\d{4}-/, "")}:
-            </td>
-            <td style={{ padding: "5px 10px", fontSize: 12, fontWeight: 700, color: "var(--gld2)", textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
-              Rs.{fmt(sup.total)}
-            </td>
+        const subTotalRow = (label, val, color) => (
+          <tr style={{ background: "rgba(63,63,70,.2)" }}>
+            <td colSpan={4} style={{ padding: "5px 10px", fontSize: 11, fontWeight: 700, color: "var(--mut)", textAlign: "right" }}>{label}</td>
+            <td style={{ padding: "5px 10px", fontSize: 12, fontWeight: 700, textAlign: "right", fontFamily: "'JetBrains Mono',monospace", color }}>Rs.{fmt(val)}</td>
           </tr>
-        </React.Fragment>
-      ))}
-      {Object.keys(purBySup).length === 0 && (
+        );
+
+        return (
+          <React.Fragment key={supId}>
+            <SH>{supName}</SH>
+            <tr style={{ background: "var(--s2)" }}>
+              {["Date", "Invoice No", "Description", "Qty", "Value"].map((h, i) => (
+                <td key={i} style={{ padding: "5px 10px", fontSize: 9, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut2)", borderBottom: "1px solid var(--bdr)" }}>{h}</td>
+              ))}
+            </tr>
+            {showSubs && subHead("Main Item Purchases", "var(--gld2)")}
+            {renderBucket(grp.main, "m")}
+            {showSubs && subTotalRow(`Main Items Subtotal (${supName}):`, mainTotal, "var(--txt)")}
+            {hasEmpty && subHead("Empty Item Purchases", "var(--blu)")}
+            {renderBucket(grp.empty, "e")}
+            {hasEmpty && subTotalRow(`Empty Items Subtotal (${supName}):`, emptyTotal, "var(--blu)")}
+            <tr style={{ background: "var(--gd2)", borderTop: showSubs ? "1.5px solid var(--bdr2)" : undefined }}>
+              <td colSpan={4} style={{ padding: "6px 10px", fontSize: 11.5, fontWeight: 700, color: "var(--gld2)", textAlign: "right" }}>
+                {hasEmpty ? `${supName} Grand Total:` : `Subtotal ${supName}:`}
+              </td>
+              <td style={{ padding: "6px 10px", fontSize: 12.5, fontWeight: 700, color: "var(--gld2)", textAlign: "right", fontFamily: "'JetBrains Mono',monospace" }}>
+                Rs.{fmt(mainTotal + emptyTotal)}
+              </td>
+            </tr>
+          </React.Fragment>
+        );
+      })}
+        {orderedKeys.length === 0 && (
         <tr><td colSpan={5} style={{ padding: 24, textAlign: "center", color: "var(--mut)" }}>No purchases recorded.</td></tr>
       )}
             <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
