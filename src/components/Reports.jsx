@@ -6,7 +6,7 @@ import { printFull, printA4 } from "../utils/printMode";
 import { supabase } from "../supabase";
 import { OUTLETS, SUPPLIERS_LIST } from "../data/seeds";
 import { getOutletInventory } from "./staff/S_Inventory";
-import { loadOutletOverridesFromDB } from "./admin/InventoryAdmin";
+import { loadOutletOverridesFromDB, resolveOutletPrice } from "./admin/InventoryAdmin";
 import {
   getOutlets,
   getSuppliers,
@@ -65,6 +65,13 @@ const fmtN = n => Number(n || 0).toLocaleString("en-LK", { minimumFractionDigits
 const today    = () => new Date().toISOString().split("T")[0];
 const monthOf  = d  => (d || "").slice(0, 7);
 const dayOf    = d  => parseInt((d || "").slice(8, 10)) || 0;
+
+// Same helper Current Status (S_Inventory.jsx) uses: unit cost / selling
+// price effective on a given date.
+function priceOnDate(masterItem, ov, date) {
+  const base = resolveOutletPrice(masterItem, date, masterItem.unitCost, masterItem.sellingPrice);
+  return resolveOutletPrice(ov, date, base.unitCost, base.sellingPrice);
+}
 
 // Crate types tracked in S_Crates.jsx — duplicated here (keys only) so the
 // Empty Loan Register can build a "CRATE::type" row for each one without
@@ -456,9 +463,34 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
             }));
             const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
           const inHandStock = lastEndStock !== null ? lastEndStock : opening;
-          const totalBottleSale = opening + totalPurchase - inHandStock;
+                   const totalBottleSale = opening + totalPurchase - inHandStock;
 
-          totalSalesAmt += totalBottleSale * sp;
+          // Sales Revenue = Current Status "Total Sale" (day-wise pricing):
+          // each day's sold qty × the selling price effective on THAT day,
+          // plus bottles not covered by saved daily "sold" at the latest price.
+          const masterItemSR = (inv || []).find(m => m.code === item.code && m.supplier === item.supplier) || item;
+          const ovItemSR     = overridesByOutlet[o]?.[`${item.code}__${item.supplier}`];
+          const soldByDateSR = {};
+          salesInRange.forEach(s => {
+            const row = (s.items || []).find(r =>
+              !r.isEmptyItem && (
+                (r.id && r.id === item.id) ||
+                (r.code === item.code && r.supplier === item.supplier)
+              )
+            );
+            if (!row) return;
+            const q = parseFloat(row.sold) || 0;
+            if (soldByDateSR[s.date] === undefined || q > soldByDateSR[s.date]) soldByDateSR[s.date] = q;
+          });
+          let itemSaleAmt = 0, soldTrackedSR = 0;
+          Object.entries(soldByDateSR).forEach(([date, q]) => {
+            const daySP = Number(priceOnDate(masterItemSR, ovItemSR, date).sellingPrice) || 0;
+            itemSaleAmt   += q * daySP;
+            soldTrackedSR += q;
+          });
+          itemSaleAmt += (totalBottleSale - soldTrackedSR) * sp;
+
+          totalSalesAmt += itemSaleAmt;
 
           // Income Statement — Current Status-based Opening/Purchase/End Stock
           openingStockValIS += opening * ucOpen;
