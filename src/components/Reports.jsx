@@ -547,7 +547,6 @@ const totalBottleSale = opening + totalPurchase + transferInQty - transferOutQty
 // Returns are already entered as negative "sold" qty in the daily sale,
 // so Sales Revenue is already net. Do NOT deduct them again.
 const netSalesAmt  = totalSalesAmt;
-
       // ── Opening Stock ──
       // Mirrors Current Status: firstOpening = r.openingStock from first sale record in month
       let openingStockVal=0;
@@ -1173,8 +1172,7 @@ Object.keys(cosByItem).forEach(code => {
     <ReportWrap title="Income Statement" outlet={outlet} month={month}>
       {/* Sales Revenue */}
       <TR label="Sales Revenue" val={totalSalesAmt} bold />
-      {totalReturns > 0 && <TR label="(-) Returns on Sale" val={totalReturns} neg indent={1} />}
-      {totalReturns > 0 && <TR label="Net Sales" val={netSalesAmt} bold total />}
+    
 
       {/* Cost of Sales */}
       <SH>Cost of Sales</SH>
