@@ -72,6 +72,25 @@ function priceOnDate(masterItem, ov, date) {
   const base = resolveOutletPrice(masterItem, date, masterItem.unitCost, masterItem.sellingPrice);
   return resolveOutletPrice(ov, date, base.unitCost, base.sellingPrice);
 }
+// Same transfer classification as S_Inventory.jsx (Current Status):
+// notes "type:in" / "type:out" win; otherwise fall back to outlet direction.
+const rptTransferIn = (rec, outlet) => {
+  const notes = rec.notes || "";
+  if (notes.includes("type:in")) return true;
+  if (notes.includes("type:out")) return false;
+  return (rec.to_outlet_id ?? rec.to) === outlet;
+};
+const rptTransferOut = (rec, outlet) => {
+  const notes = rec.notes || "";
+  if (notes.includes("type:out")) return true;
+  if (notes.includes("type:in")) return false;
+  return (rec.from_outlet_id ?? rec.from) === outlet;
+};
+const rptLineMatchesItem = (l, item) => {
+  if (l.itemCode !== item.code) return false;
+  if (l.supplier && item.supplier && l.supplier !== item.supplier) return false;
+  return true;
+};
 
 // Crate types tracked in S_Crates.jsx — duplicated here (keys only) so the
 // Empty Loan Register can build a "CRATE::type" row for each one without
@@ -388,9 +407,10 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       const endStockOrderIS     = [];
             let totalSalesAmt = 0;
       outlets.forEach((o, oi) => {
-        const [oSal, oPur] = arrayResults[oi];
+        const [oSal, oPur, , oTrn] = arrayResults[oi];
         const oSales     = inMonth(oSal);
         const oPurchases = inMonth(oPur);
+        const oTransfers = inMonth(oTrn);
         // Use the Current-Status-ordered copy so oInv.forEach below (which
         // drives openingStockOrderIS / endStockOrderIS push order) iterates
         // items in the exact same supplier-grouped sequence Current Status
@@ -462,8 +482,17 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
               if (l.itemCode === item.code && !l.isEmptyItem) totalPurchase += parseFloat(l.qty) || 0;
             }));
             const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
-          const inHandStock = lastEndStock !== null ? lastEndStock : opening;
-                   const totalBottleSale = opening + totalPurchase - inHandStock;
+            const inHandStock = lastEndStock !== null ? lastEndStock : opening;
+
+let transferInQty = 0, transferOutQty = 0;
+oTransfers.forEach(t => (t.items || t.lines || []).forEach(l => {
+  if (!rptLineMatchesItem(l, item)) return;
+  const q = parseFloat(l.qty) || 0;
+  if (rptTransferIn(t, o))  transferInQty  += q;
+  if (rptTransferOut(t, o)) transferOutQty += q;
+}));
+
+const totalBottleSale = opening + totalPurchase + transferInQty - transferOutQty - inHandStock;
 
           // Sales Revenue = Current Status "Total Sale" (day-wise pricing):
           // each day's sold qty × the selling price effective on THAT day,
@@ -515,7 +544,9 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       });
 
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
-      const netSalesAmt  = totalSalesAmt - totalReturns;
+// Returns are already entered as negative "sold" qty in the daily sale,
+// so Sales Revenue is already net. Do NOT deduct them again.
+const netSalesAmt  = totalSalesAmt;
 
       // ── Opening Stock ──
       // Mirrors Current Status: firstOpening = r.openingStock from first sale record in month
@@ -566,12 +597,21 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       });
 
       // ── Transfers ──
-      const transInAmt = transfers
-        .filter(t=>outlet==="ALL"||(t.to_outlet_id??t.to)===outlet)
-        .reduce((a,t)=>{ const am=(t.items||[]).reduce((s,l)=>s+(Number(l.amount)||0),0); return a+(Number(t.total)||am||0); },0);
-      const transOutAmt = transfers
-        .filter(t=>outlet==="ALL"||(t.from_outlet_id??t.from)===outlet)
-        .reduce((a,t)=>{ const am=(t.items||[]).reduce((s,l)=>s+(Number(l.amount)||0),0); return a+(Number(t.total)||am||0); },0);
+      // Line value: prefer `amount`; fall back to `stockValue` (saved by Transfer Out
+// to an AR account), then qty × unitCost.
+const transLineAmt = l =>
+  Number(l.amount) || Number(l.stockValue) || (Number(l.qty) * Number(l.unitCost)) || 0;
+const transTotal = t =>
+  Number(t.total) || (t.items || []).reduce((s, l) => s + transLineAmt(l), 0);
+// "type:out|account:1202" = goods sent out to an AR account, not received by an outlet.
+const isArTransferOut = t => /^type:out\|account:/i.test(String(t.notes || ""));
+
+const transInAmt = transfers
+  .filter(t => !isArTransferOut(t) && (outlet==="ALL" || (t.to_outlet_id??t.to)===outlet))
+  .reduce((a,t) => a + transTotal(t), 0);
+const transOutAmt = transfers
+  .filter(t => outlet==="ALL" || (t.from_outlet_id??t.from)===outlet)
+  .reduce((a,t) => a + transTotal(t), 0);
 
         // ── End Stock ──
       // Mirrors Current Status: lastEndStock = r.endStock from last sale record on mEnd date
@@ -634,9 +674,26 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       });
       const expRange  = (f,t)=>Object.values(expByAcc).filter(e=>e.id>=f&&e.id<=t).reduce((a,e)=>a+e.total,0);
       const expDetail = (f,t)=>Object.values(expByAcc).filter(e=>e.id>=f&&e.id<=t);
-      const expSaleMkt=expRange("5501","5649"), expAdmin=expRange("5650","5799");
+            const expSaleMkt=expRange("5501","5649"), expAdmin=expRange("5650","5799");
       const expFinance=expRange("5800","5899"), expOther=expRange("5900","5999");
       const totalExp=expSaleMkt+expAdmin+expFinance+expOther;
+
+      // ── Visa Card Interest → Income Statement Finance Charge ──
+// Source: card_ledger.interest (already loaded month-scoped in cardLedgerAll).
+// Kept OUT of totalExp on purpose (Cash Flow / Expense Summary use totalExp).
+const CARD_MARKER_TYPES = ["bf", "pending", "cd_manual", "different"];
+
+// FIX: this variable was used below and passed to setData() but never declared,
+// causing "ReferenceError: visaCardInterestLedger is not defined".
+const visaCardInterestLedger = (cardLedgerAll || [])
+  .filter(r => !CARD_MARKER_TYPES.includes(r.balance_type))
+  .reduce((a, r) => a + (Number(r.interest) || 0), 0);
+
+// Anti-double-count: portion already booked as a normal expense account
+const visaInterestBookedInExpenses = Object.values(expByAcc)
+  .filter(e => /vi[sz]a.*card.*interest/i.test(e.name || ""))
+  .reduce((a, e) => a + e.total, 0);
+const visaCardInterestAdd = Math.max(0, visaCardInterestLedger - visaInterestBookedInExpenses);
 
       // ── Discounts & Empty ──
       const discBySup={}, emptyDiscBySup={}, empSoldByName={}, empRetByName={};
@@ -1052,7 +1109,7 @@ Object.keys(cosByItem).forEach(code => {
       // Only commit this response if no newer load() has started since —
      // otherwise an older, slower call would clobber a newer, faster one.
      if (requestId !== loadIdRef.current) return;
-         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, bankPersonalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier, positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy });
+         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, bankPersonalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier,  positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy, visaCardInterestAdd, visaCardInterestLedger });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -1079,7 +1136,8 @@ Object.keys(cosByItem).forEach(code => {
     totalDiscPayment, totalDiscEmpty,
     sup6PctDiscBySup = {}, supVatDiscBySup = {}, totalSup6PctDisc = 0, totalSupVatDisc = 0,
     totalOtherInc,
-    expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp,
+        expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp,
+    visaCardInterestAdd = 0,
     // Opening Stock / Purchases / End Stock now come from Current Status
     // (opening qty, total purchase qty, in-hand stock qty × each item's
     // outlet unit cost) instead of Daily Sale's first/last saved date.
@@ -1096,10 +1154,14 @@ Object.keys(cosByItem).forEach(code => {
 
   // Cost of Sales = Opening Stock + Purchases − End Stock (Current
   // Status-based figures only — no transfer in/out term, per spec).
-  const costOfSales = openingStockVal + totalPurchase - endStockVal;
-  const grossProfit  = netSalesAmt - costOfSales;
-  const totalIncome  = grossProfit + totalOtherInc;
-  const netProfit     = totalIncome - totalExp;
+  // Cost of Sales = Opening Stock + Purchases + Transfer In − Transfer Out − End Stock
+   const costOfSales = openingStockVal + totalPurchase + transInAmt - transOutAmt - endStockVal;
+   const grossProfit  = netSalesAmt - costOfSales;
+    const totalIncome  = grossProfit + totalOtherInc;
+  // Visa card interest is part of Finance Charge here (added once, not in d.totalExp)
+  const expFinanceIS = expFinance + visaCardInterestAdd;
+  const totalExpIS   = totalExp + visaCardInterestAdd;
+  const netProfit     = totalIncome - totalExpIS;
 
   // Show More / Show Less — Cost of Sales item-level detail rows only.
   // Default OFF (Show Less) so both screen and print default to the
@@ -1215,14 +1277,15 @@ Object.keys(cosByItem).forEach(code => {
       <TR label="Total Administration" val={expAdmin} neg bold />
 
       <SH>Finance Charge (5800–5899)</SH>
-      {expDetail("5800", "5899").map(e => <TR key={e.id} label={e.name} col2={e.total} indent={1} />)}
-      <TR label="Total Finance Charge" val={expFinance} neg bold />
+          {expDetail("5800", "5899").map(e => <TR key={e.id} label={e.name} col2={e.total} indent={1} />)}
+      {visaCardInterestAdd > 0 && <TR label="Visa Card Interest" col2={visaCardInterestAdd} indent={1} />}
+      <TR label="Total Finance Charge" val={expFinanceIS} neg bold />
 
       <SH>Other Expenses (5900–5999)</SH>
       {expDetail("5900", "5999").map(e => <TR key={e.id} label={e.name} col2={e.total} indent={1} />)}
-      <TR label="Total Other Expenses" val={expOther} neg bold />
+           <TR label="Total Other Expenses" val={expOther} neg bold />
 
-      <TR label="Total Expenses" val={totalExp} neg total />
+      <TR label="Total Expenses" val={totalExpIS} neg total />
       <TR label="Net Profit / (Loss)" val={netProfit} bold total />
     </ReportWrap>
   );
@@ -1308,7 +1371,7 @@ function BalanceSheet({ d, outlet, month }) {
   const costOfSalesIS = (d.openingStockValIS || 0) + (d.totalPurchaseIS || 0) - (d.endStockValIS || 0);
   const grossProfitIS = (d.netSalesAmt || 0) - costOfSalesIS;
   const totalIncomeIS = grossProfitIS + (d.totalOtherInc || 0);
-  const netProfit = totalIncomeIS - (d.totalExp || 0);
+    const netProfit = totalIncomeIS - ((d.totalExp || 0) + (d.visaCardInterestAdd || 0));
 
     const [ownersCapital, setOwnersCapitalState] = useState(0);
   const [ocDateInput, setOcDateInput] = useState(today());

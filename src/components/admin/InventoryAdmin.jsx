@@ -1612,11 +1612,11 @@ useEffect(() => {
         }));
     });
 
-    const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
-    const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
+const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
+const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
 
-    const totalBottleSale = opening + totalPurchase - inHandStock;
-    const physicalStock   = inHandStock * uc;
+const totalBottleSale = opening + totalPurchase + transferIn - transferOut - inHandStock;
+const physicalStock   = inHandStock * uc;
     const totalSaleAmt    = totalBottleSale * sp;
     const profit          = mg * totalBottleSale;
     const physKey         = `${item.code}_${csFrom}_${csTo}_${csOutlet}`;

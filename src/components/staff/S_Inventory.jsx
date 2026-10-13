@@ -274,7 +274,12 @@ function ScrollArrows({ scrollBy }) {
 //  subTab  → "daily" | "status"
 //  dailyTab → "main"  | "empty"
 // ─────────────────────────────────────────────────────────────
- function CsTotals({ csData, fmt, physStock }) {
+ // DCSL empty-bottle deduction (Current Status only)
+const PINTS_EMPTY_RATE = 40;
+const NIPS_EMPTY_RATE  = 20;
+const DCSL_PINT_ITEMS  = ["DES P", "DCA P"];
+const DCSL_NIP_ITEMS   = ["DCA N", "DES N", "DSP N", "DEC N", "DDB N"];
+function CsTotals({ csData, fmt, physStock }) {
   const totSale      = csData.reduce((a, r) => a + r.totalSaleAmt,   0);
   const totProfit    = csData.reduce((a, r) => a + r.profit,         0);
   const totPhys      = csData.reduce((a, r) =>
@@ -283,6 +288,31 @@ function ScrollArrows({ scrollBy }) {
   const totOpening   = csData.reduce((a, r) => a + (Number(r.opening)     || 0), 0);
   const totInHand    = csData.reduce((a, r) => a + (Number(r.inHandStock)  || 0), 0);
   const totPurchase  = csData.reduce((a, r) => a + (Number(r.totalPurchase)|| 0), 0);
+    const isDcsl = r => (r.supplier || "").replace(/^\d{4}-/, "").toUpperCase().trim() === "DCSL";
+  const nm     = r => (r.name || "").toUpperCase().trim().replace(/\s+/g, " ");
+  const dcslRows = csData.filter(isDcsl);
+  const pintsQty = dcslRows.filter(r => DCSL_PINT_ITEMS.includes(nm(r)))
+    .reduce((a, r) => a + (Number(r.totalBottleSale) || 0), 0);
+  const nipsQty  = dcslRows.filter(r => DCSL_NIP_ITEMS.includes(nm(r)))
+    .reduce((a, r) => a + (Number(r.totalBottleSale) || 0), 0);
+  const pintsEmpty = pintsQty * PINTS_EMPTY_RATE;
+  const nipsEmpty  = nipsQty  * NIPS_EMPTY_RATE;
+  const totalEmptyDeduction = pintsEmpty + nipsEmpty;
+  const finalProfit = totProfit - totalEmptyDeduction;
+  const showDeduction = dcslRows.some(r => DCSL_PINT_ITEMS.includes(nm(r)) || DCSL_NIP_ITEMS.includes(nm(r)));
+
+  // Same 17-cell layout as the Totals row so columns stay aligned on screen and in print.
+  const dedRow = (key, label, amount, rowStyle, amtStyle) => (
+    <tr key={key} style={rowStyle}>
+      <td className="col-num" /><td className="col-code" />
+      <td colSpan={2} />
+      <td className="col-type" />
+      <td colSpan={6} className="rt" style={{ fontSize:11.5, paddingRight:11, ...(amtStyle?.label || {}) }}>{label}</td>
+      <td className="rt mono" style={{ ...(amtStyle?.amount || {}) }}>{amount}</td>
+      <td className="col-margin" />
+      <td colSpan={4} />
+    </tr>
+  );
  return (
     <tfoot>
       <tr style={{ background:"var(--s3)", fontWeight:700 }}>
@@ -301,10 +331,26 @@ function ScrollArrows({ scrollBy }) {
         <td className="col-margin" />
         <td />
         <td />
-        <td />
+               <td />
         <td />
       </tr>
+      {showDeduction && [
+        dedRow("pints", `Pints Empty — ${pintsQty} pints × Rs.${PINTS_EMPTY_RATE}`,
+          `(Rs.${fmt(pintsEmpty)})`, { background:"var(--s2)" }, { amount:{ color:"var(--red)" } }),
+        dedRow("nips", `Nips Empty — ${nipsQty} nips × Rs.${NIPS_EMPTY_RATE}`,
+          `(Rs.${fmt(nipsEmpty)})`, { background:"var(--s2)" }, { amount:{ color:"var(--red)" } }),
+        dedRow("totded", "Total Empty Deduction",
+          `(Rs.${fmt(totalEmptyDeduction)})`,
+          { background:"var(--s3)", fontWeight:700, borderTop:"1px solid var(--bdr)" },
+          { amount:{ color:"var(--red)", fontWeight:700 }, label:{ fontWeight:700 } }),
+        dedRow("final", "Final Profit",
+          `Rs.${fmt(finalProfit)}`,
+          { background:"var(--s3)", fontWeight:700, borderTop:"2px solid var(--bdr2,var(--bdr))" },
+          { amount:{ color: finalProfit >= 0 ? "var(--grn)" : "var(--red)", fontWeight:700, fontSize:13 },
+            label:{ fontWeight:700, fontSize:12.5 } }),
+      ]}
     </tfoot>
+
   );
 }
 // Unit cost / selling price effective on a given date
@@ -1244,7 +1290,8 @@ if (salesInRange.length > 0) {
   const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
   const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
 
-  const totalBottleSale = opening + totalPurchase - inHandStock;
+ 
+  const totalBottleSale = opening + totalPurchase + transferIn - transferOut - inHandStock;
   const physicalStock   = inHandStock * uc;
 
   // ── Day-wise Total Sale & Profit ──
