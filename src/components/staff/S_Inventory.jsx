@@ -1395,7 +1395,7 @@ if (salesInRange.length > 0) {
       { key: "transferIn",     width: 11 },
       { key: "transferOut",    width: 11 },
       { key: "totalReturn",    width: 10 },
-          { key: "adjStock",       width: 12 },
+      { key: "adjStock",       width: 12 },
       { key: "supplier",       width: 20 },
     ];
 
@@ -1453,9 +1453,50 @@ if (salesInRange.length > 0) {
       cell.font = { bold: true };
       cell.border = { top: { style: "double" } };
     });
-    totalsRow.getCell(2).alignment = { horizontal: "left" };
+      totalsRow.getCell(2).alignment = { horizontal: "left" };
     for (let c = 4; c <= 15; c++) {
       if (c !== 11 && c !== 15) totalsRow.getCell(c).alignment = { horizontal: "right" };
+    }
+    // number formats for the totals row
+    [8, 9, 10].forEach(c => { totalsRow.getCell(c).numFmt = "#,##0.00"; });
+    [4, 5, 6, 7, 12, 13, 14].forEach(c => { totalsRow.getCell(c).numFmt = "#,##0"; });
+
+    // ── DCSL empty-bottle deduction + Final Profit (same logic as the on-screen footer) ──
+    const isDcsl = r => (r.supplier || "").replace(/^\d{4}-/, "").toUpperCase().trim() === "DCSL";
+    const nmOf   = r => (r.name || "").toUpperCase().trim().replace(/\s+/g, " ");
+    const dcslRows = data.filter(isDcsl);
+    const pintsQty = dcslRows.filter(r => DCSL_PINT_ITEMS.includes(nmOf(r)))
+      .reduce((a, r) => a + (Number(r.totalBottleSale) || 0), 0);
+    const nipsQty  = dcslRows.filter(r => DCSL_NIP_ITEMS.includes(nmOf(r)))
+      .reduce((a, r) => a + (Number(r.totalBottleSale) || 0), 0);
+    const pintsEmpty = pintsQty * PINTS_EMPTY_RATE;
+    const nipsEmpty  = nipsQty  * NIPS_EMPTY_RATE;
+    const totalDed   = pintsEmpty + nipsEmpty;
+    const totProfit  = sum(r => r.profit);
+    const finalProfit = totProfit - totalDed;
+    const showDed = dcslRows.some(r =>
+      DCSL_PINT_ITEMS.includes(nmOf(r)) || DCSL_NIP_ITEMS.includes(nmOf(r)));
+
+    if (showDed) {
+      // label merged across B:I, amount in column J (under "Profit")
+      const addDedRow = (label, amount, bold, color) => {
+        const row = ws.addRow([]);
+        const n = row.number;
+        ws.mergeCells(`B${n}:I${n}`);
+        const lc = ws.getCell(`B${n}`);
+        lc.value = label;
+        lc.alignment = { horizontal: "right" };
+        lc.font = { bold };
+        const ac = ws.getCell(`J${n}`);
+        ac.value = amount;
+        ac.numFmt = "#,##0.00;(#,##0.00)";
+        ac.alignment = { horizontal: "right" };
+        ac.font = { bold, color: { argb: color } };
+      };
+      addDedRow(`Pints Empty — ${pintsQty} pints × Rs.${PINTS_EMPTY_RATE}`, -pintsEmpty, false, "FFC00000");
+      addDedRow(`Nips Empty — ${nipsQty} nips × Rs.${NIPS_EMPTY_RATE}`,     -nipsEmpty,  false, "FFC00000");
+      addDedRow("Total Empty Deduction", -totalDed, true, "FFC00000");
+      addDedRow("Final Profit", finalProfit, true, finalProfit >= 0 ? "FF007A33" : "FFC00000");
     }
 
     ws.views = [{ state: "frozen", ySplit: 3 }];

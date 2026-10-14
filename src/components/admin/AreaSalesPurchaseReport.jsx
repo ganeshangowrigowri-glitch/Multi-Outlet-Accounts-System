@@ -4,6 +4,7 @@ import { saveAs } from "file-saver";
 import { I } from "../../utils/icons";
 import { getInventoryMaster, getSales, getPurchases, getOutletInventory } from "../../db";
 import { AREAS, UNASSIGNED_AREA, getOutletArea } from "../../data/areas";
+import { today } from "../../utils/helpers";
 
 // ─────────────────────────────────────────────────────────────────────────
 //  AREA SALES & PURCHASE REPORT  (Admin-only, read-only)
@@ -167,7 +168,8 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
 
   const [reportType, setReportType] = useState("sales"); // "sales" | "purchase"
   const [areaSel, setAreaSel] = useState("ALL");
-  const [period, setPeriod] = useState(() => new Date().toISOString().slice(0, 7));
+  const [fromDate, setFromDate] = useState(() => today().slice(0, 7) + "-01");
+  const [toDate,   setToDate]   = useState(today);
   const [supplierId, setSupplierId] = useState(""); // "ALL" = All Suppliers
   const [brandSel, setBrandSel] = useState("ALL");
   const [hideZero, setHideZero] = useState(false);
@@ -280,8 +282,8 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
   // ── Build the Outlet × Brand matrix (read-only aggregation, in memory) ──
   const matrix = useMemo(() => {
     if (!supplierId || supplierItems.length === 0) return null;
-    const { from, to } = monthRange(period);
-    if (!from || !to) return null;
+       const from = fromDate, to = toDate;
+    if (!from || !to || from > to) return null;
 
     const rows = outletsInScope.map((outlet) => {
       const cached = cacheRef.current[outlet] || {};
@@ -321,7 +323,7 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
     // dataVersion is a dependency purely to re-run once newly-fetched
     // outlet data lands in cacheRef (the ref itself isn't reactive).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [outletsInScope, supplierItems, reportType, period, dataVersion]);
+    }, [outletsInScope, supplierItems, reportType, fromDate, toDate, dataVersion]);
 
   const displayRows = useMemo(() => {
     if (!matrix) return [];
@@ -335,7 +337,7 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
       ? "All Suppliers"
       : supplierOptions.find((s) => s.id === supplierId)?.name || "—";
   const brandLabel = brandSel === "ALL" ? "" : brandSel;
-  const periodLabel = monthLabel(period);
+    const periodLabel = fromDate && toDate ? `${fromDate} to ${toDate}` : "";
     const reportTitle =
         reportType === "physical"
       ? "AREA IN HAND STOCK REPORT"
@@ -377,7 +379,7 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
       `${reportTitle.replace(/ /g, "_")}_${areaLabel.replace(/[^A-Za-z0-9]+/g, "_")}_${supplierLabel.replace(
         /[^A-Za-z0-9]+/g,
         "_"
-      )}_${period}.xlsx`
+    )}_${fromDate}_to_${toDate}.xlsx`
     );
   }
 
@@ -503,14 +505,26 @@ const stickyTotalRow = {
           </select>
         </div>
 
-        <div className="ff" style={{ marginBottom: 0 }}>
+                <div className="ff" style={{ marginBottom: 0 }}>
           <label style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut)", display: "block", marginBottom: 3 }}>
-            Period
+            From Date
           </label>
           <input
-            type="month"
-            value={period}
-            onChange={(e) => setPeriod(e.target.value)}
+            type="date"
+            value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)", outline: "none" }}
+          />
+        </div>
+
+        <div className="ff" style={{ marginBottom: 0 }}>
+          <label style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".07em", textTransform: "uppercase", color: "var(--mut)", display: "block", marginBottom: 3 }}>
+            To Date
+          </label>
+          <input
+            type="date"
+            value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
             style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)", outline: "none" }}
           />
         </div>

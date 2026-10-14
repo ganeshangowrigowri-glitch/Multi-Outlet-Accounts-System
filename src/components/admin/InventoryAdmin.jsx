@@ -1,4 +1,6 @@
 import React, { useState, useMemo, useEffect,  useRef} from "react";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
 import { ls, lss } from "../../utils/helpers";
 import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride } from "../../db";
 import { I } from "../../utils/icons";
@@ -86,6 +88,20 @@ function codeNum(code) {
   const m = (code||"").match(/\d+/);
   return m ? parseInt(m[0]) : 9999;
 }
+
+// Same helpers Staff Current Status uses (S_Inventory.jsx)
+const txnDate = rec => (rec.date || "").slice(0, 10);
+function lineMatchesItem(l, item) {
+  if (l.itemCode !== item.code) return false;
+  if (l.supplier && item.supplier && l.supplier !== item.supplier) return false;
+  return true;
+}
+
+// DCSL empty-bottle deduction (same rates/items as Staff Current Status)
+const PINTS_EMPTY_RATE = 40;
+const NIPS_EMPTY_RATE  = 20;
+const DCSL_PINT_ITEMS  = ["DES P", "DCA P"];
+const DCSL_NIP_ITEMS   = ["DCA N", "DES N", "DSP N", "DEC N", "DDB N"];
 
 function sortInv(arr) {
   return [...arr].sort((a, b) => {
@@ -340,7 +356,7 @@ async function openEdit(item) {
             </thead>
             <tbody>
               {filtInv.length===0 && (
-               <tr><td colSpan={16}><div className="empty">No activity for this period.</div></td></tr>
+               <tr><td colSpan={17}><div className="empty">No activity for this period.</div></td></tr>
               )}
               {filtInv.map((item, idx) => {
                 const ovKey       = `${item.code}__${item.supplier}`;
@@ -1390,6 +1406,7 @@ useEffect(() => {
   const [repairDate,   setRepairDate]   = useState(today());
   const [repairing,    setRepairing]    = useState(false);
   const [csOutlet, setCsOutlet]= useState("ALL");
+  const [csSupFilter, setCsSupFilter] = useState("ALL");   // full supplier id, e.g. "2004-IDL"
   const [physStock,setPhysStock]= useState({});
   const [statusDb, setStatusDb]   = useState({ sales: {}, purchases: {}, transfers: {}, returns: {} });
   const [csOutletOverrides, setCsOutletOverrides] = useState({});
@@ -1461,17 +1478,21 @@ useEffect(() => {
       setCsOutletOverrides({});
     }
   }, [invTab, csOutlet, outletNames]);
- const csData = useMemo(() => {
+   const csDataAll = useMemo(() => {
   const outlets = csOutlet === "ALL" ? outletNames : [csOutlet];
+  const single  = csOutlet !== "ALL";
 
-  return inv.map(item => {
-        const { unitCost: uc, sellingPrice: sp } = (() => {
-      if (csOutlet !== "ALL") {
-        const ov = csOutletOverrides[`${item.code}__${item.supplier}`];
-        return resolveOutletPrice(ov, csTo, Number(item.unitCost) || 0, Number(item.sellingPrice) || 0);
-      }
-      return { unitCost: Number(item.unitCost) || 0, sellingPrice: Number(item.sellingPrice) || 0 };
-    })();
+  return inv
+    // Staff list: no "EM" items, and no items hidden at this outlet
+    .filter(item => item.type !== "EM" &&
+      !(single && csOutletOverrides[`${item.code}__${item.supplier}`]?.hidden))
+    .map(item => {
+    const ovItem = single ? csOutletOverrides[`${item.code}__${item.supplier}`] : undefined;
+    // Master dated price on csTo first, then outlet override (same as Staff)
+    const base = resolveOutletPrice(item, csTo, Number(item.unitCost) || 0, Number(item.sellingPrice) || 0);
+    const { unitCost: ucR, sellingPrice: spR } = resolveOutletPrice(ovItem, csTo, base.unitCost, base.sellingPrice);
+    const uc = Number(ucR) || 0;
+    const sp = Number(spR) || 0;
     const mg = sp - uc;
 
     let totalPurchase = 0;
@@ -1482,6 +1503,7 @@ useEffect(() => {
     let firstOpening  = null;
     let lastEndStock  = null;
     let hasSavedRecord = false;
+    const soldByDate  = {};   // one sold qty per date (Staff logic)
 
     outlets.forEach(outlet => {
       const salesInRange = (statusDb.sales[outlet] || [])
@@ -1505,6 +1527,21 @@ useEffect(() => {
             if (firstOpening === null || op > firstOpening) firstOpening = op;
           }
         }
+      }
+
+      // ── sold per date (single outlet only, for day-wise pricing) ──
+      if (single) {
+        salesInRange.forEach(s => {
+          const row = (s.items || []).find(r =>
+            !r.isEmptyItem && (
+              (r.id && r.id === item.id) ||
+              (r.code === item.code && r.supplier === item.supplier)
+            )
+          );
+          if (!row) return;
+          const q = parseFloat(row.sold) || 0;
+          if (soldByDate[s.date] === undefined || q > soldByDate[s.date]) soldByDate[s.date] = q;
+        });
       }
 
       // ── lastEndStock: collect all csTo rows, prefer sold > 0 ──
@@ -1570,9 +1607,10 @@ useEffect(() => {
         if (lastRow?.stkSE !== undefined) adjStock = Number(lastRow.stkSE) || 0;
       }
 
-      // ── purchases ──
+      // ── purchases (supplier-matched, like Staff) ──
       (statusDb.purchases[outlet] || [])
         .filter(p => p.date && p.date >= csFrom && p.date <= csTo)
+        .filter(p => (p.supplier || p.supplier_id) === item.supplier)
         .forEach(p => (p.items || p.lines || []).forEach(l => {
           if (l.itemCode === item.code && !l.isEmptyItem)
             totalPurchase += parseFloat(l.qty) || 0;
@@ -1580,7 +1618,7 @@ useEffect(() => {
 
       // ── transfers in ──
       (statusDb.transfers[outlet] || [])
-        .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
+        .filter(t => txnDate(t) >= csFrom && txnDate(t) <= csTo)
         .filter(t => {
           const notes = t.notes || "";
           if (notes.includes("type:in")) return true;
@@ -1588,12 +1626,12 @@ useEffect(() => {
           return (t.to_outlet_id ?? t.to) === outlet;
         })
         .forEach(t => (t.items || t.lines || []).forEach(l => {
-          if (l.itemCode === item.code) transferIn += parseFloat(l.qty) || 0;
+          if (lineMatchesItem(l, item)) transferIn += parseFloat(l.qty) || 0;
         }));
 
       // ── transfers out ──
       (statusDb.transfers[outlet] || [])
-        .filter(t => t.date && t.date >= csFrom && t.date <= csTo)
+        .filter(t => txnDate(t) >= csFrom && txnDate(t) <= csTo)
         .filter(t => {
           const notes = t.notes || "";
           if (notes.includes("type:out")) return true;
@@ -1601,25 +1639,45 @@ useEffect(() => {
           return (t.from_outlet_id ?? t.from) === outlet;
         })
         .forEach(t => (t.items || t.lines || []).forEach(l => {
-          if (l.itemCode === item.code) transferOut += parseFloat(l.qty) || 0;
+          if (lineMatchesItem(l, item)) transferOut += parseFloat(l.qty) || 0;
         }));
 
       // ── returns ──
       (statusDb.returns[outlet] || [])
         .filter(r => r.date && r.date >= csFrom && r.date <= csTo)
         .forEach(r => (r.items || r.lines || []).forEach(l => {
-          if (l.itemCode === item.code) totalReturn += parseFloat(l.qty) || 0;
+          if (lineMatchesItem(l, item)) totalReturn += parseFloat(l.qty) || 0;
         }));
     });
 
-const opening     = firstOpening !== null ? firstOpening : (Number(item.qty) || 0);
-const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
+    // Staff: outlet opening qty is 0 when there is no saved sale
+    const opening     = firstOpening !== null ? firstOpening : (single ? 0 : (Number(item.qty) || 0));
+    const inHandStock = lastEndStock  !== null ? lastEndStock  : opening;
 
-const totalBottleSale = opening + totalPurchase + transferIn - transferOut - inHandStock;
-const physicalStock   = inHandStock * uc;
-    const totalSaleAmt    = totalBottleSale * sp;
-    const profit          = mg * totalBottleSale;
-    const physKey         = `${item.code}_${csFrom}_${csTo}_${csOutlet}`;
+    const totalBottleSale = opening + totalPurchase + transferIn - transferOut - inHandStock;
+    const physicalStock   = inHandStock * uc;
+
+    let totalSaleAmt = totalBottleSale * sp;
+    let profit       = mg * totalBottleSale;
+
+    if (single) {   // Staff day-wise pricing, copied as-is
+      totalSaleAmt = 0; profit = 0;
+      let soldTracked = 0;
+      Object.entries(soldByDate).forEach(([date, q]) => {
+        const b  = resolveOutletPrice(item, date, item.unitCost, item.sellingPrice);
+        const dp = resolveOutletPrice(ovItem, date, b.unitCost, b.sellingPrice);
+        const daySP = Number(dp.sellingPrice) || 0;
+        const dayUC = Number(dp.unitCost)     || 0;
+        totalSaleAmt += q * daySP;
+        profit       += q * (daySP - dayUC);
+        soldTracked  += q;
+      });
+      const untracked = totalBottleSale - soldTracked;
+      totalSaleAmt += untracked * sp;
+      profit       += untracked * mg;
+    }
+
+    const physKey = `${item.code}_${csFrom}_${csTo}_${csOutlet}`;
 
     return {
       ...item,
@@ -1649,7 +1707,142 @@ const physicalStock   = inHandStock * uc;
     )
   );
 }, [inv, csFrom, csTo, csOutlet, physStock, statusDb, outletNames, csOutletOverrides]);
+     const csData = useMemo(
+    () => csSupFilter === "ALL" ? csDataAll : csDataAll.filter(r => r.supplier === csSupFilter),
+    [csDataAll, csSupFilter]
+  );
+    async function downloadCsExcel() {
+    const data = csData;   // exactly what is on screen (outlet + dates + supplier filter)
+    const outletLabel = csOutlet === "ALL" ? "All Outlets" : csOutlet;
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("Current Status");
 
+    ws.columns = [
+      { key: "code",            width: 14 },
+      { key: "name",            width: 32 },
+      { key: "type",            width: 12 },
+      { key: "opening",         width: 12 },
+      { key: "totalPurchase",   width: 14 },
+      { key: "inHandStock",     width: 13 },
+      { key: "totalBottleSale", width: 16 },
+      { key: "physicalStock",   width: 16 },
+      { key: "totalSaleAmt",    width: 16 },
+      { key: "profit",          width: 14 },
+      { key: "margin",          width: 12 },
+      { key: "transferIn",      width: 11 },
+      { key: "transferOut",     width: 11 },
+      { key: "totalReturn",     width: 10 },
+      { key: "adjStock",        width: 12 },
+      { key: "supplier",        width: 20 },
+    ];
+
+    ws.mergeCells("A1:P1");
+    ws.getCell("A1").value = `Current Status Report  |  ${outletLabel}  |  ${csFrom} to ${csTo}`;
+    ws.getCell("A1").font = { bold: true, size: 13 };
+    ws.addRow([]);
+
+    const headerRow = ws.addRow([
+      "Item Code","Description","Item Type","Opening Stk","Total Purchase",
+      "In Hand Stk","Total Bottle Sale","Phy Stock (Rs.)","Total Sale (Rs.)",
+      "Profit (Rs.)","Margin (Rs.)","Trans.In","Trans.Out","Return","Adj to Stock","Supplier",
+    ]);
+    headerRow.eachCell(cell => {
+      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
+      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2B2B4A" } };
+      cell.alignment = { horizontal: "center", vertical: "middle", wrapText: true };
+      cell.border = { top:{style:"thin"}, left:{style:"thin"}, bottom:{style:"thin"}, right:{style:"thin"} };
+    });
+
+    data.forEach(row => {
+      const phys = row.physicalStockOverride !== "" ? Number(row.physicalStockOverride) : row.physicalStock;
+      const r = ws.addRow([
+        row.code, row.name, row.type,
+        Number(row.opening) || 0, Number(row.totalPurchase) || 0, Number(row.inHandStock) || 0,
+        Number(row.totalBottleSale) || 0, phys, row.totalSaleAmt, row.profit, row.margin,
+        Number(row.transferIn) || 0, Number(row.transferOut) || 0, Number(row.totalReturn) || 0,
+        Number(row.adjStock) || 0,
+        (row.supplier || "").replace(/^\d{4}-/, ""),
+      ]);
+      r.eachCell((cell, col) => {
+        cell.border = {
+          top:{style:"thin",color:{argb:"FFCCCCCC"}}, left:{style:"thin",color:{argb:"FFCCCCCC"}},
+          bottom:{style:"thin",color:{argb:"FFCCCCCC"}}, right:{style:"thin",color:{argb:"FFCCCCCC"}},
+        };
+        if (col === 2 || col === 16) cell.alignment = { horizontal: "left", wrapText: true };
+        else if (col === 1 || col === 3) cell.alignment = { horizontal: "center" };
+        else {
+          cell.alignment = { horizontal: "right" };
+          cell.numFmt = (col === 8 || col === 9 || col === 10 || col === 11) ? "#,##0.00" : "#,##0";
+        }
+      });
+    });
+
+    const sum = f => data.reduce((a, r) => a + (f(r) || 0), 0);
+    const totalsRow = ws.addRow([
+      "", "TOTALS", "",
+      sum(r => r.opening), sum(r => r.totalPurchase), sum(r => r.inHandStock),
+      sum(r => r.totalBottleSale),
+      sum(r => Number(r.physicalStockOverride !== "" ? r.physicalStockOverride : r.physicalStock)),
+      sum(r => r.totalSaleAmt), sum(r => r.profit), "",
+      sum(r => r.transferIn), sum(r => r.transferOut), sum(r => r.totalReturn), "", "",
+    ]);
+    totalsRow.eachCell(cell => {
+      cell.font = { bold: true };
+      cell.border = { top: { style: "double" } };
+    });
+      totalsRow.getCell(2).alignment = { horizontal: "left" };
+    for (let c = 4; c <= 15; c++) {
+      if (c !== 11 && c !== 15) totalsRow.getCell(c).alignment = { horizontal: "right" };
+    }
+    // number formats for the totals row (it was showing unformatted, e.g. 35451680)
+    [8, 9, 10].forEach(c => { totalsRow.getCell(c).numFmt = "#,##0.00"; });
+    [4, 5, 6, 7, 12, 13, 14].forEach(c => { totalsRow.getCell(c).numFmt = "#,##0"; });
+
+    // ── DCSL empty-bottle deduction + Final Profit (same logic as the on-screen footer) ──
+    const isDcsl = r => (r.supplier || "").replace(/^\d{4}-/, "").toUpperCase().trim() === "DCSL";
+    const nmOf   = r => (r.name || "").toUpperCase().trim().replace(/\s+/g, " ");
+    const dcslRows = data.filter(isDcsl);
+    const pintsQty = dcslRows.filter(r => DCSL_PINT_ITEMS.includes(nmOf(r)))
+      .reduce((a, r) => a + (Number(r.totalBottleSale) || 0), 0);
+    const nipsQty  = dcslRows.filter(r => DCSL_NIP_ITEMS.includes(nmOf(r)))
+      .reduce((a, r) => a + (Number(r.totalBottleSale) || 0), 0);
+    const pintsEmpty = pintsQty * PINTS_EMPTY_RATE;
+    const nipsEmpty  = nipsQty  * NIPS_EMPTY_RATE;
+    const totalDed   = pintsEmpty + nipsEmpty;
+    const totProfit  = sum(r => r.profit);
+    const finalProfit = totProfit - totalDed;
+    const showDed = dcslRows.some(r =>
+      DCSL_PINT_ITEMS.includes(nmOf(r)) || DCSL_NIP_ITEMS.includes(nmOf(r)));
+
+    if (showDed) {
+      // label merged across B:I, amount in column J (under "Profit")
+      const addDedRow = (label, amount, bold, color) => {
+        const row = ws.addRow([]);
+        const n = row.number;
+        ws.mergeCells(`B${n}:I${n}`);
+        const lc = ws.getCell(`B${n}`);
+        lc.value = label;
+        lc.alignment = { horizontal: "right" };
+        lc.font = { bold };
+        const ac = ws.getCell(`J${n}`);
+        ac.value = amount;
+        ac.numFmt = "#,##0.00;(#,##0.00)";
+        ac.alignment = { horizontal: "right" };
+        ac.font = { bold, color: { argb: color } };
+      };
+      addDedRow(`Pints Empty — ${pintsQty} pints × Rs.${PINTS_EMPTY_RATE}`, -pintsEmpty, false, "FFC00000");
+      addDedRow(`Nips Empty — ${nipsQty} nips × Rs.${NIPS_EMPTY_RATE}`,     -nipsEmpty,  false, "FFC00000");
+      addDedRow("Total Empty Deduction", -totalDed, true, "FFC00000");
+      addDedRow("Final Profit", finalProfit, true, finalProfit >= 0 ? "FF007A33" : "FFC00000");
+    }
+
+    ws.views = [{ state: "frozen", ySplit: 3 }];
+
+    const buf = await wb.xlsx.writeBuffer();
+    const supPart = csSupFilter === "ALL" ? "" : `_${csSupFilter.replace(/^\d{4}-/, "").replace(/[^\w]+/g, "_")}`;
+    const outPart = csOutlet === "ALL" ? "All_Outlets" : csOutlet.replace(/[^\w]+/g, "_");
+    saveAs(new Blob([buf]), `Current_Status_${outPart}${supPart}_${csFrom}_to_${csTo}.xlsx`);
+  }
   function saveItem() {
     if (!iForm.code||!iForm.name){toast_("Fill code and name","err");return;}
     const finalType = typeInput.trim() || iForm.type || "Q";
@@ -2016,7 +2209,8 @@ async function saveSupplier() {
           padding: 1px 3px;
           font-size: 7px;
         }
-        .cs-wrap::-webkit-scrollbar { display: none; }
+        .cs-wrap { overflow: visible !important; max-height: none !important; }
+        .cs-tbl thead { position: static !important; }
     `}</style>
 
     <div className="ctrls no-print" style={{marginBottom:14,flexWrap:"wrap",gap:8}}>
@@ -2041,11 +2235,29 @@ async function saveSupplier() {
           style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
             borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none",minWidth:180}}>
           <option value="ALL">All Outlets</option>
-          {outletNames.map(o=><option key={o}>{o}</option>)}
+                  {outletNames.map(o=><option key={o}>{o}</option>)}
         </select>
       </div>
+      <div className="ff" style={{marginBottom:0}}>
+        <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",
+          color:"var(--mut)",display:"block",marginBottom:3}}>Supplier</label>
+        <select value={csSupFilter} onChange={e=>setCsSupFilter(e.target.value)}
+          style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",
+            borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none",minWidth:150}}>
+          <option value="ALL">All Suppliers</option>
+          {sups.filter(s => s !== "ALL").map(id => (
+            <option key={id} value={id}>{id.replace(/^\d{4}-/, "")}</option>
+          ))}
+        </select>
+      </div>
+            <button className="btn btng btnsm no-print" style={{alignSelf:"flex-end"}}
+        onClick={downloadCsExcel}
+        title={`Download Current Status for ${csFrom} to ${csTo}`}>
+        Download Excel
+      </button>
       <div style={{marginLeft:"auto",fontSize:11,color:"var(--mut)",alignSelf:"flex-end",paddingBottom:2}}>
         {csData.length} items with activity
+
       </div>
     </div>
 
@@ -2085,17 +2297,18 @@ async function saveSupplier() {
           {csFrom} → {csTo}
         </div>
 
-        <div
+              <div
   ref={csWrapRef}
   className="cs-wrap"
-  style={{overflowX:"auto",scrollbarWidth:"none",msOverflowStyle:"none"}}
+  style={{overflowX:"auto",overflowY:"auto",maxHeight:"calc(100vh - 300px)"}}
 >
   <table className="cs-tbl">
-    <thead>
+    <thead style={{position:"sticky",top:0,zIndex:5,background:"var(--s2,#1e1e3a)"}}>
       <tr>
         <th>#</th>
         <th>Item Code</th>
         <th style={{width:160}}>Description</th>
+        <th style={{width:100}}>Supplier</th>
         <th style={{width:90}}>Item Type</th>
         <th className="rt">Opening Stock</th>
         <th className="rt">Total Purchase</th>
@@ -2113,13 +2326,14 @@ async function saveSupplier() {
     </thead>
             <tbody>
               {csData.length===0 && (
-                <tr><td colSpan={16}><div className="empty">No activity for this period.</div></td></tr>
+                <tr><td colSpan={17}><div className="empty">No activity for this period.</div></td></tr>
               )}
               {csData.map((row,idx)=>(
                 <tr key={row.id}>
                   <td style={{color:"var(--mut2)",fontSize:11,fontFamily:"monospace",textAlign:"center"}}>{idx+1}</td>
                   <td><span className="ctag">{row.code}</span></td>
                   <td style={{fontWeight:600,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",maxWidth:160}}>{row.name}</td>
+                  <td style={{fontSize:10,whiteSpace:"nowrap"}}>{(row.supplier || "").replace(/^\d{4}-/, "")}</td>
                   <td style={{textAlign:"center"}}><span className="tpill">{row.type}</span></td>
                   <td className="rt mono">{row.opening ?? "—"}</td>
                   <td className="rt mono">{row.totalPurchase||"—"}</td>
@@ -2142,26 +2356,62 @@ async function saveSupplier() {
                 </tr>
               ))}
             </tbody>
-            {csData.length>0&&(
+                        {csData.length>0&&(() => {
+              const totProfit = csData.reduce((a,r)=>a+r.profit,0);
+              const isDcsl = r => (r.supplier||"").replace(/^\d{4}-/,"").toUpperCase().trim()==="DCSL";
+              const nm     = r => (r.name||"").toUpperCase().trim().replace(/\s+/g," ");
+              const dcsl   = csData.filter(isDcsl);
+              const pintsQty = dcsl.filter(r=>DCSL_PINT_ITEMS.includes(nm(r)))
+                .reduce((a,r)=>a+(Number(r.totalBottleSale)||0),0);
+              const nipsQty  = dcsl.filter(r=>DCSL_NIP_ITEMS.includes(nm(r)))
+                .reduce((a,r)=>a+(Number(r.totalBottleSale)||0),0);
+              const pintsEmpty = pintsQty*PINTS_EMPTY_RATE;
+              const nipsEmpty  = nipsQty*NIPS_EMPTY_RATE;
+              const totalDed   = pintsEmpty+nipsEmpty;
+              const finalProfit = totProfit-totalDed;
+              const showDed = dcsl.some(r=>DCSL_PINT_ITEMS.includes(nm(r))||DCSL_NIP_ITEMS.includes(nm(r)));
+              // label spans cols 1-10, amount sits under "Profit" (col 11), 5 cols remain
+              const dedRow = (key,label,amount,rowStyle,amtColor,bold) => (
+                <tr key={key} style={rowStyle}>
+                  <td colSpan={11} className="rt" style={{paddingRight:11,fontSize:11.5,fontWeight:bold?700:400}}>{label}</td>
+                  <td className="rt mono" style={{color:amtColor,fontWeight:bold?700:400}}>{amount}</td>
+                  <td colSpan={5}/>
+                </tr>
+              );
+              return (
               <tfoot>
-            <tr style={{background:"var(--s3)",fontWeight:700}}>
-            <td colSpan={3} className="rt" style={{paddingRight:11,fontSize:11.5}}>Totals:</td>
-            <td/>
-            <td className="rt mono bold">{csData.reduce((a,r)=>a+(Number(r.opening)||0),0)}</td>
-            <td className="rt mono bold">{csData.reduce((a,r)=>a+(Number(r.totalPurchase)||0),0)||"—"}</td>
-            <td className="rt mono bold" style={{color:"var(--grn)"}}>
-            {csData.reduce((a,r)=>a+(Number(r.inHandStock)||0),0)}
-            </td>
-            <td className="rt mono bold">{csData.reduce((a,r)=>a+r.totalBottleSale,0)}</td>
-            <td className="rt mono bold">
-            Rs.{fmt(csData.reduce((a,r)=>a+Number(r.physicalStockOverride!==""?r.physicalStockOverride:r.physicalStock),0))}
-            </td>
-            <td className="rt mono cg bold">Rs.{fmt(csData.reduce((a,r)=>a+r.totalSaleAmt,0))}</td>
-            <td className="rt mono cg bold">Rs.{fmt(csData.reduce((a,r)=>a+r.profit,0))}</td>
-            <td colSpan={5}/>
-            </tr>
-           </tfoot>
-            )}
+                <tr style={{background:"var(--s3)",fontWeight:700}}>
+                   <td colSpan={3} className="rt" style={{paddingRight:11,fontSize:11.5}}>Totals:</td>
+                  <td/>
+                  <td/>
+                  <td className="rt mono bold">{csData.reduce((a,r)=>a+(Number(r.opening)||0),0)}</td>
+                  <td className="rt mono bold">{csData.reduce((a,r)=>a+(Number(r.totalPurchase)||0),0)||"—"}</td>
+                  <td className="rt mono bold" style={{color:"var(--grn)"}}>
+                    {csData.reduce((a,r)=>a+(Number(r.inHandStock)||0),0)}
+                  </td>
+                  <td className="rt mono bold">{csData.reduce((a,r)=>a+r.totalBottleSale,0)}</td>
+                  <td className="rt mono bold">
+                    Rs.{fmt(csData.reduce((a,r)=>a+Number(r.physicalStockOverride!==""?r.physicalStockOverride:r.physicalStock),0))}
+                  </td>
+                  <td className="rt mono cg bold">Rs.{fmt(csData.reduce((a,r)=>a+r.totalSaleAmt,0))}</td>
+                  <td className="rt mono cg bold">Rs.{fmt(totProfit)}</td>
+                  <td colSpan={5}/>
+                </tr>
+                {showDed && [
+                  dedRow("pints",`Pints Empty — ${pintsQty} pints × Rs.${PINTS_EMPTY_RATE}`,
+                    `(Rs.${fmt(pintsEmpty)})`,{background:"var(--s2)"},"var(--red)",false),
+                  dedRow("nips",`Nips Empty — ${nipsQty} nips × Rs.${NIPS_EMPTY_RATE}`,
+                    `(Rs.${fmt(nipsEmpty)})`,{background:"var(--s2)"},"var(--red)",false),
+                  dedRow("totded","Total Empty Deduction",`(Rs.${fmt(totalDed)})`,
+                    {background:"var(--s3)",borderTop:"1px solid var(--bdr)"},"var(--red)",true),
+                  dedRow("final","Final Profit",`Rs.${fmt(finalProfit)}`,
+                    {background:"var(--s3)",borderTop:"2px solid var(--bdr)"},
+                    finalProfit>=0?"var(--grn)":"var(--red)",true),
+                ]}
+              </tfoot>
+              );
+            })()}
+            
           </table>
         </div>
       </div>
