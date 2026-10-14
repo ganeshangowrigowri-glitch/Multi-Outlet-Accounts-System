@@ -1696,7 +1696,7 @@ export function brandOf(rawSupplier) {
 // ─────────────────────────────────────────────────────────────────────────
 function SalesSummary({ d, outlet, month }) {
   const { sales, totalSalesAmt, bankLedger, purchases, cardLedgerAll } = d;
-
+  
   // ── 1. Per-brand, per-day aggregates ─────────────────────────────────
   // brandDay[brandKey][dayNum] = { amt, qty }
   const brandDay = {};
@@ -1707,8 +1707,9 @@ function SalesSummary({ d, outlet, month }) {
 
     const salesFiltered = [...sales]
     .filter(s => (s.items || []).some(r => !r.isEmptyItem));
+  
 
-  salesFiltered.forEach(s => {
+     salesFiltered.forEach(s => {
     // Exact-date guard: only ever bucket a record into the day it actually
     // belongs to (selectedDate === rowDate). Prevents any stray/out-of-range
     // record from silently adding onto another day's totals.
@@ -1735,6 +1736,14 @@ function SalesSummary({ d, outlet, month }) {
       brandDay[bk][day].amt += amt;
       brandDay[bk][day].qty += qty;
     });
+
+    // ← NEW: Daily Sale column = the saved "Total Sale" of the day (same as the
+    // Daily Sale screen). Only dailySale changes; brand columns and Sold stay as is.
+    if (s.total !== undefined && s.total !== null && s.total !== "") {
+      const itemsTotal = (s.items || []).filter(r => !r.isEmptyItem)
+        .reduce((a, r) => a + (parseFloat(r.sold) || 0) * (parseFloat(r.rate) || 0), 0);
+      dailySale[day] = (dailySale[day] || 0) + ((Number(s.total) || 0) - itemsTotal);
+    }
   });
 
   // ── 2. Daily Deposit — from bankLedger debit entries ─────────────────

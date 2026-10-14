@@ -1055,9 +1055,11 @@ export const POSITION_CATEGORIES = {
   ],
 };
 
-export const getPositionLedger = async (outlet) => {
-  const { data, error } = await supabase
-    .from("position_ledger").select("*").eq("outlet_id", outlet).order("date");
+export const getPositionLedger = async (outlet, groups) => {
+  let q = supabase.from("position_ledger").select("*")
+    .eq("outlet_id", outlet).order("date");
+  if (groups?.length) q = q.in("category_group", groups);
+  const { data, error } = await q;
   if (error) { console.error("getPositionLedger:", error); return []; }
   return data;
 };

@@ -17,20 +17,21 @@ export default function S_Position({ outlet, toast_ }) {
   const [coa, setCoa] = useState([]);
 
   function reload() {
-    setLoading(true);
-    getPositionLedger(outlet).then(data => { setEntries(data || []); setLoading(false); });
-  }
+  setLoading(true);
+  getPositionLedger(outlet, Object.keys(GROUP_LABELS)).then(data => {
+    setEntries(data || []);
+    setLoading(false);
+  });
+}
+  
   useEffect(() => { reload(); }, [outlet]);
   useEffect(() => { getCOA().then(list => setCoa(list || [])); }, []);
 
   // Live Chart of Accounts categories for Asset / Liability groups — any
   // account the admin adds in Chart of Accounts shows up here automatically.
-  // Ranges match Reports.jsx's Balance Sheet convention: Assets 1000–1999,
+    // Ranges match Reports.jsx's Balance Sheet convention: Assets 1000–1999,
   // Liabilities 2000–2999 (current + non-current).
-    // Restricted to 1000–1499 (Current Assets) only — 1500–1999 is Fixed
-  // Assets, a separate Balance Sheet category already listed on its own
-  // (coaNonCurrentAssets), so it must not appear in Position Entry.
-    // Restricted to 1000–1499 (Current Assets) only — 1500–1999 is Fixed
+  // Restricted to 1000–1499 (Current Assets) only — 1500–1999 is Fixed
   // Assets, a separate Balance Sheet category already listed on its own
   // (coaNonCurrentAssets), so it must not appear in Position Entry.
   // 1100 (Account Receivable) and 1400 (Empty) are also excluded — both
@@ -91,8 +92,9 @@ async function save() {
   }
 
   const period = entries
-    .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
-    .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  .filter(e => e.category_group in GROUP_LABELS)
+  .filter(e => (!from || e.date >= from) && (!to || e.date <= to))
+  .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
     const label = (group, key) =>
     categoryOptions(group)?.find(c => c.key === key)?.label
@@ -165,10 +167,10 @@ async function save() {
                 </tr>
             </thead>
             <tbody>
-              {loading && <tr><td colSpan={7} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
-              {!loading && period.length === 0 && (
-                <tr><td colSpan={7} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>
-              )}
+         { loading && <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>Loading…</td></tr>}
+         {!loading && period.length === 0 && (
+         <tr><td colSpan={6} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No entries in this period</td></tr>
+        )}
               {period.map(e => (
                 <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.15)" }}>
                   <td style={td}>{e.date}</td>
