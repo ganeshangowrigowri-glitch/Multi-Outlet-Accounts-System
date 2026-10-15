@@ -455,7 +455,44 @@ function useAutoSave(rows, saveFn, scopeKey, delay = 800) {
     begin: () => { clearTimeout(timerRef.current); dirtyRef.current = false; },  // manual save takes over
   };
 }
-
+// ── Control bar (module level so inputs keep focus while typing) ──
+function CtrlBar({ date, setDate, supFilter, setSupFilter, suppliers, onSave, saveLabel, count, supLabel, search, setSearch }) {
+  const iS  = { padding:"4px 8px", background:"var(--s2)", border:"1px solid var(--bdr)", borderRadius:6, fontSize:12, color:"var(--txt)", outline:"none" };
+  const lbl = { fontSize:9, fontWeight:700, letterSpacing:".08em", textTransform:"uppercase", color:"var(--mut)", display:"block", marginBottom:2 };
+  return (
+    <div style={{ display:"flex", alignItems:"flex-end", gap:8, flexWrap:"wrap", padding:"6px 0" }}>
+      <div>
+        <label style={lbl}>Date</label>
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...iS, width:148 }} />
+      </div>
+      <div>
+        <label style={lbl}>{supLabel || "Supplier"}</label>
+        <select value={supFilter} onChange={e => setSupFilter(e.target.value)} style={{ ...iS, minWidth:130 }}>
+          {suppliers.map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <div className="no-print">
+        <label style={lbl}>Search</label>
+        <input
+          type="text"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Name, code or description…"
+          style={{ ...iS, width:180 }}
+        />
+      </div>
+      <button className="btn btng" style={{ marginBottom:0 }} onClick={onSave}>
+        {I.check} {saveLabel}
+      </button>
+      <button className="btn btnd btnsm no-print" style={{ marginBottom:0 }} onClick={() => window.print()}>
+        {I.print} Print
+      </button>
+      <span style={{ marginLeft:"auto", fontSize:11, color:"var(--mut)", alignSelf:"center" }}>
+        {count} items{supFilter !== "ALL" ? ` · ${supFilter}` : ""}
+      </span>
+    </div>
+  );
+}
 export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) {
   const [supOrder, setSupOrder] = useState([
   "2001-DCSL","2003-UG","2005-ROCKLAND","2004-IDL","2006-DCSL BEER",
@@ -1680,45 +1717,7 @@ if (salesInRange.length > 0) {
     return rows;
   }, [empRows, empSupFilter, empSearch]);
 
-  // ─────────────────────────────────────────────────────────
-  //  CONTROL BAR (shared by main and empty tabs)
-  // ─────────────────────────────────────────────────────────
-    function CtrlBar({ date, setDate, supFilter, setSupFilter, suppliers, onSave, saveLabel, count, supLabel, search, setSearch }) {
-    return (
-      <div style={{ display:"flex", alignItems:"flex-end", gap:8, flexWrap:"wrap", padding:"6px 0" }}>
-        <div>
-          <label style={lbl}>Date</label>
-          <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...iS, width:148 }} />
-        </div>
-        <div>
-          <label style={lbl}>{supLabel || "Supplier"}</label>
-          <select value={supFilter} onChange={e => setSupFilter(e.target.value)} style={{ ...iS, minWidth:130 }}>
-            {suppliers.map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
-        </div>
-        <div className="no-print">
-          <label style={lbl}>Search</label>
-          <input
-            type="text"
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Name, code or description…"
-            style={{ ...iS, width:180 }}
-          />
-        </div>
-        <button className="btn btng" style={{ marginBottom:0 }} onClick={onSave}>
-          {I.check} {saveLabel}
-        </button>
-        <button className="btn btnd btnsm no-print" style={{ marginBottom:0 }} onClick={() => window.print()}>
-          {I.print} Print
-        </button>
-        <span style={{ marginLeft:"auto", fontSize:11, color:"var(--mut)", alignSelf:"center" }}>
-          {count} items{supFilter !== "ALL" ? ` · ${supFilter}` : ""}
-        </span>
-      </div>
-    );
-  }
-
+  
   // ─────────────────────────────────────────────────────────
   //  RENDER
   // ─────────────────────────────────────────────────────────
