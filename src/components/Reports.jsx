@@ -448,15 +448,26 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
               : Math.max(...endRows.map(r => parseFloat(r.endStock)));
           }
           if (lastEndStock === null) {
+            // Latest saved date that has an end stock for this item. Zero is valid.
+            // Same-date duplicates use the same rule as above: prefer sold>0, else highest.
+            let fbDate = null;
+            const fbRows = [];
             for (let i = salesInRange.length - 1; i >= 0; i--) {
-              const row = (salesInRange[i].items || []).find(r => !r.isEmptyItem && (
+              const s = salesInRange[i];
+              if (fbDate !== null && s.date !== fbDate) break;
+              const row = (s.items || []).find(r => !r.isEmptyItem && (
                 (r.id && r.id === item.id) ||
                 (r.code && r.code === item.code && r.supplier === item.supplier)
               ));
-              if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined && parseFloat(row.endStock) > 0) {
-                lastEndStock = parseFloat(row.endStock);
-                break;
+              if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined) {
+                fbDate = s.date;
+                fbRows.push(row);
               }
+            }
+            if (fbRows.length > 0) {
+              const soldRow = fbRows.find(r => parseFloat(r.sold) > 0);
+              lastEndStock = soldRow ? parseFloat(soldRow.endStock)
+                : Math.max(...fbRows.map(r => parseFloat(r.endStock)));
             }
           }
 
@@ -3677,13 +3688,19 @@ export async function computeStockValBySupplier(outlet, month, invMap) {
       lastEndStock = soldRow ? parseFloat(soldRow.endStock)
         : Math.max(...endRows.map(r => parseFloat(r.endStock)));
     }
-    if (lastEndStock === null) {
+        if (lastEndStock === null) {
+      let fbDate = null;
+      const fbRows = [];
       for (let i = salesInRange.length - 1; i >= 0; i--) {
-        const row = (salesInRange[i].items || []).find(matchRow);
-        if (hasEnd(row) && parseFloat(row.endStock) > 0) {
-          lastEndStock = parseFloat(row.endStock);
-          break;
-        }
+        const s = salesInRange[i];
+        if (fbDate !== null && s.date !== fbDate) break;
+        const row = (s.items || []).find(matchRow);
+        if (hasEnd(row)) { fbDate = s.date; fbRows.push(row); }
+      }
+      if (fbRows.length > 0) {
+        const soldRow = fbRows.find(r => parseFloat(r.sold) > 0);
+        lastEndStock = soldRow ? parseFloat(soldRow.endStock)
+          : Math.max(...fbRows.map(r => parseFloat(r.endStock)));
       }
     }
 

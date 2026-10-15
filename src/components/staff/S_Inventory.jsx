@@ -248,7 +248,7 @@ function getOpeningForDate(outlet, date, seedMain, seedEmp) {
 // ─────────────────────────────────────────────────────────────
 //  SCROLL ARROWS
 // ─────────────────────────────────────────────────────────────
-function ScrollArrows({ scrollBy }) {
+function ScrollArrows({ scrollBy, status, onRetry }) {
   return (
     <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
       <button onClick={() => scrollBy(-300)} style={{
@@ -257,7 +257,15 @@ function ScrollArrows({ scrollBy }) {
         background:"var(--s2,#252540)", color:"var(--txt,#ccc)",
         cursor:"pointer", fontSize:15,
         display:"flex", alignItems:"center", justifyContent:"center",
-      }}>‹</button>
+            }}>‹</button>
+      {status && (
+        <span onClick={status === "failed" ? onRetry : undefined}
+          style={{ fontSize:11, alignSelf:"center",
+            cursor: status === "failed" ? "pointer" : "default",
+            color: status === "failed" ? "var(--red)" : status === "saved" ? "var(--grn)" : "var(--mut)" }}>
+          {status === "saving" ? "Saving…" : status === "saved" ? "Saved ✓" : "Save failed — click to retry"}
+        </span>
+      )}
       <button onClick={() => scrollBy(300)} style={{
         width:28, height:24, borderRadius:5,
         border:"1px solid var(--s3,#444)",
@@ -359,6 +367,95 @@ function priceOnDate(masterItem, ov, date) {
   const base = resolveOutletPrice(masterItem, date, masterItem.unitCost, masterItem.sellingPrice);
   return resolveOutletPrice(ov, date, base.unitCost, base.sellingPrice);
 }
+// ── Keyboard navigation for the Daily Sale tables (Main + Empty) ──
+function navKey(e) {
+  const el = e.target;
+  if (el.tagName !== "INPUT" || el.type !== "number") return;
+  if (!["Enter", "ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight"].includes(e.key)) return;
+  if (e.shiftKey || e.ctrlKey || e.altKey || e.metaKey || e.nativeEvent?.isComposing) return;
+
+  const tr = el.closest("tr");
+  if (!tr) return;
+  const rowInputs = Array.from(tr.querySelectorAll("input"));
+  const idx = rowInputs.indexOf(el);
+  let target = null;
+
+  if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+    target = rowInputs[idx + (e.key === "ArrowRight" ? 1 : -1)] || null;
+    if (!target) return;
+  } else {
+    const dir = e.key === "ArrowUp" ? "previousElementSibling" : "nextElementSibling";
+    for (let row = tr[dir]; row; row = row[dir]) {
+      const cand = row.querySelectorAll("input")[idx];
+      if (cand) { target = cand; break; }
+    }
+  }
+
+  e.preventDefault();
+  if (target) {
+    target.focus();
+    try { target.select(); } catch (_) {}
+  }
+}
+// ── Auto-save: debounced, one save at a time, tied to the outlet/date it was typed for ──
+function useAutoSave(rows, saveFn, scopeKey, delay = 800) {
+  const [status, setStatus] = useState("");          // "" | "saving" | "saved" | "failed"
+  const dirtyRef = useRef(false);
+  const timerRef = useRef(null);
+  const saveRef  = useRef(saveFn);                   // save closure captured WITH the rows it will save
+  const busyRef  = useRef(null);
+
+  const run = useCallback(async () => {
+    clearTimeout(timerRef.current);
+    while (busyRef.current) await busyRef.current.catch(() => {});   // never overlap two saves
+    if (!dirtyRef.current) return true;
+    dirtyRef.current = false;                        // edits typed during the save set it again
+    setStatus("saving");
+    const p = saveRef.current(true);
+    busyRef.current = p;
+    try {
+      const ok = await p;
+      if (ok === false) {                            // skipped (manual save running) → retry shortly
+        dirtyRef.current = true;
+        timerRef.current = setTimeout(run, 500);
+        return false;
+      }
+      if (!dirtyRef.current) setStatus("saved");     // "Saved" only after the DB confirmed
+      return true;
+    } catch (err) {
+      console.error("Auto-save failed", err);
+      dirtyRef.current = true;                       // keep the entry, allow retry
+      setStatus("failed");
+      return false;
+    } finally {
+      busyRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {                                  // runs after every rows change
+    if (!dirtyRef.current) return;                   // reloads from DB are not user edits
+    saveRef.current = saveFn;
+    setStatus("saving");
+    clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(run, delay);
+  }, [rows]); // eslint-disable-line
+
+  // leaving the screen / switching outlet: flush with the OLD outlet's closure
+  useEffect(() => () => { clearTimeout(timerRef.current); if (dirtyRef.current) run(); }, [scopeKey]); // eslint-disable-line
+
+  useEffect(() => {                                  // warn if the tab is closed with unsaved data
+    const h = e => { if (dirtyRef.current || busyRef.current) { e.preventDefault(); e.returnValue = ""; } };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, []);
+
+  return {
+    status, flush: run, retry: run,
+    markDirty: () => { dirtyRef.current = true; },
+    begin: () => { clearTimeout(timerRef.current); dirtyRef.current = false; },  // manual save takes over
+  };
+}
+
 export default function S_Inventory({ outlet, user, toast_, subTab, dailyTab }) {
   const [supOrder, setSupOrder] = useState([
   "2001-DCSL","2003-UG","2005-ROCKLAND","2004-IDL","2006-DCSL BEER",
@@ -427,6 +524,7 @@ useEffect(() => {
   const skipNextEmpReloadDateRef = useRef(null);
   const openingWriteLockRef = useRef(Promise.resolve());
   const savingMainRef = useRef(false);
+  const savingEmpRef  = useRef(false);
   const mainScrollBy = useCallback(d => mainTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
   const empScrollBy  = useCallback(d => empTableRef.current?.scrollBy({ left:d, behavior:"smooth" }), []);
 
@@ -963,6 +1061,7 @@ function deriveMain(r) {
   // ─────────────────────────────────────────────────────────
 const updM = (id, field, val) => setMR(prev => prev.map(r => {
   if (r.id !== id) return r;
+  autoMain.markDirty();   // real user edit → eligible for auto-save
   // When sold changes, clear endStock so it auto-follows balance
 if (field === "sold") {
   return { ...r, sold: val, endStock: null };
@@ -976,6 +1075,7 @@ if (field === "endStock") {
 
  const updE = (id, field, val) => setER(prev => prev.map(r => {
   if (r.id !== id) return r;
+  autoEmp.markDirty();
   // When any balance-affecting field changes, clear endStock so it auto-follows
   if (["sold", "received", "return_", "invIssue", "issue"].includes(field)) {
   return { ...r, [field]: val, endStock: null };
@@ -985,7 +1085,17 @@ if (field === "endStock") {
 }
 return { ...r, [field]: val };
 }));
+  const autoMain = useAutoSave(mainRows, saveMainSale, outlet);
+  const autoEmp  = useAutoSave(empRows,  saveEmpGuarded, outlet);
 
+  // Empty save had no re-entrancy guard (Main already has savingMainRef)
+  async function saveEmpGuarded(auto) {
+    if (savingEmpRef.current) return false;
+    savingEmpRef.current = true;
+    try { return await saveEmpSale(auto); }
+    catch (err) { autoEmp.markDirty(); throw err; }
+    finally { savingEmpRef.current = false; }
+  }
   // ── Auto Sold Total (DCSL only): Main "Sold" fields → Empty "Sold" field.
   // Same lookup pattern as EMPTY_RECEIVED_AUTO_MAP above, applied to the
   // live Main Sold values instead of saved purchase qty. Only touches the
@@ -1011,9 +1121,11 @@ return { ...r, [field]: val };
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
   // ─────────────────────────────────────────────────────────
-  async function saveMainSale() {
-  if (savingMainRef.current) return;
+  async function saveMainSale(auto) {
+  const isAuto = auto === true;          // onClick passes an event object, so compare strictly
+  if (savingMainRef.current) return false;
   savingMainRef.current = true;
+  if (!isAuto) autoMain.begin();
   try {
   skipNextReloadRef.current = true;
   skipNextReloadDateRef.current = mainDate;
@@ -1073,7 +1185,7 @@ await openingWriteLockRef.current;
     mainRowsWithDerived.map(r => [r.id, r])
   );
   setMR(prev => {
-    if (mainDateRef.current !== mainDate) return prev;
+        if (isAuto || mainDateRef.current !== mainDate) return prev;
     return prev.map(r => {
       const sv = localSavedMap[r.id];
       if (!sv) return r;
@@ -1093,8 +1205,11 @@ skipNextReloadRef.current = true;
 skipNextReloadDateRef.current = mainDate;
 dbSalesRef.current = freshSales;
 setDbSales(freshSales);
- setJustSaved(true);
-toast_("Main stock daily sale saved ✓");
+  if (!isAuto) { setJustSaved(true); toast_("Main stock daily sale saved ✓"); }
+  return true;
+  } catch (err) {
+    autoMain.markDirty();               // keep the entries eligible for retry
+    throw err;
   } finally {
     savingMainRef.current = false;
   }
@@ -1103,7 +1218,9 @@ toast_("Main stock daily sale saved ✓");
   //  SAVE EMPTY DAILY SALE
   // ─────────────────────────────────────────────────────────
 
-   async function saveEmpSale() {
+     async function saveEmpSale(auto) {
+  const isAuto = auto === true;
+  if (!isAuto) autoEmp.begin();
   skipNextEmpReloadRef.current = true;
   skipNextEmpReloadDateRef.current = empDate;
   const nd = new Date(empDate);
@@ -1153,7 +1270,8 @@ const updatedSales = [
 ];
 dbSalesRef.current = updatedSales;
 setDbSales(updatedSales);
-toast_("Empty stock daily sale saved ✓");
+if (!isAuto) toast_("Empty stock daily sale saved ✓");
+return true;
   }
    
   // ─────────────────────────────────────────────────────────
@@ -1207,17 +1325,27 @@ if (csToRows.length > 0) {
 
 // Fallback: search entire range
 if (lastEndStock === null) {
+  // Latest saved date with an end stock for this item. Zero is valid.
+  let fbDate = null;
+  const fbRows = [];
   for (let i = salesInRange.length - 1; i >= 0; i--) {
-    const row = (salesInRange[i].items || []).find(
+    const s = salesInRange[i];
+    if (fbDate !== null && s.date !== fbDate) break;
+    const row = (s.items || []).find(
       r => !r.isEmptyItem && (
         (r.id && r.id === item.id) ||
         (r.code && r.code === item.code && r.supplier === item.supplier)
       )
     );
-    if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined && parseFloat(row.endStock) > 0) {
-      lastEndStock = parseFloat(row.endStock);
-      break;
+    if (row && row.endStock !== null && row.endStock !== "" && row.endStock !== undefined) {
+      fbDate = s.date;
+      fbRows.push(row);
     }
+  }
+  if (fbRows.length > 0) {
+    const soldRow = fbRows.find(r => parseFloat(r.sold) > 0);
+    lastEndStock = soldRow ? parseFloat(soldRow.endStock)
+      : Math.max(...fbRows.map(r => parseFloat(r.endStock)));
   }
 }
 
@@ -1604,6 +1732,9 @@ if (salesInRange.length > 0) {
         [data-inv-tbl]::-webkit-scrollbar-thumb:hover { background: #fbbf24; }
         [data-inv-tbl]::-webkit-scrollbar-track { background: var(--s2, #1e1e3a); }
         [data-inv-tbl]::-webkit-scrollbar-corner { background: var(--s2, #1e1e3a); }
+        [data-inv-tbl] input[type=number]::-webkit-outer-spin-button,
+        [data-inv-tbl] input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        [data-inv-tbl] input[type=number] { -moz-appearance: textfield; appearance: textfield; }
         @media print {
           .no-print, button, select, input[type=date] { display:none !important; }
           body, html { background:#fff !important; color:#000 !important; }
@@ -1622,7 +1753,8 @@ if (salesInRange.length > 0) {
           {dailyTab === "main" && (
           <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
                           <CtrlBar
-             date={mainDate} setDate={d => {
+             date={mainDate} setDate={async d => {
+             if (!(await autoMain.flush())) { toast_("Could not save yet — date not changed. Click Save Daily Sale to retry."); return; }
              setMainDate(d);
              getSales(outlet).then(data => {
              dbSalesRef.current = data;
@@ -1635,7 +1767,7 @@ if (salesInRange.length > 0) {
                 count={filteredMain.length} supLabel="Supplier"
                 search={mainSearch} setSearch={setMainSearch}
               />
-              <ScrollArrows scrollBy={mainScrollBy} />
+             <ScrollArrows scrollBy={mainScrollBy} status={autoMain.status} onRetry={autoMain.retry} />
               <div data-inv-tbl ref={mainTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
                 <table className="tbl tin" style={{ minWidth:1100, width:"100%" }}>
                   <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
@@ -1658,8 +1790,8 @@ if (salesInRange.length > 0) {
                       <th>Stk ±</th>
                       <th>End Stock</th>
                     </tr>
-                  </thead>
-                  <tbody>
+                    </thead>
+                  <tbody onKeyDown={navKey}>
                     {filteredMain.length === 0 && (
                       <tr><td colSpan={17}><div className="empty">No items.</div></td></tr>
                     )}
@@ -1741,8 +1873,9 @@ if (salesInRange.length > 0) {
           {/* ── EMPTY STOCK TAB ── */}
            {dailyTab === "empty" && (
            <div style={{ display:"flex", flexDirection:"column", height:"100%", overflow:"hidden" }}>
-                            <CtrlBar
-              date={empDate} setDate={d => {
+             <CtrlBar
+             date={empDate} setDate={async d => {
+              if (!(await autoEmp.flush())) { toast_("Could not save yet — date not changed. Click Save Empty Sale to retry."); return; }
               setEmpDate(d);
               getSales(outlet).then(data => {
               dbSalesRef.current = data;
@@ -1751,11 +1884,11 @@ if (salesInRange.length > 0) {
               }}
                 supFilter={empSupFilter} setSupFilter={setEmpSupFilter}
                 suppliers={empSuppliers}
-                onSave={saveEmpSale} saveLabel="Save Empty Sale"
+                onSave={saveEmpGuarded} saveLabel="Save Empty Sale"
                 count={filteredEmp.length} supLabel="Supplier / Type"
                 search={empSearch} setSearch={setEmpSearch}
               />
-              <ScrollArrows scrollBy={empScrollBy} />
+              <ScrollArrows scrollBy={empScrollBy} status={autoEmp.status} onRetry={autoEmp.retry} />
                <div data-inv-tbl ref={empTableRef} style={{ flex:1, overflowX:"auto", overflowY:"scroll", minHeight:0, height:0 }}>
                 <table className="tbl tin" style={{ minWidth:1200, width:"100%" }}>
                   <thead style={{ position:"sticky", top:0, zIndex:5, background:"var(--s2,#1e1e3a)" }}>
@@ -1778,8 +1911,8 @@ if (salesInRange.length > 0) {
                       <th>Stk ±</th>
                       <th>End Stock</th>
                     </tr>
-                  </thead>
-                  <tbody>
+                   </thead>
+                  <tbody onKeyDown={navKey}>
                     {filteredEmp.length === 0 && (
                       <tr><td colSpan={17}><div className="empty">No empty stock items.</div></td></tr>
                     )}
