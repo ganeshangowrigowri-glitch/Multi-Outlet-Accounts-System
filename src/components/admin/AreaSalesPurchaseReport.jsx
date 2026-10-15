@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import { I } from "../../utils/icons";
-import { getInventoryMaster, getSales, getPurchases, getOutletInventory } from "../../db";
+import { getInventoryMaster, getSales, getPurchases, getOutletInventory, getTransfers } from "../../db";
 import { AREAS, UNASSIGNED_AREA, getOutletArea } from "../../data/areas";
 import { today } from "../../utils/helpers";
 
@@ -105,11 +105,36 @@ function findOpeningAndEndStock(salesInRange, toDate, item) {
   return { firstOpening, lastEndStock };
 }
 
+// ── Transfer helpers: identical to S_Inventory.jsx ──
+function txnDate(rec) {
+  return (rec.date || "").slice(0, 10);
+}
+function txnItems(rec) {
+  return rec.items || rec.lines || [];
+}
+function lineMatchesItem(l, item) {
+  if (l.itemCode !== item.code) return false;
+  if (l.supplier && item.supplier && l.supplier !== item.supplier) return false;
+  return true;
+}
+function isTransferIn(rec, outlet) {
+  const notes = rec.notes || "";
+  if (notes.includes("type:in")) return true;
+  if (notes.includes("type:out")) return false;
+  return (rec.to_outlet_id ?? rec.to) === outlet;
+}
+function isTransferOut(rec, outlet) {
+  const notes = rec.notes || "";
+  if (notes.includes("type:out")) return true;
+  if (notes.includes("type:in")) return false;
+  return (rec.from_outlet_id ?? rec.from) === outlet;
+}
+
 // ── Per-outlet, per-item Current Status figures for one item ──
 // (same formula as computeCsData; currency/margin/transfers/returns are
 // intentionally omitted here — this report only needs the two bottle
 // quantities, and Sales/Purchase never touch those fields anyway)
-  function computeItemCurrentStatus(item, salesForOutlet, purchasesForOutlet, invQty, fromDate, toDate) {
+    function computeItemCurrentStatus(item, salesForOutlet, purchasesForOutlet, invQty, fromDate, toDate, transfersForOutlet, outlet) {
   const salesInRange = (salesForOutlet || [])
     .filter(
       (s) => s.date && s.date >= fromDate && s.date <= toDate && (s.items || []).some((r) => !r.isEmptyItem)
@@ -127,9 +152,23 @@ function findOpeningAndEndStock(salesInRange, toDate, item) {
         if (l.itemCode === item.code && !l.isEmptyItem) totalPurchase += parseFloat(l.qty) || 0;
       })
     );
+    // ── Transfers In / Out (same as Current Status) ──
+  let transferIn = 0;
+  (transfersForOutlet || [])
+    .filter((t) => txnDate(t) >= fromDate && txnDate(t) <= toDate && isTransferIn(t, outlet))
+    .forEach((t) => txnItems(t).forEach((l) => {
+      if (lineMatchesItem(l, item)) transferIn += parseFloat(l.qty) || 0;
+    }));
+  let transferOut = 0;
+  (transfersForOutlet || [])
+    .filter((t) => txnDate(t) >= fromDate && txnDate(t) <= toDate && isTransferOut(t, outlet))
+    .forEach((t) => txnItems(t).forEach((l) => {
+      if (lineMatchesItem(l, item)) transferOut += parseFloat(l.qty) || 0;
+    }));
+
   const opening = firstOpening !== null ? firstOpening : Number(invQty) || 0;
   const inHandStock = lastEndStock !== null ? lastEndStock : opening;
-  const totalBottleSale = opening + totalPurchase - inHandStock;
+  const totalBottleSale = opening + totalPurchase + transferIn - transferOut - inHandStock;
 
     return { totalBottleSale, totalPurchase, inHandStock };
 }
@@ -251,12 +290,13 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
     setOutletsLoading(true);
     Promise.all(
       missing.map(async (o) => {
-        const [sales, purchases, inv] = await Promise.all([
+       const [sales, purchases, inv, transfers] = await Promise.all([
           getSales(o),
           getPurchases(o),
           getOutletInventory(o),
+          getTransfers(o),
         ]);
-        return [o, { sales, purchases, inv }];
+        return [o, { sales, purchases, inv, transfers }];
       })
     )
       .then((entries) => {
@@ -289,6 +329,7 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
       const cached = cacheRef.current[outlet] || {};
       const sales = cached.sales || [];
       const purchases = cached.purchases || [];
+      const transfers = cached.transfers || [];
       const invRows = cached.inv || [];
       const invQtyMap = {};
       invRows.forEach((r) => {
@@ -304,7 +345,9 @@ export default function AreaSalesPurchaseReport({ outlets, toast_ }) {
           purchases,
           invQty,
           from,
-          to
+          to,
+          transfers,
+          outlet
         );
         if (reportType === "physical") return inHandStock;
         return reportType === "sales" ? totalBottleSale : totalPurchase;
