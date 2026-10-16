@@ -198,7 +198,7 @@ function Ring({ segs, size = 80 }) {
 /* ───────────────────────── Main component ─────────────────────────
    onNavigate(key) is optional. Keys used by the buttons:
    "sales" · "expenses" · "bank" · "ap" · "settings"                  */
-const EMPTY = { sales: [], expenses: [], cash: [], bank: [], apInv: [], apPay: [], ar: [], card: [] };
+const EMPTY = { sales: [], expenses: [], cash: [], bank: [], apInv: [], apPay: [], ar: [], card: [], suppliers: [] };
 
 export default function S_Dashboard({ outlet, user, onNavigate }) {
   const [data, setData]       = useState(EMPTY);
@@ -226,14 +226,15 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
       q("ap_invoices"),
       q("ap_payments"),
             q("ar_ledger"),
-      q("card_ledger"),
+           q("card_ledger"),
+      supabase.from("suppliers").select("*"),
     ])
       .then((res) => {
         if (cancelled) return;
         const failed = res.find((r) => r.error);
         if (failed) setError(failed.error.message);
-       const [sales, expenses, cash, bank, apInv, apPay, ar, card] = res.map((r) => r.data || []);
-        setData({ sales, expenses, cash, bank, apInv, apPay, ar, card });
+          const [sales, expenses, cash, bank, apInv, apPay, ar, card, suppliers] = res.map((r) => r.data || []);
+        setData({ sales, expenses, cash, bank, apInv, apPay, ar, card, suppliers });
       })
       .catch((e) => !cancelled && setError(e.message))
       .finally(() => !cancelled && setLoading(false));
@@ -280,7 +281,11 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
       expTotal:   monthTotal,
       cashBal:    cashNet(data.cash),
       bankBal:    net(data.bank),
-      apOut:      sum(data.apInv, "amount") - sum(data.apPay, "amount"),
+      // Same as AP window → Suppliers tab: per supplier, invoices − (payments + discount), then total
+      apOut:      data.suppliers.reduce((t, s) =>
+        t + sum(data.apInv.filter((i) => i.supplier_id === s.id), "amount")
+      - sum(data.apPay.filter((p) => p.supplier_id === s.id), "amount")
+      - sum(data.apPay.filter((p) => p.supplier_id === s.id), "discount"), 0),
       arBal:      arBilled - arReceived,
       arPct:      arBilled > 0 ? Math.max(0, Math.min(100, (arReceived / arBilled) * 100)) : 0,
       hasAr:      arBilled > 0,
