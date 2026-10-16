@@ -1,126 +1,440 @@
 // src/components/staff/S_Dashboard.jsx
-import { useState, useEffect } from "react";
-import { fmt, today, monthOf } from "../../utils/helpers";
+import { useState, useEffect, useMemo } from "react";
+import { fmt } from "../../utils/helpers";
 import { supabase } from "../../supabase";
-import { I } from "../../utils/icons";
 
-export default function S_Dashboard({ outlet, user }) {
-  const [sales,      setSales]      = useState([]);
-const [expenses,   setExpenses]   = useState([]);
-const [cashLedger, setCashLedger] = useState([]);
-const [bankLedger, setBankLedger] = useState([]);
-const [apInvoices, setApInvoices] = useState([]);
-const [apPayments, setApPayments] = useState([]);
-const [arLedger,   setArLedger]   = useState([]);
+/* ───────────────────────── Theme ─────────────────────────
+   Surfaces, borders and text come from the app's own CSS variables
+   (--s1, --bdr, --txt, --mut ...) so this page follows the same theme
+   as every other window. The fallbacks only apply if a variable is missing.
+   Accent = amber (same as the sidebar highlight). One hue per meaning:
+   sales amber · expenses rose · bank blue · payables violet ·
+   cash green · receivables teal                                        */
+const MONO  = "'JetBrains Mono','IBM Plex Mono','Space Mono',ui-monospace,SFMono-Regular,Menlo,monospace";
+const SERIF = "'Playfair Display',serif";
 
-useEffect(() => {
-  if (!outlet) return;
+const SURF = "var(--s1, #121214)";
+const BORD = "var(--bdr, #2a2a30)";
+const MUT  = "var(--mut, #9a9aa6)";
+const TXT  = "var(--txt, #ececf0)";
 
-  supabase.from("sales").select("*").eq("outlet_id", outlet)
-    .order("date", { ascending: false })
-    .then(({ data }) => { if (data) setSales(data); });
+const tone = (hex) => ({
+  bg:  `linear-gradient(160deg,color-mix(in srgb,${hex} 11%,${SURF}) 0%,${SURF} 70%)`,
+  bd:  `color-mix(in srgb,${hex} 30%,${BORD})`,
+  val: hex,
+  btn: hex,
+});
 
-  supabase.from("expenses").select("*").eq("outlet_id", outlet)
-    .then(({ data }) => { if (data) setExpenses(data); });
+const T = {
+  sales: tone("#fbbf24"),
+  exp:   tone("#fb7185"),
+  bank:  tone("#60a5fa"),
+  ap:    tone("#a78bfa"),
+  cash:  tone("#34d399"),
+  ar:    tone("#2dd4bf"),
+};
 
-  supabase.from("cash_ledger").select("*").eq("outlet_id", outlet)
-    .then(({ data }) => { if (data) setCashLedger(data); });
+const DONUT = ["#f59e0b", "#60a5fa", "#34d399", "#fb7185", "#a78bfa", "#2dd4bf", "#fb923c"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-  supabase.from("bank_ledger").select("*").eq("outlet_id", outlet)
-    .then(({ data }) => { if (data) setBankLedger(data); });
+/* ───────────────────────── Helpers ───────────────────────── */
+const ymd = (d) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
-  supabase.from("ap_invoices").select("*").eq("outlet_id", outlet)
-    .then(({ data }) => { if (data) setApInvoices(data); });
+const sum = (rows, key) => rows.reduce((a, r) => a + (Number(r[key]) || 0), 0);
+const net = (rows) => rows.reduce((a, r) => a + ((Number(r.debit) || 0) - (Number(r.credit) || 0)), 0);
 
-  supabase.from("ap_payments").select("*").eq("outlet_id", outlet)
-    .then(({ data }) => { if (data) setApPayments(data); });
+// Expense category: adjust the field names here if your expenses table uses another column
+const catOf = (e) =>
+  String(e.category || e.expense_type || e.type || e.head || e.account || "Uncategorised").trim() || "Uncategorised";
+// Same rule as the In Hand Cash page's "Cash Balance": opening B/F (earliest
+// month only) + all entries, Daily Sale de-duplicated per date, and
+// Day Sheet count rows excluded.
+const cashNet = (rows) => {
+  const per = (r) => r.period || String(r.date).slice(0, 7);
+  const bfs = rows.filter(r => r.balance_type === "bf")
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const first = bfs.length ? per(bfs[0]) : null;
+  const bf = bfs.filter(r => per(r) === first);
 
-  supabase.from("ar_ledger").select("*").eq("outlet_id", outlet)
-    .then(({ data }) => { if (data) setArLedger(data); });
-}, [outlet]);
-  const mo         = today().slice(0, 7);
-  const mSales     = sales.filter(s => monthOf(s.date) === mo).reduce((a, s) => a + Number(s.total), 0);
-  const mExp       = expenses.filter(e => monthOf(e.date) === mo).reduce((a, e) => a + Number(e.amount), 0);
-  const cashBal = cashLedger.reduce((a, t) => a + (Number(t.debit) - Number(t.credit)), 0);
-  const bankBal = bankLedger.reduce((a, t) => a + (Number(t.debit) - Number(t.credit)), 0);
-  const apOut   = apInvoices.reduce((a, i) => a + Number(i.amount), 0) - apPayments.reduce((a, p) => a + Number(p.amount), 0);
-  const arBal   = arLedger.reduce((a, e) => a + (Number(e.debit) - Number(e.credit)), 0);
-  const todaySales = sales.filter(s => s.date === today()).reduce((a, s) => a + Number(s.total), 0);
+  const lastSale = {};
+  rows.forEach((e, i) => { if (e.description === "Daily Sale") lastSale[e.date] = i; });
+  const body = rows.filter((e, i) =>
+    e.balance_type !== "bf" && e.balance_type !== "daysheet" &&
+    (e.description !== "Daily Sale" || lastSale[e.date] === i));
+
+   // Same as the In Hand Cash top bar: restart from the latest Day Sheet count,
+  // then add only entries dated after it. No Day Sheet → plain formula.
+  const ds = rows.filter(r => r.balance_type === "daysheet")
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const last = ds[ds.length - 1];
+  if (last) {
+    const lastAmt = (Number(last.debit) || 0) - (Number(last.credit) || 0);
+    return lastAmt + net(body.filter(e => String(e.date) > String(last.date)));
+  }
+  return net(bf) + net(body);
+};
+
+// Smooth curve through points (horizontal-tangent cubic segments, no overshoot)
+const smoothPath = (pts) =>
+  pts.reduce((d, [x, y], i) => {
+    if (i === 0) return `M${x.toFixed(1)},${y.toFixed(1)}`;
+    const [px, py] = pts[i - 1];
+    const mx = ((px + x) / 2).toFixed(1);
+    return `${d} C${mx},${py.toFixed(1)} ${mx},${y.toFixed(1)} ${x.toFixed(1)},${y.toFixed(1)}`;
+  }, "");
+
+/* ───────────────────────── Icons ───────────────────────── */
+function Icon({ name, size = 14 }) {
+  const paths = {
+    up: (<><polyline points="22 7 13.5 15.5 8.5 10.5 2 17" /><polyline points="16 7 22 7 22 13" /></>),
+    down: (<><polyline points="22 17 13.5 8.5 8.5 13.5 2 7" /><polyline points="16 17 22 17 22 11" /></>),
+    bank: (<><path d="M3 21h18" /><path d="M5 21V10M9.5 21V10M14.5 21V10M19 21V10" /><path d="M2.5 10 12 4l9.5 6" /></>),
+    bars: (<path d="M5 21V11M12 21V4M19 21v-7" />),
+    gear: (
+      <>
+        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+        <circle cx="12" cy="12" r="3" />
+      </>
+    ),
+  }[name];
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+      {paths}
+    </svg>
+  );
+}
+
+/* ───────────────────────── Small pieces ───────────────────────── */
+function Btn({ color, icon, onClick, children }) {
+  return (
+    <button type="button" className="sd-btn" onClick={onClick} style={{ "--c": color }}>
+      <Icon name={icon} />
+      {children}
+    </button>
+  );
+}
+
+function Card({ t, style, children }) {
+  return (
+    <div style={{ background: t.bg, border: `1px solid ${t.bd}`, borderRadius: 14, padding: "16px 18px", ...style }}>
+      {children}
+    </div>
+  );
+}
+
+function Metric({ label, value, color, size = 22 }) {
+  return (
+    <div>
+      <div style={{ fontSize: 13, color: TXT, opacity: 0.72, marginBottom: 6 }}>{label}</div>
+      <div style={{ fontFamily: MONO, fontSize: size, fontWeight: 600, color, letterSpacing: ".01em" }}>Rs.{fmt(value)}</div>
+    </div>
+  );
+}
+
+/* ───────────────────────── Charts (pure SVG) ───────────────────────── */
+function TrendChart({ data, id }) {
+  const W = 300, H = 104, PX = 10, PT = 10, PB = 22;
+  const iw = W - PX * 2, ih = H - PT - PB;
+  const max = Math.max(...data.map((d) => d.value), 0) || 1;
+  const x = (i) => PX + (data.length < 2 ? iw / 2 : (i * iw) / (data.length - 1));
+  const y = (v) => PT + ih - (v / max) * ih * 0.92;
+  const pts = data.map((d, i) => [x(i), y(d.value)]);
+  const line = smoothPath(pts);
+  const area = `${line} L${pts[pts.length - 1][0].toFixed(1)},${PT + ih} L${pts[0][0].toFixed(1)},${PT + ih} Z`;
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+      <defs>
+        <linearGradient id={id} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor="#f59e0b" stopOpacity=".45" />
+          <stop offset="100%" stopColor="#f59e0b" stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      <path d={area} fill={`url(#${id})`} />
+      <path d={line} fill="none" stroke="#f5a524" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+      {data.map((d, i) => (
+        <g key={i}>
+          <circle cx={pts[i][0]} cy={pts[i][1]} r="7" fill="transparent">
+            <title>{`${d.label}: Rs.${fmt(d.value)}`}</title>
+          </circle>
+          {i === data.length - 1 && (
+            <circle cx={pts[i][0]} cy={pts[i][1]} r="3.5" fill="#14120c" stroke="#fbbf24" strokeWidth="2" pointerEvents="none" />
+          )}
+          <text x={x(i)} y={H - 6} textAnchor="middle" fontSize="8.5" fill="#8a8a96">{d.label}</text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+function Ring({ segs, size = 80 }) {
+  const R = 30, SW = 14, Ct = 2 * Math.PI * R;
+  const total = segs.reduce((a, s) => a + s.value, 0);
+  let acc = 0;
+  return (
+    <svg viewBox="0 0 80 80" width={size} height={size} style={{ flexShrink: 0 }}>
+      <circle cx="40" cy="40" r={R} fill="none" stroke="rgba(255,255,255,.08)" strokeWidth={SW} />
+      {total > 0 &&
+        segs.map((s) => {
+          const len = (s.value / total) * Ct;
+          const el = (
+            <circle
+              key={s.label} cx="40" cy="40" r={R} fill="none" stroke={s.color} strokeWidth={SW}
+              strokeDasharray={`${Math.max(len - 1.5, 0)} ${Ct}`} strokeDashoffset={-acc}
+              transform="rotate(-90 40 40)"
+            >
+              <title>{`${s.label}: Rs.${fmt(s.value)} (${((s.value / total) * 100).toFixed(0)}%)`}</title>
+            </circle>
+          );
+          acc += len;
+          return el;
+        })}
+    </svg>
+  );
+}
+
+/* ───────────────────────── Main component ─────────────────────────
+   onNavigate(key) is optional. Keys used by the buttons:
+   "sales" · "expenses" · "bank" · "ap" · "settings"                  */
+const EMPTY = { sales: [], expenses: [], cash: [], bank: [], apInv: [], apPay: [], ar: [] };
+
+export default function S_Dashboard({ outlet, user, onNavigate }) {
+  const [data, setData]       = useState(EMPTY);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState(null);
+
+  useEffect(() => {
+    if (!outlet) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    // Sales chart shows the last 8 months, so only fetch that window
+    const from = new Date();
+    from.setDate(1);
+    from.setMonth(from.getMonth() - 7);
+
+    const q = (table) => supabase.from(table).select("*").eq("outlet_id", outlet);
+
+    Promise.all([
+      q("sales").gte("date", ymd(from)).order("date", { ascending: false }),
+      q("expenses"),
+      q("cash_ledger"),
+      q("bank_ledger"),
+      q("ap_invoices"),
+      q("ap_payments"),
+      q("ar_ledger"),
+    ])
+      .then((res) => {
+        if (cancelled) return;
+        const failed = res.find((r) => r.error);
+        if (failed) setError(failed.error.message);
+        const [sales, expenses, cash, bank, apInv, apPay, ar] = res.map((r) => r.data || []);
+        setData({ sales, expenses, cash, bank, apInv, apPay, ar });
+      })
+      .catch((e) => !cancelled && setError(e.message))
+      .finally(() => !cancelled && setLoading(false));
+
+    return () => { cancelled = true; };
+  }, [outlet]);
+
+  const m = useMemo(() => {
+    const now = new Date();
+    const todayStr = ymd(now);
+    const monthKey = todayStr.slice(0, 7);
+
+    // 8-month sales trend
+    const trend = [];
+    for (let i = 7; i >= 0; i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      trend.push({ label: MONTHS[d.getMonth()], value: sum(data.sales.filter((s) => String(s.date).slice(0, 7) === key), "total") });
+    }
+
+    // Expense breakdown by category (top 6 + Other)
+    const cats = {};
+    data.expenses.forEach((e) => { cats[catOf(e)] = (cats[catOf(e)] || 0) + (Number(e.amount) || 0); });
+    const sorted = Object.entries(cats).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
+    const top = sorted.slice(0, 6);
+    const rest = sorted.slice(6).reduce((a, c) => a + c.value, 0);
+    if (rest > 0) top.push({ label: "Other", value: rest });
+    const segs = top.map((s, i) => ({ ...s, color: DONUT[i % DONUT.length] }));
+
+    const arBilled   = sum(data.ar, "debit");
+    const arReceived = sum(data.ar, "credit");
+
+    return {
+      trend, segs,
+      // newest first (already sorted by the query); skip zero-value sales
+      recent: data.sales.filter((s) => Number(s.total) > 0).slice(0, 8),
+      todaySales: sum(data.sales.filter((s) => String(s.date).slice(0, 10) === todayStr), "total"),
+      mExp:       sum(data.expenses.filter((e) => String(e.date).slice(0, 7) === monthKey), "amount"),
+      expTotal:   sum(data.expenses, "amount"),
+      cashBal:    cashNet(data.cash),
+      bankBal:    net(data.bank),
+      apOut:      sum(data.apInv, "amount") - sum(data.apPay, "amount"),
+      arBal:      arBilled - arReceived,
+      arPct:      arBilled > 0 ? Math.max(0, Math.min(100, (arReceived / arBilled) * 100)) : 0,
+      hasAr:      arBilled > 0,
+    };
+  }, [data]);
 
   const hour    = new Date().getHours();
   const greet   = hour < 12 ? "Good Morning" : hour < 17 ? "Good Afternoon" : "Good Evening";
   const dateStr = new Date().toLocaleDateString("en-LK", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const name    = user?.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : "Staff";
+  const go      = (key) => () => onNavigate && onNavigate(key);
 
   return (
     <>
-      {/* ── Welcome Banner ── */}
-      <div style={{ background: "linear-gradient(135deg,var(--s1) 0%,#1a1a2e 100%)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", padding: "22px 24px", marginBottom: 14, position: "relative", overflow: "hidden" }}>
-        <div style={{ position: "absolute", top: 0, right: 0, width: 200, height: 200, background: "radial-gradient(circle,rgba(245,158,11,.08) 0%,transparent 70%)", pointerEvents: "none" }} />
-        <div style={{ position: "relative" }}>
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
-            <div>
-              <div style={{ fontSize: 10.5, color: "var(--mut)", fontWeight: 600, letterSpacing: ".08em", textTransform: "uppercase", marginBottom: 4 }}>{greet} 👋</div>
-              <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 24, color: "var(--txt)", marginBottom: 4 }}>
-                {user?.username ? user.username.charAt(0).toUpperCase() + user.username.slice(1) : "Staff"}
-              </div>
-              <div style={{ fontSize: 11.5, color: "var(--mut)" }}>{user?.designation || "Staff"} &nbsp;·&nbsp; {dateStr}</div>
+      <style>{`
+        @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600&display=swap");
+        .sd-btn{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:8px;font-size:11.5px;font-weight:500;
+          color:var(--c);background:transparent;border:1px solid var(--c);
+          background:color-mix(in srgb,var(--c) 10%,transparent);border:1px solid color-mix(in srgb,var(--c) 75%,transparent);
+          cursor:pointer;white-space:nowrap;font-family:inherit;transition:background .15s}
+        .sd-btn:hover{background:color-mix(in srgb,var(--c) 24%,transparent)}
+        .sd-row1{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-bottom:12px}
+        .sd-row2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-bottom:14px}
+        .sd-col3{display:flex;flex-direction:column;gap:12px}
+        .sd-col3>*{flex:1}
+        .sd-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
+        @media(max-width:900px){
+          .sd-row1{grid-template-columns:repeat(2,minmax(0,1fr))}
+          .sd-col3{grid-column:1/-1;flex-direction:row}
+        }
+        @media(max-width:620px){
+          .sd-row1,.sd-row2{grid-template-columns:1fr}
+          .sd-col3{flex-direction:column}
+        }
+      `}</style>
+
+      {/* ── Welcome banner ── */}
+      <div style={{ position: "relative", overflow: "hidden", background: `linear-gradient(135deg,color-mix(in srgb,#f59e0b 14%,${SURF}) 0%,${SURF} 65%)`, border: `1px solid color-mix(in srgb,#f59e0b 28%,${BORD})`, borderRadius: 16, padding: "22px 24px", marginBottom: 12 }}>
+        <div style={{ position: "absolute", top: -70, right: -40, width: 300, height: 300, background: "radial-gradient(circle,rgba(245,158,11,.16) 0%,transparent 70%)", pointerEvents: "none" }} />
+        <div style={{ position: "relative", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+          <div>
+            <div style={{ fontSize: 10.5, color: MUT, fontWeight: 600, letterSpacing: ".1em", textTransform: "uppercase", marginBottom: 6 }}>{greet} 👋</div>
+            <div style={{ fontFamily: SERIF, fontSize: 26, fontWeight: 700, color: TXT, marginBottom: 6 }}>{name}</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 12, color: MUT }}>{user?.designation || "Staff"} &nbsp;•&nbsp; {dateStr}</span>
+              <button type="button" onClick={go("settings")} title="Settings"
+                style={{ display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, borderRadius: 9, border: `1px solid ${BORD}`, background: "rgba(255,255,255,.04)", color: MUT, cursor: "pointer" }}>
+                <Icon name="gear" size={15} />
+              </button>
             </div>
-            <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6 }}>
-              <div style={{ display: "inline-flex", alignItems: "center", gap: 6, background: "rgba(245,158,11,.12)", border: "1px solid rgba(245,158,11,.25)", borderRadius: 8, padding: "6px 14px" }}>
-                <div style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--gld2)", boxShadow: "0 0 6px var(--gld)" }} />
-                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--gld2)" }}>{outlet}</span>
-              </div>
-              <div style={{ fontSize: 10.5, color: "var(--mut2)" }}>Access: {user?.access || "All windows"}</div>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}>
+            <div style={{ display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(155, 153, 19, 0.12)", border: "1px solid rgba(245,158,11,.30)", borderRadius: 9, padding: "8px 16px" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#34d399", boxShadow: "0 0 6px #34d399" }} />
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: "#7f9715", letterSpacing: ".08em", textTransform: "uppercase" }}>{outlet}</span>
             </div>
+            <div style={{ fontSize: 11, color: MUT }}>Access: {user?.access || "All windows"}</div>
           </div>
         </div>
       </div>
 
-      {/* ── KPI Grid ── */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 14 }}>
-        {[
-          ["Today's Sales",  todaySales, "cg"],
-          ["Month Sales",    mSales,     "ca"],
-          ["Month Expenses", mExp,       "cr"],
-          ["Cash in Hand",   cashBal,    "cg"],
-          ["Bank Balance",   bankBal,    "cb"],
-          ["AP Outstanding", apOut,      "cr"],
-        ].map(([l, v, c]) => (
-          <div className="sc" key={l}>
-            <div className="sl">{l}</div>
-            <div className={`sa ${c}`}>Rs.{fmt(v)}</div>
+      {error && (
+        <div style={{ background: "rgba(251,113,133,.1)", border: "1px solid rgba(251,113,133,.3)", color: "#fb7185", borderRadius: 10, padding: "10px 14px", fontSize: 12, marginBottom: 12 }}>
+          Some data could not be loaded ({error}). Figures below may be incomplete.
+        </div>
+      )}
+
+      <div style={{ opacity: loading ? 0.55 : 1, transition: "opacity .2s" }}>
+        {/* ── Row 1: sales / expenses / bank + AP ── */}
+        <div className="sd-row1">
+          <Card t={T.sales}>
+            <div className="sd-top">
+              <Metric label="Today's Sales" value={m.todaySales} color={T.sales.val} />
+              <Btn color={T.sales.btn} icon="up" onClick={go("sales")}>View Sales Report</Btn>
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <TrendChart data={m.trend} id="sd-trend" />
+            </div>
+          </Card>
+
+          <Card t={T.exp}>
+            <div className="sd-top">
+              <Metric label="Month Expenses" value={m.mExp} color={T.exp.val} />
+              <Btn color={T.exp.btn} icon="down" onClick={go("expenses")}>View Expense Log</Btn>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginTop: 18 }}>
+              <Metric label="Expense Breakdown" value={m.expTotal} color={T.exp.val} size={19} />
+              <Ring segs={m.segs} size={72} />
+            </div>
+          </Card>
+
+          <div className="sd-col3">
+            <Card t={T.bank}>
+              <div className="sd-top">
+                <Metric label="Bank Balance" value={m.bankBal} color={T.bank.val} />
+                <Btn color={T.bank.btn} icon="bank" onClick={go("bank")}>Add Transaction</Btn>
+              </div>
+            </Card>
+            <Card t={T.ap}>
+              <div className="sd-top">
+                <Metric label="Accounts Payable Outstanding" value={m.apOut} color={T.ap.val} />
+                <Btn color={T.ap.btn} icon="bars" onClick={go("ap")}>View AP Details</Btn>
+              </div>
+            </Card>
           </div>
-        ))}
-      </div>
-
-      {/* ── AP / AR Big Numbers ── */}
-      <div className="sg2">
-        <div className="sc" style={{ textAlign: "center" }}>
-          <div className="sl">Accounts Payable Outstanding</div>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, color: "var(--red)", marginTop: 4 }}>Rs.{fmt(apOut)}</div>
         </div>
-        <div className="sc" style={{ textAlign: "center" }}>
-          <div className="sl">Accounts Receivable Balance</div>
-          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 22, color: "var(--grn)", marginTop: 4 }}>Rs.{fmt(arBal)}</div>
-        </div>
-      </div>
 
-      {/* ── Recent Sales Table ── */}
-      <div className="card">
-        <div className="chd"><h3>Recent Sales</h3></div>
-        <table className="tbl">
-          <thead><tr><th>Date</th><th>By</th><th className="rt">Amount</th></tr></thead>
-          <tbody>
-            {sales.length === 0 && <tr><td colSpan={3}><div className="empty">No sales yet.</div></td></tr>}
-            {sales.slice(0, 8).map(s => (
-              <tr key={s.id}>
-                <td className="mono">{s.date}</td>
-                <td>{s.by}</td>
-                <td className="rt mono cg bold">Rs.{fmt(s.total)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        {/* ── Row 2: cash + AR ── */}
+        <div className="sd-row2">
+          <Card t={T.cash}>
+            <div style={{ display: "grid", gridTemplateColumns: "1.25fr 1fr", gap: 20 }}>
+              <Metric label="Cash in Hand" value={m.cashBal} color={T.cash.val} size={20} />
+              <Metric label="AR Balance" value={m.arBal} color={T.ar.val} size={20} />
+            </div>
+          </Card>
+          <Card t={T.ar}>
+            <div style={{ fontSize: 13, color: TXT, opacity: 0.72, marginBottom: 12 }}>Accounts Receivable Balance</div>
+            <div style={{ height: 12, borderRadius: 8, background: "rgba(255,255,255,.12)", overflow: "hidden" }}>
+              <div style={{ width: `${m.arPct}%`, height: "100%", borderRadius: 8, background: "linear-gradient(90deg,#2dd4bf,#5eead4)", transition: "width .6s ease" }} />
+            </div>
+            <div style={{ fontSize: 10.5, color: MUT, marginTop: 7, textAlign: "right" }}>
+              {m.hasAr ? `${m.arPct.toFixed(0)}% collected` : "No receivables yet"}
+            </div>
+          </Card>
+        </div>
+
+        {/* ── Recent sales ── */}
+        <div style={{ background: SURF, border: `1px solid ${BORD}`, borderRadius: 16, overflow: "hidden" }}>
+          <div style={{ padding: "16px 20px", fontFamily: SERIF, fontSize: 17, fontWeight: 700, color: "var(--txt, #e6e9f2)" }}>Recent Sales</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
+              <thead>
+                <tr style={{ background: "rgba(255,255,255,.04)" }}>
+                  {["Date", "By", "Amount", "Status"].map((h, i) => (
+                    <th key={h} style={{ padding: "11px 20px", fontSize: 10.5, fontWeight: 600, letterSpacing: ".09em", textTransform: "uppercase", color: MUT, textAlign: i === 3 ? "right" : "left" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {!loading && m.recent.length === 0 && (
+                  <tr><td colSpan={4} style={{ padding: 28, textAlign: "center", color: MUT, fontSize: 13 }}>No sales yet.</td></tr>
+                )}
+                {m.recent.map((s, i) => {
+                  const status = s.status ? String(s.status) : "Completed";
+                  return (
+                    <tr key={s.id} style={{ background: i % 2 ? "rgba(255,255,255,.03)" : "transparent", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
+                      <td style={{ padding: "13px 20px", fontFamily: MONO, fontSize: 13, color: MUT }}>{String(s.date).slice(0, 10)}</td>
+                      <td style={{ padding: "13px 20px", fontFamily: MONO, fontSize: 13, color: TXT }}>{s.by}</td>
+                      <td style={{ padding: "13px 20px", fontFamily: MONO, fontSize: 13, color: "#fbbf24" }}>Rs.{fmt(s.total)}</td>
+                      <td style={{ padding: "13px 20px", textAlign: "right" }}>
+                        <span style={{ display: "inline-block", background: "rgba(201, 141, 39, 0.14)", color: "#fbbf24", border: "1px solid rgba(245,158,11,.30)", fontSize: 11.5, fontWeight: 600, padding: "3px 12px", borderRadius: 999 }}>
+                          {status.charAt(0).toUpperCase() + status.slice(1)}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </>
   );

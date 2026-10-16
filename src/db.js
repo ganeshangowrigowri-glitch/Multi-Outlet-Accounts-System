@@ -623,31 +623,59 @@ export const deleteEmptyCashEntriesForDate = async (outlet, date) => {
     .like("description", "Empty %");
   if (error) console.error("deleteEmptyCashEntriesForDate:", error);
 };
-export const getCashBF = async (outlet) => {
-  const { data } = await supabase
-    .from("cash_ledger").select("debit,credit")
-    .eq("outlet_id", outlet).eq("balance_type", "bf");
-  if (!data || !data.length) return 0;
-  return data.reduce((s, r) => s + Number(r.debit) - Number(r.credit), 0);
-};
- 
-// Returns the date stored against the Opening Balance (B/F) row, if any.
-export const getCashBFDate = async (outlet) => {
-  const { data } = await supabase
-    .from("cash_ledger").select("date")
-    .eq("outlet_id", outlet).eq("balance_type", "bf").limit(1);
-  if (!data || !data.length) return null;
-  return data[0].date;
+// Month key of a cash B/F row: its stored period, else derived from its date
+// (existing rows saved before this fix have no period).
+const cashBFPeriod = (r) => r.period || String(r.date || "").slice(0, 7);
+
+const fetchCashBFRows = async (outlet) => {
+  const { data, error } = await supabase
+    .from("cash_ledger").select("id,date,period,debit,credit")
+    .eq("outlet_id", outlet).eq("balance_type", "bf")
+    .order("date", { ascending: true });
+  if (error) { console.error("fetchCashBFRows:", error); return null; }
+  return data || [];
 };
 
+// period = "YYYY-MM" → that month's B/F only (0 if none saved).
+// no period → the opening B/F of the books (earliest B/F row), exactly the
+// value every existing caller (calculations, reports) got before.
+export const getCashBF = async (outlet, period) => {
+  const rows = await fetchCashBFRows(outlet);
+  if (!rows || !rows.length) return 0;
+  const net = (r) => Number(r.debit) - Number(r.credit);
+  const target = period || cashBFPeriod(rows[0]);
+  return rows.filter(r => cashBFPeriod(r) === target).reduce((s, r) => s + net(r), 0);
+};
+
+export const getCashBFDate = async (outlet, period) => {
+  const rows = await fetchCashBFRows(outlet);
+  if (!rows || !rows.length) return null;
+  if (!period) return rows[0].date;
+  const hit = rows.find(r => cashBFPeriod(r) === period);
+  return hit ? hit.date : null;
+};
+
+// Writes ONLY the month of `date`. Inserts the new row first, then removes
+// that same month's older row(s), so a failure can never leave the month empty.
 export const setCashBF = async (outlet, amount, date) => {
-  await supabase.from("cash_ledger")
-    .delete().eq("outlet_id", outlet).eq("balance_type", "bf");
-  await supabase.from("cash_ledger").insert({
-    outlet_id: outlet, date: date || new Date().toISOString().split("T")[0],
+  const d = date || new Date().toISOString().split("T")[0];
+  const period = d.slice(0, 7);
+  const existing = await fetchCashBFRows(outlet);
+  if (existing === null) return false;
+  const oldIds = existing.filter(r => cashBFPeriod(r) === period).map(r => r.id);
+
+  const { error } = await supabase.from("cash_ledger").insert({
+    outlet_id: outlet, date: d, period,
     description: "Opening Balance", debit: amount > 0 ? amount : 0,
     credit: amount < 0 ? Math.abs(amount) : 0, balance_type: "bf",
   });
+  if (error) { console.error("setCashBF:", error); return false; }
+
+  if (oldIds.length) {
+    const { error: delErr } = await supabase.from("cash_ledger").delete().in("id", oldIds);
+    if (delErr) console.error("setCashBF (remove old same-month row):", delErr);
+  }
+  return true;
 };
 // ─── Cash Ledger — Day Sheet Balance (staff-entered actual cash count for
 // one specific date). Same delete-then-insert pattern as setCashBF, but

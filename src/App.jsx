@@ -297,14 +297,35 @@ function S_GL({ outlet }) {
   const [filterTo,   setFilterTo]   = useState("");
   const [cashTab, setCashTab] = useState("ledger"); // NEW — Stock/Excess Tab 2
 
+    // Editor state for the "Opening Balance (B/F)" card. Kept separate from
+  // bfBal/bfDate (the books' opening B/F used by the balance calculations),
+  // so browsing/editing a month never changes Cash Balance or Balance C/D.
+  const [bfEditAmt,  setBfEditAmt]  = useState("0");
+  const [bfEditDate, setBfEditDate] = useState(today());
+
+  const loadBaseBF = () =>
+    Promise.all([getCashBF(outlet), getCashBFDate(outlet)]).then(([b, d]) => {
+      setBF(b); setBFD(d || today()); setBfEditDate(d || today());
+    });
+
   useEffect(() => {
     getCashLedger(outlet).then(setL);
-    getCashBF(outlet).then(setBF);
-    getCashBFDate(outlet).then(d => setBFD(d || today()));
+    loadBaseBF();
   }, [outlet]);
 
+  // Load the B/F saved for the selected month (0 if none).
+  useEffect(() => {
+    if (!bfEditDate) return;
+    let cancelled = false;
+    getCashBF(outlet, bfEditDate.slice(0, 7)).then(v => { if (!cancelled) setBfEditAmt(String(v)); });
+    return () => { cancelled = true; };
+  }, [outlet, bfEditDate]);
+
   async function saveBF() {
-    await setCashBF(outlet, parseFloat(bfBal)||0, bfDate);
+    const ok = await setCashBF(outlet, parseFloat(bfEditAmt) || 0, bfEditDate);
+    if (!ok) { toast_("Failed to save B/F — check connection", "err"); return; }
+    const [b, d] = await Promise.all([getCashBF(outlet), getCashBFDate(outlet)]);
+    setBF(b); setBFD(d || today());
     toast_("B/F updated ✓");
   }
   async function saveManual() {
@@ -341,7 +362,8 @@ function S_GL({ outlet }) {
       (e.description !== "Daily Sale" || lastAutoIndexForDate[e.date] === idx)
     );
   })();
-    const balance = bfBal + dedupedLedger.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
+       const balance = bfBal + dedupedLedger.reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
+    // Top-card balance: restart from the latest Day Sheet count (same rule as the ledger)
 
   // Date-range filter for the ledger view only — does not affect Cash Balance above.
   const rangedLedger = dedupedLedger.filter(e =>
@@ -354,12 +376,19 @@ function S_GL({ outlet }) {
     .filter(e => e.balance_type === "daysheet")
     .map(e => ({ date: e.date, amt: (Number(e.debit)||0) - (Number(e.credit)||0) }))
     .sort((a, b) => a.date.localeCompare(b.date));
+      const lastDS = daySheetRows[daySheetRows.length - 1];
+  const cashBalanceNow = lastDS
+    ? lastDS.amt + dedupedLedger.filter(e => e.date > lastDS.date).reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0)
+    : balance;
 
   // Opening balance at the start of `date`: latest EARLIER Day Sheet wins,
   // otherwise the normal B/F behaviour.
+    // B/F only applies on/after its own date; earlier periods start from 0.
+  const bfFor = (date) => (!bfDate || date >= bfDate) ? (Number(bfBal) || 0) : 0;
+
   const openingOn = (date) => {
     const prev = [...daySheetRows].reverse().find(d => d.date < date);
-    return (prev ? prev.amt : bfBal) + dedupedLedger
+    return (prev ? prev.amt : bfFor(date)) + dedupedLedger
       .filter(e => e.date < date && (!prev || e.date > prev.date))
       .reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
   };
@@ -445,19 +474,19 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     <div className="sg3">
       <div className="sc"><div className="sl">Account</div><div className="sv">1001</div></div>
       <div className="sc"><div className="sl">Entries</div><div className="sv">{ledger.length}</div></div>
-      <div className="sc"><div className="sl">Cash Balance</div><div className="sa" style={{color:balance>=0?"var(--grn)":"var(--red)"}}>Rs.{fmt(balance)}</div></div>
+      <div className="sc"><div className="sl">Cash Balance</div><div className="sa" style={{color:cashBalanceNow>=0?"var(--grn)":"var(--red)"}}>Rs.{fmt(cashBalanceNow)}</div></div>
     </div>
     <div className="sg2">
       <div className="card">
        <div className="chd"><h3>Opening Balance (B/F)</h3></div>
         <div style={{padding:14,display:"flex",gap:8,alignItems:"flex-end"}}>
-          <div className="ff" style={{marginBottom:0,flex:1}}>
+            <div className="ff" style={{marginBottom:0,flex:1}}>
             <label>Date</label>
-            <input type="date" value={bfDate} onChange={e=>setBFD(e.target.value)}/>
+            <input type="date" value={bfEditDate} onChange={e=>setBfEditDate(e.target.value)}/>
           </div>
           <div className="ff" style={{marginBottom:0,flex:1}}>
             <label>Balance B/F (Rs.)</label>
-            <input type="number" value={bfBal} onChange={e=>setBF(e.target.value)}/>
+            <input type="number" value={bfEditAmt} onChange={e=>setBfEditAmt(e.target.value)}/>
           </div>
           <button className="btn btnd btnsm" onClick={saveBF}>{I.check} Set</button>
         </div>
