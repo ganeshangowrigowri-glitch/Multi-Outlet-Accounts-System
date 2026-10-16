@@ -91,7 +91,11 @@ const rptLineMatchesItem = (l, item) => {
   if (l.supplier && item.supplier && l.supplier !== item.supplier) return false;
   return true;
 };
-
+// Same DCSL empty-deduction rule as Current Status (S_Inventory.jsx)
+const EMPTY_PINTS_RATE = 40;
+const EMPTY_NIPS_RATE  = 20;
+const EMPTY_PINT_ITEMS = ["DES P", "DCA P"];
+const EMPTY_NIP_ITEMS  = ["DCA N", "DES N", "DSP N", "DEC N", "DDB N"];
 // Crate types tracked in S_Crates.jsx — duplicated here (keys only) so the
 // Empty Loan Register can build a "CRATE::type" row for each one without
 // importing the whole S_Crates component.
@@ -405,7 +409,8 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       // Insertion-order arrays — kept separate from the objects above
       const openingStockOrderIS = [];
       const endStockOrderIS     = [];
-            let totalSalesAmt = 0;
+      let totalSalesAmt = 0;
+      let emptyPintsQtyIS = 0, emptyNipsQtyIS = 0;
       outlets.forEach((o, oi) => {
         const [oSal, oPur, , oTrn] = arrayResults[oi];
         const oSales     = inMonth(oSal);
@@ -505,6 +510,13 @@ oTransfers.forEach(t => (t.items || t.lines || []).forEach(l => {
 
 const totalBottleSale = opening + totalPurchase + transferInQty - transferOutQty - inHandStock;
 
+// DCSL empty-deduction quantities (same items/rule as Current Status)
+if ((item.supplier || "").replace(/^\d{4}-/, "").toUpperCase().trim() === "DCSL") {
+  const nmE = (item.name || "").toUpperCase().trim().replace(/\s+/g, " ");
+  if (EMPTY_PINT_ITEMS.includes(nmE)) emptyPintsQtyIS += totalBottleSale;
+  if (EMPTY_NIP_ITEMS.includes(nmE))  emptyNipsQtyIS  += totalBottleSale;
+}
+
           // Sales Revenue = Current Status "Total Sale" (day-wise pricing):
           // each day's sold qty × the selling price effective on THAT day,
           // plus bottles not covered by saved daily "sold" at the latest price.
@@ -553,7 +565,7 @@ const totalBottleSale = opening + totalPurchase + transferInQty - transferOutQty
           }
         });
       });
-
+      const emptyDeductionIS = emptyPintsQtyIS * EMPTY_PINTS_RATE + emptyNipsQtyIS * EMPTY_NIPS_RATE;
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
 // Returns are already entered as negative "sold" qty in the daily sale,
 // so Sales Revenue is already net. Do NOT deduct them again.
@@ -1100,6 +1112,7 @@ Object.keys(cosByItem).forEach(code => {
       totalCurrentAssets = endStockVal + emptyStockVal + cashBal + bankBal + arBal;
       totalAssets = totalCurrentAssets;
       ownerEquity = totalAssets - totalCurrentLiab;
+      
 
       // crateLedgerAll is already accumulated above (all-time, not month-filtered,
       // since we need the cumulative balance as of period-end for the crate
@@ -1119,7 +1132,7 @@ Object.keys(cosByItem).forEach(code => {
       // Only commit this response if no newer load() has started since —
      // otherwise an older, slower call would clobber a newer, faster one.
      if (requestId !== loadIdRef.current) return;
-         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, bankPersonalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier,  positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy, visaCardInterestAdd, visaCardInterestLedger });
+         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, bankPersonalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier,  positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy, visaCardInterestAdd, visaCardInterestLedger, emptyDeductionIS, emptyPintsQtyIS, emptyNipsQtyIS });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -1147,7 +1160,8 @@ Object.keys(cosByItem).forEach(code => {
     sup6PctDiscBySup = {}, supVatDiscBySup = {}, totalSup6PctDisc = 0, totalSupVatDisc = 0,
     totalOtherInc,
         expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp,
-    visaCardInterestAdd = 0,
+        visaCardInterestAdd = 0,
+    emptyDeductionIS = 0,
     // Opening Stock / Purchases / End Stock now come from Current Status
     // (opening qty, total purchase qty, in-hand stock qty × each item's
     // outlet unit cost) instead of Daily Sale's first/last saved date.
@@ -1166,7 +1180,8 @@ Object.keys(cosByItem).forEach(code => {
   // Status-based figures only — no transfer in/out term, per spec).
   // Cost of Sales = Opening Stock + Purchases + Transfer In − Transfer Out − End Stock
    const costOfSales = openingStockVal + totalPurchase + transInAmt - transOutAmt - endStockVal;
-   const grossProfit  = netSalesAmt - costOfSales;
+      const grossProfitBeforeEmpty = netSalesAmt - costOfSales;
+   const grossProfit  = grossProfitBeforeEmpty - emptyDeductionIS;
     const totalIncome  = grossProfit + totalOtherInc;
   // Visa card interest is part of Finance Charge here (added once, not in d.totalExp)
   const expFinanceIS = expFinance + visaCardInterestAdd;
@@ -1222,7 +1237,9 @@ Object.keys(cosByItem).forEach(code => {
         })}
 
       <TR label="Cost of Sales" val={costOfSales} neg total />
-      <TR label="Gross Profit / (Loss)" val={grossProfit} bold total />
+      <TR label="Gross Profit / (Loss)" val={grossProfitBeforeEmpty} bold total />
+      {emptyDeductionIS !== 0 && <TR label="(-) Empty Deduction" val={emptyDeductionIS} neg indent={1} />}
+      {emptyDeductionIS !== 0 && <TR label="Gross Profit / (Loss) " val={grossProfit} bold total />}
 
       {/* Other Income */}
       <SH>Other Income</SH>
@@ -1377,8 +1394,10 @@ function BalanceSheet({ d, outlet, month }) {
     // selected month — no duplicate raw-data computation, just the same
     // combination Income Statement itself uses.
 
-  const costOfSalesIS = (d.openingStockValIS || 0) + (d.totalPurchaseIS || 0) - (d.endStockValIS || 0);
-  const grossProfitIS = (d.netSalesAmt || 0) - costOfSalesIS;
+   const costOfSalesIS = (d.openingStockValIS || 0) + (d.totalPurchaseIS || 0)
+    + (d.transInAmt || 0) - (d.transOutAmt || 0) - (d.endStockValIS || 0);
+  // Same Gross Profit as Income Statement: Net Sales − Cost of Sales − DCSL Empty Deduction
+  const grossProfitIS = (d.netSalesAmt || 0) - costOfSalesIS - (d.emptyDeductionIS || 0);
   const totalIncomeIS = grossProfitIS + (d.totalOtherInc || 0);
     const netProfit = totalIncomeIS - ((d.totalExp || 0) + (d.visaCardInterestAdd || 0));
 
