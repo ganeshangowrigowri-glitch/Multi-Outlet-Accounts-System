@@ -4834,13 +4834,11 @@ export default function Reports({ user }) {
 
   const reportList = [
     { id: "income",    label: "Income Statement",      icon: "📊" },
-    { id: "balance",   label: "Balance Sheet",         icon: "⚖️"  },
     { id: "capital",   label: "Capital Sheet",         icon: "💰" },
     { id: "cashflow",  label: "Cash Flow Statement",   icon: "💸" },
     { id: "sales",     label: "Sales Summary",         icon: "📈" },
     { id: "expenses",  label: "Expense Summary",       icon: "📉" },
     { id: "purchase",  label: "Purchase Summary",      icon: "🛒" },
-    { id: "cos",       label: "Cost of Sales Summary", icon: "📦" },
     { id: "emptybott", label: "Empty Bottles",         icon: "🍾" },
     { id: "emptyloan", label: "Empty Loan Register",   icon: "🔁" },
     { id: "ugbook",    label: "UG Book",               icon: "📒" },
@@ -4899,13 +4897,11 @@ export default function Reports({ user }) {
         ) : (
           <>
             {report==="income"    && <IncomeStatement    d={d} outlet={effectiveOutlet} month={month}/>}
-            {report==="balance"   && <BalanceSheet       d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="capital"   && <CapitalSheet       d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="cashflow"  && <CashFlowStatement  d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="sales"     && <SalesSummary       d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="expenses"  && <ExpenseSummary     d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="purchase"  && <PurchaseSummary    d={d} outlet={effectiveOutlet} month={month}/>}
-            {report==="cos"       && <CostOfSalesSummary d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="emptybott" && <EmptyBottles       d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="emptyloan" && <EmptyLoanRegister  d={d} outlet={effectiveOutlet} month={month} refresh={refresh} recordEdit={recordEmptyLoanEdit}/>}
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
