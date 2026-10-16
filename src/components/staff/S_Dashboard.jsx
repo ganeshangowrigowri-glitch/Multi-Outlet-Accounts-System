@@ -194,7 +194,68 @@ function Ring({ segs, size = 80 }) {
     </svg>
   );
 }
+function SalesBars({ data }) {
+  const W = 640, H = 150, PX = 24, PT = 34, PB = 24;
+  const iw = W - PX * 2, ih = H - PT - PB;
+  const max = Math.max(...data.map((d) => d.value), 0) || 1;
+  const slot = iw / Math.max(data.length, 1);
+  const bw = Math.min(40, slot * 0.55), rx = bw / 2, ry = 4.5;
+  const base = PT + ih;
+  const short = (v) => (v >= 1e6 ? `${(v / 1e6).toFixed(2)}M` : `${(v / 1e3).toFixed(0)}k`);
 
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+      <defs>
+        <linearGradient id="sd-cyl" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%"   stopColor="#a66a0c" />
+          <stop offset="30%"  stopColor="#fbd96a" />
+          <stop offset="55%"  stopColor="#f2b223" />
+          <stop offset="100%" stopColor="#8f5a08" />
+        </linearGradient>
+        <linearGradient id="sd-arrow" x1="0" y1="1" x2="1" y2="0">
+          <stop offset="0%"   stopColor="#f2b223" stopOpacity="0" />
+          <stop offset="100%" stopColor="#e0a31a" stopOpacity=".55" />
+        </linearGradient>
+        <radialGradient id="sd-coin" cx=".35" cy=".3" r=".8">
+          <stop offset="0%" stopColor="#fff1a8" />
+          <stop offset="100%" stopColor="#d99a12" />
+        </radialGradient>
+      </defs>
+
+      {/* faint rising arrow (decorative, not data) */}
+      <path d={`M${PX},${base - 4} C${W * 0.45},${base - 8} ${W * 0.7},${PT + 6} ${W - PX - 26},${PT - 8}`}
+            fill="none" stroke="url(#sd-arrow)" strokeWidth="5" strokeLinecap="round" />
+      <polygon points={`${W - PX - 34},${PT - 18} ${W - PX - 8},${PT - 14} ${W - PX - 22},${PT + 4}`}
+               fill="#e0a31a" opacity=".55" />
+
+      <line x1={PX} x2={W - PX} y1={base} y2={base} stroke="rgba(255,255,255,.15)" />
+
+      {data.map((d, i) => {
+        const h = Math.max((d.value / max) * ih, 8);
+        const cx = PX + slot * i + slot / 2;
+        const x = cx - rx, y = base - h;
+        const last = i === data.length - 1;
+        return (
+          <g key={d.id ?? i}>
+            <ellipse cx={cx} cy={base} rx={rx} ry={ry} fill="#8f5a08" />
+            <rect x={x} y={y} width={bw} height={h} fill="url(#sd-cyl)">
+              <title>{`${d.date}: Rs.${fmt(d.value)}`}</title>
+            </rect>
+            <ellipse cx={cx} cy={y} rx={rx} ry={ry} fill="#fff0a6" />
+            {last && (
+              <g>
+                <circle cx={cx} cy={y - 11} r="9" fill="url(#sd-coin)" stroke="#c98a0c" strokeWidth="1" />
+                <text x={cx} y={y - 7.5} textAnchor="middle" fontSize="10" fontWeight="700" fill="#fff8d6">$</text>
+              </g>
+            )}
+            <text x={cx} y={y - (last ? 26 : 9)} textAnchor="middle" fontSize="8.5" fontWeight="600" fill="#fde68a">{short(d.value)}</text>
+            <text x={cx} y={H - 8} textAnchor="middle" fontSize="8.5" fill="#8a8a96">{d.date.slice(5)}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
 /* ───────────────────────── Main component ─────────────────────────
    onNavigate(key) is optional. Keys used by the buttons:
    "sales" · "expenses" · "bank" · "ap" · "settings"                  */
@@ -411,40 +472,17 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
             </div>
           </Card>
         </div>
-
-        {/* ── Recent sales ── */}
+                 {/* ── Recent sales (chart) ── */}
         <div style={{ background: SURF, border: `1px solid ${BORD}`, borderRadius: 16, overflow: "hidden" }}>
-          <div style={{ padding: "16px 20px", fontFamily: SERIF, fontSize: 17, fontWeight: 700, color: "var(--txt, #e6e9f2)" }}>Recent Sales</div>
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
-              <thead>
-                <tr style={{ background: "rgba(255,255,255,.04)" }}>
-                  {["Date", "By", "Amount", "Status"].map((h, i) => (
-                    <th key={h} style={{ padding: "11px 20px", fontSize: 10.5, fontWeight: 600, letterSpacing: ".09em", textTransform: "uppercase", color: MUT, textAlign: i === 3 ? "right" : "left" }}>{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {!loading && m.recent.length === 0 && (
-                  <tr><td colSpan={4} style={{ padding: 28, textAlign: "center", color: MUT, fontSize: 13 }}>No sales yet.</td></tr>
-                )}
-                {m.recent.map((s, i) => {
-                  const status = s.status ? String(s.status) : "Completed";
-                  return (
-                    <tr key={s.id} style={{ background: i % 2 ? "rgba(255,255,255,.03)" : "transparent", borderBottom: "1px solid rgba(255,255,255,.04)" }}>
-                      <td style={{ padding: "13px 20px", fontFamily: MONO, fontSize: 13, color: MUT }}>{String(s.date).slice(0, 10)}</td>
-                      <td style={{ padding: "13px 20px", fontFamily: MONO, fontSize: 13, color: TXT }}>{s.by}</td>
-                      <td style={{ padding: "13px 20px", fontFamily: MONO, fontSize: 13, color: "#fbbf24" }}>Rs.{fmt(s.total)}</td>
-                      <td style={{ padding: "13px 20px", textAlign: "right" }}>
-                        <span style={{ display: "inline-block", background: "rgba(201, 141, 39, 0.14)", color: "#fbbf24", border: "1px solid rgba(245,158,11,.30)", fontSize: 11.5, fontWeight: 600, padding: "3px 12px", borderRadius: 999 }}>
-                          {status.charAt(0).toUpperCase() + status.slice(1)}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div style={{ padding: "10px 16px 0", fontFamily: SERIF, fontSize: 14, fontWeight: 700, color: TXT }}>Recent Sales</div>
+          <div style={{ padding: "2px 16px 8px", maxWidth: 760 }}>
+            {!loading && m.recent.length === 0 ? (
+              <div style={{ padding: 28, textAlign: "center", color: MUT, fontSize: 13 }}>No sales yet.</div>
+            ) : (
+              <SalesBars
+                data={[...m.recent].reverse().map((s) => ({ id: s.id, date: String(s.date).slice(0, 10), value: Number(s.total) || 0 }))}
+              />
+            )}
           </div>
         </div>
       </div>
