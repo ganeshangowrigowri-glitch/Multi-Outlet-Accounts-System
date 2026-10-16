@@ -46,7 +46,8 @@ const net = (rows) => rows.reduce((a, r) => a + ((Number(r.debit) || 0) - (Numbe
 
 // Expense category: adjust the field names here if your expenses table uses another column
 const catOf = (e) =>
-  String(e.category || e.expense_type || e.type || e.head || e.account || "Uncategorised").trim() || "Uncategorised";
+  
+String(e.category || e.expense_type || e.type || e.head || e.account || e.account_id || "Uncategorised").trim() || "Uncategorised";
 // Same rule as the In Hand Cash page's "Cash Balance": opening B/F (earliest
 // month only) + all entries, Daily Sale de-duplicated per date, and
 // Day Sheet count rows excluded.
@@ -197,7 +198,7 @@ function Ring({ segs, size = 80 }) {
 /* ───────────────────────── Main component ─────────────────────────
    onNavigate(key) is optional. Keys used by the buttons:
    "sales" · "expenses" · "bank" · "ap" · "settings"                  */
-const EMPTY = { sales: [], expenses: [], cash: [], bank: [], apInv: [], apPay: [], ar: [] };
+const EMPTY = { sales: [], expenses: [], cash: [], bank: [], apInv: [], apPay: [], ar: [], card: [] };
 
 export default function S_Dashboard({ outlet, user, onNavigate }) {
   const [data, setData]       = useState(EMPTY);
@@ -224,14 +225,15 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
       q("bank_ledger"),
       q("ap_invoices"),
       q("ap_payments"),
-      q("ar_ledger"),
+            q("ar_ledger"),
+      q("card_ledger"),
     ])
       .then((res) => {
         if (cancelled) return;
         const failed = res.find((r) => r.error);
         if (failed) setError(failed.error.message);
-        const [sales, expenses, cash, bank, apInv, apPay, ar] = res.map((r) => r.data || []);
-        setData({ sales, expenses, cash, bank, apInv, apPay, ar });
+       const [sales, expenses, cash, bank, apInv, apPay, ar, card] = res.map((r) => r.data || []);
+        setData({ sales, expenses, cash, bank, apInv, apPay, ar, card });
       })
       .catch((e) => !cancelled && setError(e.message))
       .finally(() => !cancelled && setLoading(false));
@@ -253,8 +255,13 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
     }
 
     // Expense breakdown by category (top 6 + Other)
+        // Current month only; card interest (from card_ledger) counts as an expense, same as Reports
+    const monthExp      = data.expenses.filter((e) => String(e.date).slice(0, 7) === monthKey);
+    const monthInterest = sum(data.card.filter((c) => String(c.date).slice(0, 7) === monthKey), "interest");
+    const monthTotal    = sum(monthExp, "amount") + monthInterest;
     const cats = {};
-    data.expenses.forEach((e) => { cats[catOf(e)] = (cats[catOf(e)] || 0) + (Number(e.amount) || 0); });
+    monthExp.forEach((e) => { cats[catOf(e)] = (cats[catOf(e)] || 0) + (Number(e.amount) || 0); });
+    if (monthInterest > 0) cats["Card Interest"] = monthInterest;
     const sorted = Object.entries(cats).map(([label, value]) => ({ label, value })).sort((a, b) => b.value - a.value);
     const top = sorted.slice(0, 6);
     const rest = sorted.slice(6).reduce((a, c) => a + c.value, 0);
@@ -269,8 +276,8 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
       // newest first (already sorted by the query); skip zero-value sales
       recent: data.sales.filter((s) => Number(s.total) > 0).slice(0, 8),
       todaySales: sum(data.sales.filter((s) => String(s.date).slice(0, 10) === todayStr), "total"),
-      mExp:       sum(data.expenses.filter((e) => String(e.date).slice(0, 7) === monthKey), "amount"),
-      expTotal:   sum(data.expenses, "amount"),
+       mExp:       monthTotal,
+      expTotal:   monthTotal,
       cashBal:    cashNet(data.cash),
       bankBal:    net(data.bank),
       apOut:      sum(data.apInv, "amount") - sum(data.apPay, "amount"),
