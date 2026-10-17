@@ -286,8 +286,8 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
       q("bank_ledger"),
       q("ap_invoices"),
       q("ap_payments"),
-            q("ar_ledger"),
-           q("card_ledger"),
+      q("ar_ledger"),
+      q("card_ledger"),
       supabase.from("suppliers").select("*"),
     ])
       .then((res) => {
@@ -336,7 +336,14 @@ export default function S_Dashboard({ outlet, user, onNavigate }) {
     return {
       trend, segs,
       // newest first (already sorted by the query); skip zero-value sales
-      recent: data.sales.filter((s) => Number(s.total) > 0).slice(0, 8),
+      recent: (() => {
+  // one record per date: the latest saved (query is date-desc; later rows of the same date are duplicates)
+  const seen = new Set();
+  return data.sales
+    .filter((s) => Number(s.total) > 0 && (s.items || []).some((r) => !r.isEmptyItem))
+    .filter((s) => { const d = String(s.date).slice(0, 10); if (seen.has(d)) return false; seen.add(d); return true; })
+    .slice(0, 8);
+    })(),
       todaySales: sum(data.sales.filter((s) => String(s.date).slice(0, 10) === todayStr), "total"),
        mExp:       monthTotal,
       expTotal:   monthTotal,
