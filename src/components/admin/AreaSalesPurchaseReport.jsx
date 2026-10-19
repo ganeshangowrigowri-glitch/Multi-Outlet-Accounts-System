@@ -467,9 +467,14 @@ const stickyTotalRow = {
 
   return (
     <>
-    <style>{`
+        <style>{`
   @media print {
     @page { size: landscape; margin: 6mm; }
+
+    * {
+      -webkit-print-color-adjust: exact !important;
+      print-color-adjust: exact !important;
+    }
 
     .asp-print-scroll {
       overflow: visible !important;
@@ -477,31 +482,103 @@ const stickyTotalRow = {
       height: auto !important;
     }
 
+    /* Title bar: white background, black text on paper */
+    .asp-heading-wrap {
+      background: #fff !important;
+      color: #000 !important;
+      border-bottom: 1.5pt solid #000 !important;
+      padding: 4pt 0 !important;
+    }
+    .asp-heading-wrap *,
+    .asp-title {
+      color: #000 !important;
+      background: transparent !important;
+    }
+    .asp-heading-wrap .asp-badge {
+      border: 0.5pt solid #000 !important;
+      padding: 1pt 5pt !important;
+      font-size: 8pt !important;
+    }
+
+    /* Fixed layout: equal item columns, wider Outlet column, narrow Total column */
     .asp-tbl {
       width: 100% !important;
       max-width: none !important;
-      table-layout: auto !important;
+      table-layout: fixed !important;
       border-collapse: collapse !important;
     }
+    .asp-tbl th:first-child,
+    .asp-tbl td:first-child {
+      width: 28mm !important;
+      text-align: left !important;
+    }
+    .asp-tbl th:last-child,
+    .asp-tbl td:last-child {
+      width: 12mm !important;
+    }
 
-    /* Compact, column-count-aware sizing instead of relying on browser print-scale */
+    /* Compact, column-count-aware sizing */
     .asp-tbl th,
     .asp-tbl td {
-      padding: 2pt 4pt !important;
-      font-size: clamp(7pt, calc(11pt - var(--asp-print-cols, 8) * 0.12pt), 10pt) !important;
-      line-height: 1.25 !important;
+      padding: 2pt 1pt !important;
+      font-size: clamp(6.5pt, calc(10pt - var(--asp-print-cols, 8) * 0.1pt), 9pt) !important;
+      line-height: 1.2 !important;
+      border: 0.5pt solid #000 !important;
+      color: #000 !important;
+      background: #fff !important;
+      text-align: center !important;
+      overflow: hidden !important;
     }
 
-    /* Brand/item header names wrap instead of forcing extra column width */
-    .asp-tbl th {
+        /* Item names: horizontal, wrap onto short lines inside the narrow column */
+    .asp-tbl thead th:not(:first-child):not(:last-child) {
+      writing-mode: horizontal-tb !important;
+      transform: none !important;
       white-space: normal !important;
-      word-break: break-word !important;
-      vertical-align: bottom;
+      word-break: normal !important;
+      overflow-wrap: anywhere !important;
+      text-align: center !important;
+      vertical-align: bottom !important;
+      height: auto !important;
+      padding: 2pt 0.5pt !important;
+      font-size: 5.5pt !important;
+      line-height: 1.1 !important;
+      letter-spacing: -0.1pt !important;
     }
 
-    /* Outlet names and values stay on one line for readability */
+    /* Number cells: slightly smaller so 4-5 digit values fit the column */
+    .asp-tbl tbody td:not(:first-child),
+    .asp-tbl tfoot td:not(:first-child) {
+      font-size: 6pt !important;
+      padding: 2pt 0 !important;
+      letter-spacing: -0.2pt !important;
+    }
+
+    /* Outlet / Total header cells stay horizontal */
+    .asp-tbl thead th:first-child,
+    .asp-tbl thead th:last-child {
+      white-space: nowrap !important;
+      vertical-align: bottom !important;
+      font-weight: 800 !important;
+    }
+
+    /* Outlet names and values stay on one line */
     .asp-tbl td {
       white-space: nowrap !important;
+    }
+    .asp-tbl td:first-child {
+      font-weight: 700 !important;
+    }
+
+    /* Total column + total row: light grey, bold, black text */
+    .asp-tbl td:last-child,
+    .asp-tbl tfoot td {
+      background: #eee !important;
+      color: #000 !important;
+      font-weight: 800 !important;
+    }
+    .asp-tbl tfoot td {
+      border-top: 1.5pt solid #000 !important;
     }
 
     /* Sticky positioning is meaningless on paper and can break layout */
