@@ -4110,8 +4110,7 @@ const assetOthersEntries = assetOthersCat
           ["Empty Bottle Stock", d.emptyStockVal],
           ["In Hand Cash", d.cashBal],
            ...bankAccountRows.map(r => [r.label, r.balance]),
-          ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance]),
-          ...assetRows.map(r => [r.label, r.balance]),
+           ...cardAccountRows.map(r => [`${r.label} (Card)`, r.balance]),
           ].map(([label, val], i) => (
          <div key={`${label}-${i}`} style={{ flex: "1 1 160px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8, padding: "12px 14px" }}>
          <div style={{ fontSize: 10.5, color: "var(--mut)", textTransform: "uppercase", letterSpacing: ".04em" }}>{label}</div>
