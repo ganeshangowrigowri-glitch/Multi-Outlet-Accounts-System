@@ -1,6 +1,9 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, Fragment } from "react";
 import Reports from "../Reports";
 import { I } from "../../utils/icons";
+import ExcelJS from "exceljs";
+import { saveAs } from "file-saver";
+import { printA4, printFull } from "../../utils/printMode";
 import { OUTLETS, SUP_COLOR } from "../../data/seeds";
 import Toast from "../shared/Toast";
 import UserManagement from "./UserManagement";
@@ -16,8 +19,9 @@ import {
   getClerks, saveClerks, addClerk, updateClerk, deleteClerk,
   ensureOutlets, addOutlet, deleteOutlet, sortOutletsByOrder,
   getInventoryMaster,
-  getSales, getExpenses, getCashLedger, getCOA
+  getSales, getExpenses, getCOA
 } from "../../db";
+import { AREAS, getOutletArea } from "../../data/areas";
 
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
 const monthOf = d => (d||"").slice(0,7);
@@ -53,12 +57,13 @@ export default function AdminDashboard({ user, onLogout }) {
   
   const [toast,      setToast]     = useState(null);
   const [search,     setSearch]    = useState("");
-  const [selOutlet,  setSelOutlet] = useState("");
-
-  // outlet data viewer
-  const [odSales,  setOdSales]  = useState([]);
-  const [odExp,    setOdExp]    = useState([]);
-  const [odCash,   setOdCash]   = useState([]);
+  // outlet data viewer — VAT & SSCL expense summary (area + date range)
+  const todayStr = new Date().toISOString().split("T")[0];
+  const [odArea,    setOdArea]    = useState("ALL");
+  const [odFrom,    setOdFrom]    = useState(() => todayStr.slice(0,7) + "-01");
+  const [odTo,      setOdTo]      = useState(todayStr);
+  const [odExpMap,  setOdExpMap]  = useState({});   // { outlet: expenses[] } for outlets in scope
+  const [odLoading, setOdLoading] = useState(false);
   const [loading,  setLoading]  = useState(true);
 
   const t_ = (msg, type="ok") => setToast({ msg, type });
@@ -76,26 +81,119 @@ useEffect(() => {
     setCR(c);
     const list = outletList.length ? outletList : OUTLETS;
     setOR(list);
-    setSelOutlet(list[0] || "");
     setInv(i);
     setAllCOA(coa);
   }).catch(err => {
     console.error("Initial load failed:", err);
     // Fall back to seed data so the UI still renders
     setOR(OUTLETS);
-    setSelOutlet(OUTLETS[0] || "");
   }).finally(() => {
     setLoading(false);  // ← always runs, even on error
   });
 }, []);
 
-  // ── load outlet data when selOutlet changes ──
+  // ── Outlet Data: outlets in the selected area (existing area→outlet mapping) ──
+  const odOutlets = useMemo(
+    () => odArea === "ALL" ? outlets : outlets.filter(o => getOutletArea(o) === odArea),
+    [outlets, odArea]
+  );
+  const odOutletKey = odOutlets.join("\u0001");
+
+  // ── Outlet Data: load expenses (existing getExpenses) for outlets in scope.
+  //    Reloads when the area/outlet set changes or the page is (re)opened, so
+  //    saved edits elsewhere are never shown stale. Date range is applied
+  //    client-side below, so changing dates needs no refetch. ──
   useEffect(() => {
-    if (!selOutlet) return;
-    getSales(selOutlet).then(setOdSales);
-    getExpenses(selOutlet).then(setOdExp);
-    getCashLedger(selOutlet).then(setOdCash);
-  }, [selOutlet]);
+    if (page !== "odata") return;
+    let cancelled = false;
+    setOdLoading(true);
+    Promise.all(odOutlets.map(o =>
+      getExpenses(o).then(r => [o, asArray(r)]).catch(() => [o, []])
+    )).then(pairs => {
+      if (cancelled) return;
+      const m = {};
+      pairs.forEach(([o, r]) => { m[o] = r; });
+      setOdExpMap(m);
+    }).finally(() => { if (!cancelled) setOdLoading(false); });
+    return () => { cancelled = true; };
+  }, [page, odOutletKey]);
+
+  // ── Outlet Data: VAT / SSCL classification. Same source as Expense Summary:
+  //    expenses grouped by account_id → Chart of Accounts name, restricted to
+  //    the Income Statement expense range (5501–5999). Each row counts once. ──
+  const odRangeInvalid = !!(odFrom && odTo && odFrom > odTo);
+  const odSummary = useMemo(() => {
+    const coaName = id => (allCOA.find(a => a.id === id)?.name) || "";
+    const seen = new Set();
+    const perOutlet = {};
+    odOutlets.forEach(o => { perOutlet[o] = { outlet:o, vat:0, sscl:0, rows:[] }; });
+    if (!odRangeInvalid) {
+      odOutlets.forEach(o => {
+        (odExpMap[o] || []).forEach(e => {
+          if (!e.date || (odFrom && e.date < odFrom) || (odTo && e.date > odTo)) return;
+          const aid = e.account_id || e.acc || "";
+          if (!(aid >= "5501" && aid <= "5999")) return;
+          const nm = coaName(aid);
+          const kind = /\bsscl\b/i.test(nm) ? "sscl" : /\bvat\b/i.test(nm) ? "vat" : null;
+          if (!kind) return;
+          const key = e.id != null ? `id:${e.id}` : `${o}|${e.date}|${aid}|${e.amount}|${e.ref||""}|${e.description||""}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          const amt = Number(e.amount) || 0;
+          perOutlet[o][kind] += amt;
+          perOutlet[o].rows.push({ key, date:e.date, acct:nm, desc:e.description||"", vat: kind==="vat"?amt:0, sscl: kind==="sscl"?amt:0 });
+        });
+      });
+    }
+    const list = odOutlets.map(o => {
+      const p = perOutlet[o];
+      p.rows.sort((a,b)=>a.date.localeCompare(b.date));
+      return p;
+    });
+    const vat  = list.reduce((a,p)=>a+p.vat,0);
+    const sscl = list.reduce((a,p)=>a+p.sscl,0);
+    return { list, vat, sscl, total: vat + sscl };
+  }, [odOutlets, odExpMap, allCOA, odFrom, odTo, odRangeInvalid]);
+    async function downloadOdExcel() {
+    const areaLabel = odArea === "ALL" ? "All Areas" : odArea;
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("VAT & SSCL");
+    const bd = { top:{style:"thin",color:{argb:"FFCCCCCC"}}, left:{style:"thin",color:{argb:"FFCCCCCC"}}, bottom:{style:"thin",color:{argb:"FFCCCCCC"}}, right:{style:"thin",color:{argb:"FFCCCCCC"}} };
+    ws.columns = [{width:26},{width:14},{width:30},{width:34},{width:16},{width:16}];
+    const head = row => row.eachCell(c => {
+      c.font = { bold:true, color:{argb:"FFFFFFFF"} };
+      c.fill = { type:"pattern", pattern:"solid", fgColor:{argb:"FF2B2B4A"} };
+      c.alignment = { horizontal:"center" }; c.border = bd;
+    });
+    const money = (row, cols) => cols.forEach(n => { const c=row.getCell(n); c.numFmt="#,##0.00"; c.alignment={horizontal:"right"}; });
+
+    ws.mergeCells(1,1,1,6);
+    ws.getCell(1,1).value = `VAT and SSCL Expenses Summary | ${areaLabel} | ${odFrom} to ${odTo}`;
+    ws.getCell(1,1).font = { bold:true, size:13 };
+    ws.addRow([]);
+
+    head(ws.addRow(["Outlet","VAT","SSCL","Total"]));
+    odSummary.list.forEach(p => {
+      const r = ws.addRow([p.outlet, p.vat, p.sscl, p.vat + p.sscl]);
+      r.eachCell(c => { c.border = bd; }); money(r,[2,3,4]);
+    });
+    const tr = ws.addRow(["Area Total", odSummary.vat, odSummary.sscl, odSummary.total]);
+    tr.eachCell(c => { c.font={bold:true}; c.border={...bd, top:{style:"double"}}; }); money(tr,[2,3,4]);
+
+    ws.addRow([]);
+    head(ws.addRow(["Outlet","Date","Account","Description","VAT","SSCL"]));
+    odSummary.list.filter(p => p.rows.length).forEach(p => {
+      p.rows.forEach(x => {
+        const r = ws.addRow([p.outlet, x.date, x.acct, x.desc, x.vat || null, x.sscl || null]);
+        r.eachCell(c => { c.border = bd; }); money(r,[5,6]);
+      });
+      const st = ws.addRow([`${p.outlet} — Total`, "", "", "", p.vat, p.sscl]);
+      st.eachCell(c => { c.font={bold:true}; c.border=bd; c.fill={type:"pattern",pattern:"solid",fgColor:{argb:"FFEFEFEF"}}; }); money(st,[5,6]);
+    });
+
+    const buf = await wb.xlsx.writeBuffer();
+    saveAs(new Blob([buf]), `VAT_SSCL_${areaLabel.replace(/[^\w-]+/g,"_")}_${odFrom}_to_${odTo}.xlsx`);
+  }
 
   // ── clerk CRUD passed down to UserManagement ──
   async function setClerks(newClerks) {
@@ -405,42 +503,106 @@ const salesStats = useMemo(() => {
           )}
 
           {/* ── OUTLET DATA ── */}
-          {page==="odata" && (
+                    {page==="odata" && (
             <>
-              <div className="ctrls">
-                <label style={{fontSize:11,fontWeight:600,color:"var(--mut)"}}>View Outlet:</label>
-                <select style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none",width:200}}
-                  value={selOutlet} onChange={e=>setSelOutlet(e.target.value)}>
-                  {outlets.map(o=><option key={o}>{o}</option>)}
-                </select>
-              </div>
-              <div className="sg4">
-                <div className="sc"><div className="sl">Month Sales</div><div className="sa cg">Rs.{fmt(odSales.filter(s=>monthOf(s.date)===mo).reduce((a,s)=>a+(s.total||0),0))}</div></div>
-                <div className="sc"><div className="sl">Month Expenses</div><div className="sa cr">Rs.{fmt(odExp.filter(e=>monthOf(e.date)===mo).reduce((a,e)=>a+(e.amount||0),0))}</div></div>
-                <div className="sc"><div className="sl">Cash Balance</div><div className="sa cg">Rs.{fmt(odCash.reduce((a,t)=>a+(t.debit||0)-(t.credit||0),0))}</div></div>
-                <div className="sc"><div className="sl">Total Sales Records</div><div className="sv">{odSales.length}</div></div>
-              </div>
-              <div className="sg2">
-                <div className="card">
-                  <div className="chd"><h3>Recent Sales — {selOutlet}</h3></div>
-                  <table className="tbl">
-                    <thead><tr><th>Date</th><th>Payment</th><th className="rt">Amount</th></tr></thead>
-                    <tbody>
-                      {odSales.length===0&&<tr><td colSpan={3}><div className="empty">No sales recorded.</div></td></tr>}
-                      {odSales.slice(0,8).map(s=><tr key={s.id}><td className="mono">{s.date}</td><td>{s.payment_method}</td><td className="rt mono cg bold">Rs.{fmt(s.total)}</td></tr>)}
-                    </tbody>
-                  </table>
+              <style>{`
+                @media print {
+                  .sidebar, .topbar, .sb-backdrop, .od-hide-print { display: none !important; }
+                  .main, .page, .page-content { margin: 0 !important; padding: 0 !important; width: 100% !important; max-width: none !important; }
+                }
+              `}</style>
+             <div className="ctrls no-print" style={{alignItems:"flex-end",gap:12,flexWrap:"wrap"}}>
+                <div>
+                  <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",color:"var(--mut)",display:"block",marginBottom:3}}>Area</label>
+                  <select style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none",minWidth:200}} value={odArea} onChange={e=>setOdArea(e.target.value)}>
+                    <option value="ALL">All Areas</option>
+                    {AREAS.map(a=><option key={a} value={a}>{a}</option>)}
+                  </select>
                 </div>
-                <div className="card">
-                  <div className="chd"><h3>Recent Expenses — {selOutlet}</h3></div>
-                  <table className="tbl">
-                    <thead><tr><th>Date</th><th>Description</th><th className="rt">Amount</th></tr></thead>
-                    <tbody>
-                      {odExp.length===0&&<tr><td colSpan={3}><div className="empty">No expenses.</div></td></tr>}
-                      {odExp.slice(0,8).map(e=><tr key={e.id}><td className="mono">{e.date}</td><td style={{fontSize:11}}>{e.description}</td><td className="rt mono cr bold">Rs.{fmt(e.amount)}</td></tr>)}
-                    </tbody>
-                  </table>
+                <div>
+                  <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",color:"var(--mut)",display:"block",marginBottom:3}}>From Date</label>
+                  <input type="date" style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}} value={odFrom} max={odTo||undefined} onChange={e=>setOdFrom(e.target.value)}/>
                 </div>
+                  <div>
+                  <label style={{fontSize:10,fontWeight:700,letterSpacing:".07em",textTransform:"uppercase",color:"var(--mut)",display:"block",marginBottom:3}}>To Date</label>
+                  <input type="date" style={{padding:"6px 10px",background:"var(--s2)",border:"1px solid var(--bdr)",borderRadius:7,fontSize:12.5,color:"var(--txt)",outline:"none"}} value={odTo} min={odFrom||undefined} onChange={e=>setOdTo(e.target.value)}/>
+                </div>
+                <div style={{display:"flex",gap:8,marginLeft:"auto"}}>
+                  <button className="btn btng btnsm" onClick={downloadOdExcel}>Download Excel</button>
+                  <button className="btn btnd btnsm" onClick={printA4}>{I.print} Print (A4)</button>
+                  <button className="btn btnd btnsm" onClick={printFull}>{I.print} Print (8K)</button>
+                </div>
+              </div>
+              {odRangeInvalid && (
+                <div style={{padding:"8px 12px",marginBottom:12,border:"1px solid var(--red)",borderRadius:7,color:"var(--red)",fontSize:12}}>
+                  From Date cannot be later than To Date.
+                </div>
+              )}
+                <div className="sg4 od-hide-print">
+                <div className="sc"><div className="sl">VAT Total</div><div className="sa cr">Rs.{fmt(odSummary.vat)}</div></div>
+                <div className="sc"><div className="sl">SSCL Total</div><div className="sa cr">Rs.{fmt(odSummary.sscl)}</div></div>
+                <div className="sc"><div className="sl">VAT + SSCL Total</div><div className="sa cr">Rs.{fmt(odSummary.total)}</div></div>
+              </div>
+
+                <div className="card">
+                <div className="chd">
+                  <h3>VAT and SSCL Expenses Summary — {odArea==="ALL"?"All Areas":odArea}</h3>
+                  <div style={{fontSize:11,color:"var(--mut)",marginTop:2}}>{odFrom} to {odTo}</div>
+                </div>
+                <table className="tbl" style={{width:"100%",tableLayout:"fixed"}}>
+                <thead><tr><th style={{textAlign:"left",width:"40%"}}>Outlet</th><th style={{textAlign:"right"}}>VAT</th><th style={{textAlign:"right"}}>SSCL</th><th style={{textAlign:"right"}}>Total</th></tr></thead>
+                  <tbody>
+                    {odLoading && <tr><td colSpan={4}><div className="empty">Loading…</div></td></tr>}
+                    {!odLoading && odSummary.list.length===0 && <tr><td colSpan={4}><div className="empty">No outlets in this area.</div></td></tr>}
+                    {!odLoading && odSummary.list.map(p=>(
+                      <tr key={p.outlet}>
+                        <td className="bold">{p.outlet}</td>
+                        <td className="rt mono">Rs.{fmt(p.vat)}</td>
+                        <td className="rt mono">Rs.{fmt(p.sscl)}</td>
+                        <td className="rt mono cr bold">Rs.{fmt(p.vat+p.sscl)}</td>
+                      </tr>
+                    ))}
+                    {!odLoading && odSummary.list.length>0 && (
+                      <tr style={{borderTop:"2px solid var(--bdr2)",background:"var(--s3)"}}>
+                        <td className="bold">Area Total</td>
+                        <td className="rt mono bold">Rs.{fmt(odSummary.vat)}</td>
+                        <td className="rt mono bold">Rs.{fmt(odSummary.sscl)}</td>
+                        <td className="rt mono cr bold">Rs.{fmt(odSummary.total)}</td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+                <div className="card od-hide-print">
+                <div className="chd"><h3>VAT and SSCL Expense Details</h3></div>
+                <table className="tbl">
+                  <thead><tr><th style={{textAlign:"left"}}>Outlet</th><th style={{textAlign:"left"}}>Date</th><th style={{textAlign:"left"}}>Account</th><th style={{textAlign:"left"}}>Description</th><th style={{textAlign:"right"}}>VAT</th><th style={{textAlign:"right"}}>SSCL</th></tr></thead>
+                  <tbody>
+                    {!odLoading && odSummary.list.every(p=>p.rows.length===0) && (
+                      <tr><td colSpan={6}><div className="empty">No VAT or SSCL expenses for the selected area and dates.</div></td></tr>
+                    )}
+                    {odSummary.list.filter(p=>p.rows.length>0).map(p=>(
+                      <Fragment key={p.outlet}>
+                        {p.rows.map(r=>(
+                          <tr key={r.key}>
+                            <td>{p.outlet}</td>
+                            <td className="mono">{r.date}</td>
+                            <td style={{fontSize:11}}>{r.acct}</td>
+                            <td style={{fontSize:11}}>{r.desc}</td>
+                            <td className="rt mono">{r.vat?`Rs.${fmt(r.vat)}`:"-"}</td>
+                            <td className="rt mono">{r.sscl?`Rs.${fmt(r.sscl)}`:"-"}</td>
+                          </tr>
+                        ))}
+                        <tr style={{background:"var(--s2)"}}>
+                          <td colSpan={4} className="bold">{p.outlet} — Total</td>
+                          <td className="rt mono bold">Rs.{fmt(p.vat)}</td>
+                          <td className="rt mono bold">Rs.{fmt(p.sscl)}</td>
+                        </tr>
+                      </Fragment>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             </>
           )}
