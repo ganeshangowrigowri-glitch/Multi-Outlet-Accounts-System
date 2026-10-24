@@ -82,8 +82,8 @@ export default function S_Crates({ outlet, toast_ }) {
     .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
   const before = from ? typeRows.filter(e => e.date < from) : [];
-  const bfAtFrom = bf + before.reduce((a, e) =>
-    a + Number(e.purchase||0) + Number(e.received||0) - Number(e.returned||0) - Number(e.ex||0) - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0), 0);
+    const bfAtFrom = bf + before.reduce((a, e) =>
+    a + Number(e.purchase||0) + Number(e.received||0) - Number(e.returned||0) + Number(e.ex||0) - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0), 0);
 
   const period = typeRows.filter(e => (!from || e.date >= from) && (!to || e.date <= to));
 
@@ -227,7 +227,7 @@ export default function S_Crates({ outlet, toast_ }) {
               )}
 
               {period.map(e => {
-                running += Number(e.purchase||0) + Number(e.received||0) - Number(e.returned||0) - Number(e.ex||0) - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0);
+                              running += Number(e.purchase||0) + Number(e.received||0) - Number(e.returned||0) + Number(e.ex||0) - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0);
                 return (
                   <tr key={e.id} style={{ borderBottom: "1px solid rgba(63,63,70,.15)" }}>
                     <td style={td}>{e.date}</td>
@@ -263,7 +263,7 @@ export default function S_Crates({ outlet, toast_ }) {
                 <td style={td}></td>
                 <td style={td}></td>
               </tr>
-                        </tbody>
+             </tbody>
           </table>
         </div>
 

@@ -7,6 +7,7 @@ import { supabase } from "../supabase";
 import { OUTLETS, SUPPLIERS_LIST } from "../data/seeds";
 import { getOutletInventory } from "./staff/S_Inventory";
 import { loadOutletOverridesFromDB, resolveOutletPrice } from "./admin/InventoryAdmin";
+import { buildHistoryRows } from "./staff/S_PriceHistory";
 import {
   getOutlets,
   getSuppliers,
@@ -24,6 +25,8 @@ import {
   getAPPayments,
   getCashBF,
   getBankBF,
+  getBankCD,
+  getBankBFMonthly,
   getCardBF,
   getCardCD,
   getCashPettyCash,
@@ -43,8 +46,9 @@ import {
    POSITION_CATEGORIES, 
    getCrateLedger,
    getEmptyInventoryMaster,
-   getEmptyLoanRegister,
+    getEmptyLoanRegister,
    upsertEmptyLoanEntry,
+   getPriceHistoryStock,
 } from "../db";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -122,7 +126,128 @@ const prevMonthStr = m => {
   const d = new Date(y, mo - 2, 1); // mo is 1-indexed; mo-2 = previous month, 0-indexed
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 };
+// ═══════════════════════════════════════════════════════════════
+//  IDL 8% ITEMS — these 6 items get 8% trade discount (+VAT on it);
+//  every other IDL item keeps 6%. Mirrors Excel "IDL %" sheet.
+// ═══════════════════════════════════════════════════════════════
+const IDL_EIGHT_PCT_ENABLED = true;          // false = old behaviour (all 6%)
+const IDL_EIGHT_PCT_FROM    = "2026-08-01";  // purchases dated before this stay at 6%
+const IDL_EIGHT_PCT_NAMES = new Set(["IBCR Q", "IBCR P", "IBBR Q", "IBBR P", "IEV Q", "IEV P"]);
+const normItemName  = v => (v || "").toString().toUpperCase().trim().replace(/\s+/g, " ");
+const normInvKey    = v => (v || "").toString().trim().toUpperCase();
+const isIdlSupplier = raw => normSup(raw) === "IDL";
+const isLuxurySupplier = raw => normSup(raw) === "LUXURY BRAND";
+const isDisc6Supplier  = raw => ["UG", "IDL"].includes(normSup(raw));   // 6% + VAT columns
+const isDisc8Supplier  = raw => normSup(raw) === "IDL";                 // 8% + VAT(8%) columns
 
+// field: "amount" (Amount column) or "payment" (Payment column)
+async function loadLuxuryDisc(outlet, month, supplierId, field = "amount") {
+  if (!month) return 0;
+  try {
+    let q = supabase.from("supplier_luxury_discount").select("amount, payment_amount")
+      .eq("supplier_id", supplierId).eq("month", month);
+    if (outlet !== "ALL") q = q.eq("outlet_id", outlet);
+    const { data, error } = await q;
+    if (error) throw error;
+    const col = field === "payment" ? "payment_amount" : "amount";
+    return (data || []).reduce((a, r) => a + (Number(r[col]) || 0), 0);
+  } catch (e) { console.error("Luxury discount load failed:", e); return 0; }
+}
+async function saveLuxuryDisc(outlet, month, supplierId, amount, field = "amount") {
+  const col = field === "payment" ? "payment_amount" : "amount";
+  const { error } = await supabase.from("supplier_luxury_discount")
+    .upsert({ outlet_id: outlet, supplier_id: supplierId, month, [col]: Number(amount) || 0 },
+            { onConflict: "outlet_id,supplier_id,month" });
+  if (error) console.error("Luxury discount save failed:", error);
+  return !error;
+}
+// Income Statement: Amount-column + Payment-column discounts together
+async function loadLuxuryDiscTotal(outlets, month) {
+  if (!month || !outlets.length) return 0;
+  try {
+    const { data, error } = await supabase.from("supplier_luxury_discount")
+      .select("supplier_id, amount, payment_amount").eq("month", month).in("outlet_id", outlets);
+    if (error) throw error;
+    return (data || []).filter(r => isLuxurySupplier(r.supplier_id))
+      .reduce((a, r) => a + (Number(r.amount) || 0) + (Number(r.payment_amount) || 0), 0);
+  } catch (e) { console.error("Luxury discount total failed:", e); return 0; }
+}
+// ── Income Statement: manual Other Income entries (month-scoped) ──
+const signedManual = e => (e.sign === "-" ? -1 : 1) * (Number(e.amount) || 0);
+async function loadManualOtherIncome(outlet, month) {
+  if (!month) return [];
+  let q = supabase.from("income_other_entries").select("*")
+    .eq("month", month).order("created_at", { ascending: true });
+  if (outlet !== "ALL") q = q.eq("outlet_id", outlet);
+  const { data, error } = await q;
+  if (error) throw error;
+  return data || [];
+}
+async function addManualOtherIncome(outlet, month, description, amount, sign) {
+  const { data, error } = await supabase.from("income_other_entries")
+    .insert({ outlet_id: outlet, month, description, amount, sign })
+    .select().single();
+  if (error) throw error;
+  return data;
+}
+// Invoice number of a purchase — same rule PurchaseSummary uses
+const purchaseInvNo = p => {
+  const m = String(p.notes || "").match(/^Inv:([^|]*)/);
+  return normInvKey((m && m[1]) || p.ref || p.invoice_no || "");
+};
+const isEightPctLine = (l, eightCodes) => {
+  if (l.isEmptyItem) return false;
+  if (eightCodes.has(l.itemCode) || eightCodes.has(l.code)) return true;
+  return [l.itemName, l.name, l.itemCode, l.code].some(v => IDL_EIGHT_PCT_NAMES.has(normItemName(v)));
+};
+// invoice no -> total value of 8% items bought on it
+function buildIdlEightAmtByInvoice(purchases, eightCodes) {
+  const map = {};
+  (purchases || []).forEach(p => {
+    if (!isIdlSupplier(p.supplier_id || p.supplier)) return;
+    if ((p.date || "").slice(0, 10) < IDL_EIGHT_PCT_FROM) return;
+    const key = purchaseInvNo(p);
+    if (!key) return;
+    (p.items || []).forEach(l => {
+      if (!isEightPctLine(l, eightCodes)) return;
+      const amt = Number(l.amount) || (Number(l.qty) * Number(l.unitCost)) || 0;
+      map[key] = (map[key] || 0) + amt;
+    });
+  });
+  return map;
+}
+// THE one place that decides how an invoice is discounted.
+// eightAmtRaw = 0 gives exactly the old 6% formula.
+function invoiceDiscountSplit(amount, eightAmtRaw) {
+  const eightAmt = IDL_EIGHT_PCT_ENABLED ? Math.min(Math.max(eightAmtRaw || 0, 0), amount) : 0;
+  const sixAmt   = amount - eightAmt;                 // 6% side = total − 8% side (as Excel)
+  const sixPctDis   = (sixAmt / 1.18) * 0.06;
+  const vatDis      = (sixAmt * 0.06) - sixPctDis;
+  const eightPctDis = (eightAmt / 1.18) * 0.08;
+  const vatDis8     = (eightAmt * 0.08) - eightPctDis;
+  return { sixAmt, eightAmt, sixPctDis, vatDis, eightPctDis, vatDis8 };
+}
+async function loadIdlEightAmtMap(outlet) {
+  const outlets = outlet === "ALL" ? OUTLETS : [outlet];
+  const [inv, ...lists] = await Promise.all([getInventoryMaster(), ...outlets.map(o => getPurchases(o))]);
+  const eightCodes = new Set(
+    (inv || []).filter(i => isIdlSupplier(i.supplier) && IDL_EIGHT_PCT_NAMES.has(normItemName(i.name)))
+               .map(i => i.code)
+  );
+  return buildIdlEightAmtByInvoice(lists.flatMap(l => l || []), eightCodes);
+}
+let _idlEightCache = {};
+const clearIdlEightCache = () => { _idlEightCache = {}; };
+function getIdlEightAmtMap(outlet) {
+  if (!_idlEightCache[outlet]) {
+    _idlEightCache[outlet] = loadIdlEightAmtMap(outlet).catch(err => {
+      console.error("IDL 8% map failed — falling back to 6%:", err);
+      delete _idlEightCache[outlet];
+      return {};
+    });
+  }
+  return _idlEightCache[outlet];
+}
 // ─── Shared UI Atoms ─────────────────────────────────────────────────────────
 const SH = ({ children }) => (
   <tr style={{ background: "var(--s3)" }}>
@@ -239,7 +364,9 @@ function useReportData(outlet, month, outletList) {
 
   const load = useCallback(async (opts = {}) => {
     const { silent = false } = opts;
+   
     const requestId = ++loadIdRef.current;
+    clearIdlEightCache();
     if (!silent) setLoading(true);
     try {
       const outlets = outlet === "ALL" ? outletList : [outlet];
@@ -399,9 +526,43 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       // used by Balance Sheet, Purchase Summary, UG Book, Stock Summary,
       // and Cost of Sales Summary are completely untouched.
            let openingStockValIS = 0;
-      let totalPurchaseIS   = 0;
+            // Income Statement purchases = EXACT main-item purchase amounts per supplier
+      // (the same invoice lines Purchase Summary shows as main items),
+      // NOT qty × month-end unit cost, and NOT empty items.
+            // Income Statement purchases = same basis as Purchase Summary's main subtotal:
+      // main item lines + the invoice-level adjustments (damage / return / late charge).
+      // Empty items are excluded.
+      const purMainBySupIS = {};
+      const noteNum = (notes, key) => {
+        const m = String(notes || "").match(new RegExp("\\|" + key + ":(-?\\d+(?:\\.\\d+)?)"));
+        return m ? parseFloat(m[1]) : 0;
+      };
+      const purLineAmt = l => Number(l.amount) || (Number(l.qty) * Number(l.unitCost)) || 0;
+      purchases.forEach(p => {
+        const sid = p.supplier_id || p.supplier || "Unknown";
+        if (normSup(sid) === "EMPTY PURCHASE") return;
+        const items     = p.items || [];
+               // Empty-bottle codes (DEMP Q/P/N, UEMP Q, BEMP Q, TEMP Q, HEMP Q) are never main stock,
+        // even when the invoice line was not flagged isEmptyItem.
+        const isEmpLine = l => l.isEmptyItem || /^[A-Z]EMP\b/i.test(String(l.itemCode || l.code || ""));
+        const mainLines = items.filter(l => !isEmpLine(l)).reduce((a, l) => a + purLineAmt(l), 0);
+        const allLines  = items.reduce((a, l) => a + purLineAmt(l), 0);
+        const recTotal  = Number(p.total) || Number(p.grand_total) || allLines;
+        const hasEmpty  = items.some(isEmpLine);
+                // Damage is NOT part of Income Statement purchases.
+        // Invoice with only main items: adjustment = saved total − its lines, with the damage
+        // part added back out (damage lowers the saved total, so + damage removes it).
+        // Invoice that also holds empty items: only the return saved in the notes is used.
+        const damageAmt = noteNum(p.notes, "damage");
+        const adj = hasEmpty
+          ? noteNum(p.notes, "return")
+          : (recTotal - allLines + damageAmt);
+        purMainBySupIS[sid] = (purMainBySupIS[sid] || 0) + mainLines + adj;
+      
+      });
+      const totalPurchaseIS = Object.values(purMainBySupIS).reduce((a, v) => a + v, 0);
       let endStockValIS     = 0;
-            const openingStockByCodeIS = {};
+      const openingStockByCodeIS = {};
       const endStockByCodeIS     = {};
       // Per-supplier split of the SAME inHandStock × unitCost used for endStockValIS
       // (identical to Current Status supplier-wise Physical Stock total).
@@ -409,7 +570,9 @@ const invOrderedForDisplay = [...(inv || [])].sort((a, b) => {
       // Insertion-order arrays — kept separate from the objects above
       const openingStockOrderIS = [];
       const endStockOrderIS     = [];
-      let totalSalesAmt = 0;
+            let totalSalesAmt = 0;
+      let csProfitTotalIS = 0;
+      
       let emptyPintsQtyIS = 0, emptyNipsQtyIS = 0;
       outlets.forEach((o, oi) => {
         const [oSal, oPur, , oTrn] = arrayResults[oi];
@@ -542,11 +705,21 @@ if ((item.supplier || "").replace(/^\d{4}-/, "").toUpperCase().trim() === "DCSL"
           });
           itemSaleAmt += (totalBottleSale - soldTrackedSR) * sp;
 
-          totalSalesAmt += itemSaleAmt;
+                  totalSalesAmt += itemSaleAmt;
+
+          // Current Status profit for this item (day-wise price & cost)
+          let itemCsProfit = 0;
+          Object.entries(soldByDateSR).forEach(([date, q]) => {
+            const dp = priceOnDate(masterItemSR, ovItemSR, date);
+            itemCsProfit += q * ((Number(dp.sellingPrice) || 0) - (Number(dp.unitCost) || 0));
+          });
+          itemCsProfit += (totalBottleSale - soldTrackedSR) * (sp - uc);
+          csProfitTotalIS += itemCsProfit;
+ 
+          
 
           // Income Statement — Current Status-based Opening/Purchase/End Stock
           openingStockValIS += opening * ucOpen;
-          totalPurchaseIS   += totalPurchase * uc;
          endStockValIS     += inHandStock * uc;
           stockValBySupplierIS[item.supplier] = (stockValBySupplierIS[item.supplier] || 0) + inHandStock * uc;
                    if (opening > 0) {
@@ -565,6 +738,7 @@ if ((item.supplier || "").replace(/^\d{4}-/, "").toUpperCase().trim() === "DCSL"
           }
         });
       });
+
       const emptyDeductionIS = emptyPintsQtyIS * EMPTY_PINTS_RATE + emptyNipsQtyIS * EMPTY_NIPS_RATE;
       const totalReturns = returns.reduce((a,r)=>a+(Number(r.total)||0),0);
 // Returns are already entered as negative "sold" qty in the daily sale,
@@ -737,19 +911,41 @@ const visaCardInterestAdd = Math.max(0, visaCardInterestLedger - visaInterestBoo
       // (see computeSupplierDiscountVAT), and fold the totals into Other
       // Income. Read-only against apInvoices — Supplier Credit Ledger's
       // own screen/state/calculations are completely untouched.
-      const sup6PctDiscBySup = {};
-      const supVatDiscBySup  = {};
+     const sup6PctDiscBySup = {};
+      const sup8PctDiscBySup = {};
+      const supVatDiscBySup  = {};   // VAT on 6% discount
+      const sup8VatDiscBySup = {};   // VAT on 8% discount
       const supDiscVatPairs = await Promise.all(
         SUPPLIERS_LIST.map(async s => [s.id, await computeSupplierDiscountVAT(outlet, month, s.id, apInvoices)])
       );
-      supDiscVatPairs.forEach(([id, { sixPctDis, vatDis }]) => {
+      supDiscVatPairs.forEach(([id, { sixPctDis, vatDis, eightPctDis, vatDis8 }]) => {
         if (sixPctDis > 0) sup6PctDiscBySup[id] = sixPctDis;
+        if (eightPctDis > 0) sup8PctDiscBySup[id] = eightPctDis;
         if (vatDis > 0) supVatDiscBySup[id] = vatDis;
+        if (vatDis8 > 0) sup8VatDiscBySup[id] = vatDis8;
       });
       const totalSup6PctDisc = Object.values(sup6PctDiscBySup).reduce((a, v) => a + v, 0);
+      const totalSup8PctDisc = Object.values(sup8PctDiscBySup).reduce((a, v) => a + v, 0);
       const totalSupVatDisc  = Object.values(supVatDiscBySup).reduce((a, v) => a + v, 0);
+      const totalSup8VatDisc = Object.values(sup8VatDiscBySup).reduce((a, v) => a + v, 0);
 
-      const totalOtherInc=totalDiscPayment+totalDiscEmpty+totalSup6PctDisc+totalSupVatDisc;
+           const totalLuxuryDisc = await loadLuxuryDiscTotal(outlets, month);
+      // Price History Total Value for THIS month only, from the existing Price History source.
+           // Same rows + Stock values the Price History screen uses: Σ (margin × Stock)
+      // for price changes dated inside the selected month, per outlet.
+      let priceHistoryOtherInc = 0;
+      try {
+        if (month) {
+          for (const o of outlets) {
+            const stockMap = await getPriceHistoryStock(o);
+            const phRows = buildHistoryRows(inv, overridesByOutlet[o] || {})
+              .filter(r => r.date.slice(0, 7) === month);
+             priceHistoryOtherInc += phRows.reduce(
+              (a, r) => a + r.margin * (Number(stockMap?.[r.rowKey]) || 0), 0);
+          }
+        }
+      } catch (e) { console.error("Price History total failed:", e); }
+      const totalOtherInc=totalDiscPayment+totalDiscEmpty+totalSup6PctDisc+totalSup8PctDisc+totalSupVatDisc+totalSup8VatDisc+totalLuxuryDisc;
       const totalIncome=grossProfit+totalOtherInc;
       const netProfit=totalIncome-totalExp;
  
@@ -894,7 +1090,8 @@ Object.keys(cosByItem).forEach(code => {
       // sheet, fed by cash_ledger rows tagged balance_type "drawing" /
       // "other_cash" (entered from S_Expenses.jsx's Other Cash Payments card).
          const personalDrawings = cashLedgerTxns.reduce((a,r)=> r.balance_type==="drawing" ? a+(Number(r.credit)||0) : a, 0);
-              const otherCashPayments = cashLedgerTxns.reduce((a,r)=> r.balance_type==="other_cash" ? a+(Number(r.credit)||0) : a, 0);
+        const otherCashPayments = cashLedgerTxns.reduce((a,r)=> r.balance_type==="other_cash" ? a+(Number(r.credit)||0) : a, 0);
+        const otherPayments = cashLedgerTxns.reduce((a,r)=> r.balance_type==="other_payment" ? a+(Number(r.credit)||0) : a, 0);
       // Personal Drawings paid from a bank account (Bank Ledger, in-month).
       // Kept separate from personalDrawings so Cash Flow Statement (cash only) is unaffected.
       const bankPersonalDrawings = (bankLedger||[]).reduce((a,r) => {
@@ -919,7 +1116,7 @@ Object.keys(cosByItem).forEach(code => {
       });
 
       const cashFlowIn=totalDailySaleCash+totalEmpSold;
-      const cashFlowOut=totalExp+totalCardSettle+totalEmpRet+bankDeposit+totalReturns+personalDrawings+otherCashPayments;
+      const cashFlowOut=totalExp+totalCardSettle+totalEmpRet+bankDeposit+totalReturns+personalDrawings+otherCashPayments+otherPayments;
       const netCashFlow=cashFlowIn-cashFlowOut;
                 // ── Empty Bottles ──
       // KEY CHANGE: grouped by Supplier + Item/Code (not supplier alone), so
@@ -1021,8 +1218,8 @@ Object.keys(cosByItem).forEach(code => {
             - (dd.invIssue||0) - (dd.issue||0) - (dd.sold||0)
             - sho;
 
-          received += dd.received || 0;
-           issue    += dd.issue    || 0;
+                  received += dd.received || 0;
+           issue    += (dd.issue || 0) + (dd.invIssue || 0);   // IN ISS counts as issued (same as Excel CAPITAL "ISSUED")
           });
         const movement = received - issue;
         const bfEntry = emptyLoanBF[key] || { bfLoan: 0, rate: null, details: "" };
@@ -1054,7 +1251,7 @@ Object.keys(cosByItem).forEach(code => {
           .sort((a, b) => (a.date || "").localeCompare(b.date || ""))
           .forEach(e => {
             physical += Number(e.purchase||0) + Number(e.received||0) - Number(e.returned||0)
-                      - Number(e.ex||0) - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0);
+          + Number(e.ex||0) - Number(e.issued||0) - Number(e.sold||0) - Number(e.short||0);
             if (!mStart || (e.date >= mStart && e.date <= mEnd)) {
               received += Number(e.received || 0);
               issue    += Number(e.issued   || 0);
@@ -1132,7 +1329,7 @@ Object.keys(cosByItem).forEach(code => {
       // Only commit this response if no newer load() has started since —
      // otherwise an older, slower call would clobber a newer, faster one.
      if (requestId !== loadIdRef.current) return;
-         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, bankPersonalDrawings, otherCashPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier,  positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy, visaCardInterestAdd, visaCardInterestLedger, emptyDeductionIS, emptyPintsQtyIS, emptyNipsQtyIS });
+         setData({ inv, coa, totalSalesAmt, totalReturns, netSalesAmt, openingStockVal, openingStockByCode, totalPurchase, totalPurchaseEmpty, purBySup, transInAmt, transOutAmt, endStockVal, endStockByCode, costOfSales, grossProfit, openingStockValIS, totalPurchaseIS, purMainBySupIS, endStockValIS, openingStockByCodeIS, openingStockOrderIS,endStockByCodeIS,endStockOrderIS, stockValBySupplierIS, discBySup, emptyDiscBySup, empSoldByName, empRetByName, totalDiscPayment, totalDiscEmpty, sup6PctDiscBySup, supVatDiscBySup, totalSup6PctDisc, totalSupVatDisc, sup8PctDiscBySup, totalSup8PctDisc, sup8VatDiscBySup,totalSup8VatDisc, totalLuxuryDisc, totalOtherInc, totalIncome, totalEmpSold, totalEmpRet, expByAcc, expSaleMkt, expAdmin, expFinance, expOther, expDetail, totalExp, netProfit, emptyStockVal, cashBal, bankBal, cashBF, bankBF, arBal, apInvoices, apPayments, apBal, totalCurrentAssets, totalCurrentLiab, totalAssets, ownerEquity, coaNonCurrentAssets, coaCurrentLiab, coaNonCurrentLiab, coaCapital, cashFlowIn, cashFlowOut, netCashFlow, bankDeposit, totalCardSettle, totalDailySaleCash, personalDrawings, bankPersonalDrawings, otherCashPayments, otherPayments, ocpByCategory, cashLedger, bankLedger, salesByDay, expByDay, sales, purchases, expenses, returns, transfers, cosByItem, empDailyData, empItemMeta, empSupplierGroups, empOpeningByItem, capitalByParty, totalCapitalIn, totalCapitalOut, crateLedgerAll, cardLedgerAll, stockValBySupplier,  positionLedgerAll, emptyLoanRows, emptyLoanStockVal, emptyStockValLegacy, visaCardInterestAdd, visaCardInterestLedger, emptyDeductionIS, emptyPintsQtyIS, emptyNipsQtyIS, csProfitTotalIS, priceHistoryOtherInc });
     } catch (err) {
       console.error("Reports load error:", err);
     } finally {
@@ -1158,10 +1355,16 @@ Object.keys(cosByItem).forEach(code => {
     discBySup, emptyDiscBySup,
     totalDiscPayment, totalDiscEmpty,
     sup6PctDiscBySup = {}, supVatDiscBySup = {}, totalSup6PctDisc = 0, totalSupVatDisc = 0,
-    totalOtherInc,
+        sup8PctDiscBySup = {}, totalSup8PctDisc = 0,
+        sup8VatDiscBySup = {}, totalSup8VatDisc = 0,
+        totalLuxuryDisc = 0,
+        totalOtherInc,
         expDetail, expSaleMkt, expAdmin, expFinance, expOther, totalExp,
         visaCardInterestAdd = 0,
-    emptyDeductionIS = 0,
+        priceHistoryOtherInc = 0,
+        emptyDeductionIS = 0,
+        csProfitTotalIS = null,
+         purMainBySupIS = {},
     // Opening Stock / Purchases / End Stock now come from Current Status
     // (opening qty, total purchase qty, in-hand stock qty × each item's
     // outlet unit cost) instead of Daily Sale's first/last saved date.
@@ -1176,13 +1379,53 @@ Object.keys(cosByItem).forEach(code => {
     endStockOrderIS: endStockOrder,
   } = d;
 
-  // Cost of Sales = Opening Stock + Purchases − End Stock (Current
-  // Status-based figures only — no transfer in/out term, per spec).
-  // Cost of Sales = Opening Stock + Purchases + Transfer In − Transfer Out − End Stock
-   const costOfSales = openingStockVal + totalPurchase + transInAmt - transOutAmt - endStockVal;
-      const grossProfitBeforeEmpty = netSalesAmt - costOfSales;
-   const grossProfit  = grossProfitBeforeEmpty - emptyDeductionIS;
-    const totalIncome  = grossProfit + totalOtherInc;
+    // Sales Revenue is already net of returns (returns are saved as negative
+  // "sold" qty in Daily Sale), so returns are NOT deducted again here.
+  // Stock-based cost = Opening + Purchases + Transfer In − Transfer Out − End Stock
+  const stockCostOfSales = openingStockVal + totalPurchase + transInAmt - transOutAmt - endStockVal;
+
+  // Cost of Sales that makes Gross Profit equal the Current Status profit
+  const costOfSales = csProfitTotalIS !== null
+    ? totalSalesAmt - csProfitTotalIS
+    : stockCostOfSales;
+
+  // Difference between the two cost methods (price changes / invoice adjustments)
+  const costValuationAdj = stockCostOfSales - costOfSales;
+
+   const grossProfit = (totalSalesAmt - costOfSales) - emptyDeductionIS;
+
+  // Manual Other Income entries (saved per outlet + month)
+  const [manualEntries, setManualEntries] = useState([]);
+  const [moDesc, setMoDesc]     = useState("");
+  const [moAmt, setMoAmt]       = useState("");
+  const [moSign, setMoSign]     = useState("+");
+  const [moSaving, setMoSaving] = useState(false);
+  const [moError, setMoError]   = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    setManualEntries([]);
+    loadManualOtherIncome(outlet, month)
+      .then(rows => { if (!cancelled) { setManualEntries(rows); setMoError(null); } })
+      .catch(err => { if (!cancelled) setMoError("Could not load manual entries: " + err.message); });
+    return () => { cancelled = true; };
+  }, [outlet, month]);
+
+  async function handleAddManual() {
+    const amt = parseFloat(moAmt);
+    if (!moDesc.trim() || !(amt > 0)) { setMoError("Enter a description and an amount greater than 0."); return; }
+    setMoSaving(true); setMoError(null);
+    try {
+      const row = await addManualOtherIncome(outlet, month, moDesc.trim(), amt, moSign);
+      setManualEntries(prev => [...prev, row]);
+      setMoDesc(""); setMoAmt(""); setMoSign("+");
+    } catch (err) { setMoError("Save failed: " + err.message); }
+    finally { setMoSaving(false); }
+  }
+
+  const manualNet = manualEntries.reduce((a, e) => a + signedManual(e), 0);
+  // Existing Other Income + Price History value + manual entries (each counted once)
+  const totalOtherIncIS = totalOtherInc + priceHistoryOtherInc + manualNet;
+    const totalIncome = grossProfit + totalOtherIncIS;
   // Visa card interest is part of Finance Charge here (added once, not in d.totalExp)
   const expFinanceIS = expFinance + visaCardInterestAdd;
   const totalExpIS   = totalExp + visaCardInterestAdd;
@@ -1195,9 +1438,38 @@ Object.keys(cosByItem).forEach(code => {
   const [showCosDetails, setShowCosDetails] = useState(false);
 
   return (
-    <ReportWrap title="Income Statement" outlet={outlet} month={month}>
+        <ReportWrap title="Income Statement" outlet={outlet} month={month}>
+      {/* Manual Other Income Entry */}
+      <tr className="no-print">
+        <td colSpan={3} style={{ padding: "10px 12px" }}>
+          <div style={{ padding: "10px 12px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--gld2)", marginBottom: 8 }}>Manual Other Income Entry</div>
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 10, flexWrap: "wrap" }}>
+              <input type="text" placeholder="Description" value={moDesc} disabled={outlet === "ALL"}
+                onChange={e => setMoDesc(e.target.value)}
+                style={{ padding: "6px 10px", width: 220, background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+              <input type="number" step="0.01" min="0" placeholder="Amount" value={moAmt} disabled={outlet === "ALL"}
+                onChange={e => setMoAmt(e.target.value)}
+                style={{ padding: "6px 10px", width: 130, background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
+              <select value={moSign} disabled={outlet === "ALL"} onChange={e => setMoSign(e.target.value)}
+                style={{ padding: "6px 10px", background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }}>
+                <option value="+">+</option>
+                <option value="-">-</option>
+              </select>
+              <button className="btn btnd btnsm" onClick={handleAddManual} disabled={moSaving || outlet === "ALL"}>
+                {moSaving ? "Saving…" : "Add Entry"}
+              </button>
+              <span style={{ fontSize: 11, color: "var(--mut)" }}>
+                {outlet === "ALL" ? "Select a single outlet to add entries." : `Saved for ${month || "the selected month"} only.`}
+              </span>
+              {moError && <span style={{ fontSize: 11, color: "var(--red)" }}>{moError}</span>}
+            </div>
+          </div>
+        </td>
+      </tr>
+
       {/* Sales Revenue */}
-      <TR label="Sales Revenue" val={totalSalesAmt} bold />
+          <TR label="Sales Revenue" val={totalSalesAmt} bold total />
     
 
       {/* Cost of Sales */}
@@ -1219,78 +1491,72 @@ Object.keys(cosByItem).forEach(code => {
           );
         })}
       <TR label="(+) Purchases" col2={totalPurchase} indent={1} />
-      {showCosDetails && Object.entries(purBySup).map(([supId, sup]) => (
-        <TR key={`pur-${supId}`} label={supId.replace(/^\d{4}-/, "")} col2={sup.total} indent={2} />
+           {showCosDetails && Object.entries(purMainBySupIS).map(([supId, amt]) => (
+        <TR key={`pur-${supId}`} label={supId.replace(/^\d{4}-/, "")} col2={amt} indent={2} />
       ))}
 
       {transInAmt > 0  && <TR label="(+) Transfer In"  col2={transInAmt}  indent={1} />}
       {transOutAmt > 0 && <TR label="(-) Transfer Out" col2={transOutAmt} neg indent={1} />}
 
-     <TR label="(-) End Stock" col2={endStockVal} neg indent={1} />
-      {showCosDetails && (endStockOrder || Object.keys(endStockByCode))
-        .filter(code => endStockByCode[code]?.qty > 0)
-        .map(code => {
-          const v = endStockByCode[code];
-          return (
-            <TR key={code} label={`${v.name || code}  (${fmtN(v.qty)} × Rs.${fmt(v.unitCost)})`} col2={v.qty * v.unitCost} indent={2} />
-          );
-        })}
+    
+    <TR label="(-) End Stock" col2={endStockVal} neg indent={1} />
+{/* ...showCosDetails end-stock rows... */}
 
-      <TR label="Cost of Sales" val={costOfSales} neg total />
-      <TR label="Gross Profit / (Loss)" val={grossProfitBeforeEmpty} bold total />
-      {emptyDeductionIS !== 0 && <TR label="(-) Empty Deduction" val={emptyDeductionIS} neg indent={1} />}
-      {emptyDeductionIS !== 0 && <TR label="Gross Profit / (Loss) " val={grossProfit} bold total />}
+{/* MOVED UP: must sit above the total so the column foots */}
+{Math.abs(costValuationAdj) > 0.005 && (
+  <TR
+    label={costValuationAdj > 0 ? "(-) Price change revaluation" : "(+) Price change revaluation"}
+    col2={Math.abs(costValuationAdj)}
+    indent={1}
+  />
+)}
 
+<TR label="Cost of Sales" val={costOfSales} neg total />
+
+{/* NEW subtotal = Excel V433 */}
+<TR label="Gross Profit before Empty Deduction" val={totalSalesAmt - costOfSales} bold total />
+{emptyDeductionIS !== 0 && <TR label="(-) Empty Deduction" val={emptyDeductionIS} neg indent={1} />}
+
+<TR label="Gross Profit / (Loss)" val={grossProfit} bold total neg={grossProfit < 0} />
       {/* Other Income */}
-      <SH>Other Income</SH>
+           <SH>Other Income</SH>
 
-      {/* Discount Received on Payment */}
-      {(Object.keys(discBySup).length > 0) && (
-        <>
-          <TR label="Discount Received on Payment" indent={1} />
-          {Object.entries(discBySup).map(([sup, amt]) => (
-            <TR key={sup} label={sup.replace(/^\d{4}-/, "")} col2={amt} indent={2} />
-          ))}
-          <TR label="Total Discount on Payment" val={totalDiscPayment} bold indent={1} />
-        </>
+      {Object.entries(discBySup).map(([sup, amt]) => (
+        <TR key={`dp-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} Discount on Payment`} col2={amt} indent={1} />
+      ))}
+
+      {Object.entries(emptyDiscBySup).map(([sup, amt]) => (
+        <TR key={`de-${sup}`} label={`${sup} Discount on Empty`} col2={amt} indent={1} />
+      ))}
+
+      {Object.entries(sup6PctDiscBySup).map(([sup, amt]) => (
+        <TR key={`s6-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} 6% Discount`} col2={amt} indent={1} />
+      ))}
+
+      {Object.entries(supVatDiscBySup).map(([sup, amt]) => (
+        <TR key={`sv-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} VAT`} col2={amt} indent={1} />
+      ))}
+
+      {Object.entries(sup8PctDiscBySup).map(([sup, amt]) => (
+        <TR key={`s8-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} 8% Discount`} col2={amt} indent={1} />
+      ))}
+
+      {Object.entries(sup8VatDiscBySup).map(([sup, amt]) => (
+        <TR key={`sv8-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} VAT (8%)`} col2={amt} indent={1} />
+      ))}
+
+            {totalLuxuryDisc > 0 && (
+        <TR label="Luxury Brand 16% Discount" col2={totalLuxuryDisc} indent={1} />
       )}
 
-            {/* Discount Received on Empty */}
-      {(Object.keys(emptyDiscBySup).length > 0) && (
-        <>
-          <TR label="Discount Received on Empty" indent={1} />
-          {Object.entries(emptyDiscBySup).map(([sup, amt]) => (
-            <TR key={sup} label={sup} col2={amt} indent={2} />
-          ))}
-          <TR label="Total Discount on Empty" val={totalDiscEmpty} bold indent={1} />
-        </>
-      )}
+       <TRSplit label="Price Increase" col2={Math.abs(priceHistoryOtherInc)} neg={priceHistoryOtherInc < 0} indent={1} />
 
-      {/* Supplier Credit Ledger — 6% Discount & VAT (selected month, all suppliers) */}
-      {(Object.keys(sup6PctDiscBySup).length > 0 || Object.keys(supVatDiscBySup).length > 0) && (
-        <>
-          {Object.keys(sup6PctDiscBySup).length > 0 && (
-            <>
-              <TR label="Supplier 6% Discount" indent={1} />
-              {Object.entries(sup6PctDiscBySup).map(([sup, amt]) => (
-                <TR key={`s6-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} 6% Discount`} col2={amt} indent={2} />
-              ))}
-              <TR label="Total Supplier 6% Discount" val={totalSup6PctDisc} bold indent={1} />
-            </>
-          )}
-          {Object.keys(supVatDiscBySup).length > 0 && (
-            <>
-              <TR label="VAT" indent={1} />
-              {Object.entries(supVatDiscBySup).map(([sup, amt]) => (
-                <TR key={`sv-${sup}`} label={`${sup.replace(/^\d{4}-/, "")} VAT`} col2={amt} indent={2} />
-              ))}
-              <TR label="Total VAT" val={totalSupVatDisc} bold indent={1} />
-            </>
-          )}
-        </>
-      )}
+            {manualEntries.map(e => (
+        <TRSplit key={`mo-${e.id}`} label={e.description}
+          col2={Number(e.amount) || 0} neg={e.sign === "-"} indent={1} />
+      ))}
 
-      <TR label="Total Other Income" val={totalOtherInc} bold total />
+       <TR label="Total Other Income" val={totalOtherIncIS} bold total />
       <TR label="Total Income" val={totalIncome} bold total />
 
       {/* Expenses */}
@@ -1345,7 +1611,7 @@ function BalanceSheet({ d, outlet, month }) {
       {/* Current Assets */}
       <SH>Current Assets (1000–1499)</SH>
       <TRSplit label="Main Stock"  col2={endStockVal}   indent={1} />
-      <TRSplit label="Empty Stock"                            col2={emptyStockVal}  indent={1} />
+      <TRSplit label="Empty Stock"                           col2={emptyStockVal}  indent={1} />
       <TRSplit label="Cash in Hand"                          col2={cashBal}         indent={1} />
       <TRSplit label="Bank"                                  col2={bankBal}         indent={1} />
       <TRSplit label="Accounts Receivable (1100)"            col2={arBal}           indent={1} />
@@ -1394,12 +1660,26 @@ function BalanceSheet({ d, outlet, month }) {
     // selected month — no duplicate raw-data computation, just the same
     // combination Income Statement itself uses.
 
-   const costOfSalesIS = (d.openingStockValIS || 0) + (d.totalPurchaseIS || 0)
+   // Same Gross Profit as Income Statement: Current Status profit − DCSL Empty Deduction
+  const costOfSalesIS = (d.openingStockValIS || 0) + (d.totalPurchaseIS || 0)
     + (d.transInAmt || 0) - (d.transOutAmt || 0) - (d.endStockValIS || 0);
-  // Same Gross Profit as Income Statement: Net Sales − Cost of Sales − DCSL Empty Deduction
-  const grossProfitIS = (d.netSalesAmt || 0) - costOfSalesIS - (d.emptyDeductionIS || 0);
-  const totalIncomeIS = grossProfitIS + (d.totalOtherInc || 0);
-    const netProfit = totalIncomeIS - ((d.totalExp || 0) + (d.visaCardInterestAdd || 0));
+  const grossProfitIS = (d.csProfitTotalIS ?? ((d.totalSalesAmt || 0) - costOfSalesIS)) - (d.emptyDeductionIS || 0);
+    // Same Other Income the Income Statement shows: existing total + Price Increament
+  // + this month's manual entries (loaded from the same income_other_entries table).
+  const [manualOtherEntries, setManualOtherEntries] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    setManualOtherEntries([]);              
+    loadManualOtherIncome(outlet, month)
+      .then(rows => { if (!cancelled) setManualOtherEntries(rows); })
+      .catch(err => console.error("Capital Sheet manual other income load failed:", err));
+    return () => { cancelled = true; };
+  }, [outlet, month]);
+  const manualOtherNet = manualOtherEntries.reduce((a, e) => a + signedManual(e), 0);
+
+  const totalOtherIncIS = (d.totalOtherInc || 0) + (d.priceHistoryOtherInc || 0) + manualOtherNet;
+  const totalIncomeIS = grossProfitIS + totalOtherIncIS;
+  const netProfit = totalIncomeIS - ((d.totalExp || 0) + (d.visaCardInterestAdd || 0));
 
     const [ownersCapital, setOwnersCapitalState] = useState(0);
   const [ocDateInput, setOcDateInput] = useState(today());
@@ -1579,7 +1859,7 @@ function BalanceSheet({ d, outlet, month }) {
     totalEmpSold, totalEmpRet,
     cashFlowIn, cashFlowOut, netCashFlow,
     bankDeposit, totalCardSettle, totalReturns, totalExp,
-    personalDrawings, otherCashPayments, ocpByCategory = {},
+    personalDrawings, otherCashPayments, otherPayments = 0, ocpByCategory = {},
     cashPettyCash, cashCoins, cashPendingBal, cashDiffSigned,
     cashBF, cashBal,
   } = d;
@@ -1608,6 +1888,7 @@ function BalanceSheet({ d, outlet, month }) {
       {Object.entries(ocpByCategory).filter(([, amt]) => amt > 0).map(([label, amt]) => (
         <TR key={`cf-ocp-${label}`} label={label === "MR.KK LOAN" ? "K.K Loan" : label} col2={amt} indent={1} />
       ))}
+      {otherPayments > 0 && <TR label="Other Payments" col2={otherPayments} indent={1} />}
       <TR label="Bank Deposit"       col2={bankDeposit}      indent={1} />
       <TR label="Visa Card Deposit"  col2={totalCardSettle}  indent={1} />
       {totalEmpRet > 0 && <TR label="Empty Return" col2={totalEmpRet} indent={1} />}
@@ -2643,7 +2924,8 @@ function EmptyBottles({ d, outlet, month }) {
     totals.short = totals.stkSE < 0 ? Math.abs(totals.stkSE) : 0;
     const totalBal = totals.purchase + totals.invPurchase + totals.received + totals.return_
   + totals.ex - totals.invIssue - totals.issue - totals.sold - totals.short;
-    const diff = totals.received - totals.issue; // Received − Issued
+        const issuedAll = totals.issue + totals.invIssue;      // ISS + IN ISS
+    const diff = totals.received - issuedAll;              // Received − Issued
     // Received > Issued → LOAN (negative value); Received < Issued → O/I (positive value);
     // Received = Issued → keep existing zero-case label/color.
     const loanLabel = diff > 0 ? "LOAN" : diff < 0 ? "O/I" : "Loan / OI";
@@ -2739,7 +3021,7 @@ function EmptyBottles({ d, outlet, month }) {
               {/* Loan / Overpaid row */}
                 <tr style={{ background: "var(--s2)" }}>
                 <td colSpan={COLS.length + 1} style={{ ...tdStyle(true, loanColor), textAlign: "left" }}>
-                  RECEIVED {fmtN(totals.received)} &nbsp;·&nbsp; ISSUED {fmtN(totals.issue)} &nbsp;·&nbsp; {loanLabel} {fmtN(loanDisplayVal)}
+                  RECEIVED {fmtN(totals.received)} &nbsp;·&nbsp; ISSUED {fmtN(issuedAll)} &nbsp;·&nbsp; {loanLabel} {fmtN(loanDisplayVal)}
                 </td>
               </tr>
             </tbody>
@@ -2850,7 +3132,8 @@ function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
       .finally(() => setSavingKey(null));
   }
   const th = { padding: "6px 9px", fontSize: 9.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "var(--mut2,var(--mut))", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
-  const td = (bold, color) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, color: color || "var(--txt)", whiteSpace: "nowrap" });
+   const td = (bold, color) => ({ padding: "5px 9px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", borderBottom: "1px solid rgba(63,63,70,.15)", fontWeight: bold ? 700 : 400, color: color || "var(--txt)", whiteSpace: "nowrap" });
+     const tdText = (weight, color) => ({ padding: "5px 9px", fontSize: 11.5, fontWeight: weight, textAlign: "left", borderBottom: "1px solid rgba(63,63,70,.15)", color: color || "var(--txt)", whiteSpace: "nowrap" });
   const inputSt = { width: 84, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" };
 
   const totalAmount = rows.reduce((a, r) => a + r.amount, 0);
@@ -2879,11 +3162,11 @@ function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
 
     return (
       <tr>
-        <td style={{ ...td(false), textAlign: "left" }}>{r.label}</td>
+        <td style={tdText(600)}>{r.label}</td>
 
-        <td style={{ ...td(false), textAlign: "left" }}>
-          {editable ? (
-            <input type="text" placeholder="short / excess note" value={detailsText} style={{ ...inputSt, width: 150, textAlign: "left" }}
+        <td style={tdText(400, "var(--mut)")}>
+  {editable ? (
+    <input type="text" placeholder="short / excess note" value={detailsText} style={{ ...inputSt, width: 150, textAlign: "left", fontFamily: "'Inter',sans-serif" }}
               onChange={e => setDetailsText(e.target.value)}
               onBlur={e => saveField(r, "details", e.target.value)} />
           ) : (r.details || "—")}
@@ -2899,7 +3182,7 @@ function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
           ) : fmtN(r.bfLoan)}
         </td>
 
-        <td style={td(false, bfStatus.color)}>{bfStatus.label}</td>
+        <td style={{ ...tdText(600, bfStatus.color), textAlign: "right" }}>{bfStatus.label}</td>
           <td style={td(false, r.movement > 0 ? "var(--red)" : r.movement < 0 ? "var(--grn)" : "var(--mut)")}>
           {(() => {
             // Reuses the exact same Loan/O-I value Empty Bottle Summary
@@ -2984,7 +3267,7 @@ function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
             )}
 
             <tr style={{ borderTop: "2px solid var(--bdr2)", background: "var(--s3)" }}>
-              <td colSpan={9} style={{ ...td(true), textAlign: "left" }}>Total Empty Stock Value</td>
+              <td colSpan={9} style={tdText(700)}>Total Empty Stock Value</td>
               <td style={td(true, "var(--gld2)")}>{fmt(totalAmount)}</td>
             </tr>
           </tbody>
@@ -3613,15 +3896,17 @@ function UGBook({ d, outlet, month }) {
   const applyDiscount = (diffEntry?.applyDiscount !== undefined && diffEntry?.applyDiscount !== null)
     ? !!diffEntry.applyDiscount
     : DEFAULT_DISCOUNT_SUPPLIERS.some(id => normSup(id) === normSup(supplierId));
+    const eightMap = (IDL_EIGHT_PCT_ENABLED && applyDiscount && isIdlSupplier(supplierId))
+    ? await getIdlEightAmtMap(outlet) : {};
 
   const rowsAmount = invThisMonth
     .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
     .filter(i => !useManualBF || i.date >= bfEffectiveDate)
     .reduce((a, i) => {
-      const amount    = Number(i.amount) || 0;
-      const sixPctDis = applyDiscount ? (amount / 1.18) * 0.06 : 0;
-      const vatDis    = applyDiscount ? (amount * 0.06) - sixPctDis : 0;
-      return a + amount - sixPctDis - vatDis;
+      const amount = Number(i.amount) || 0;
+      if (!applyDiscount) return a + amount;
+      const sp = invoiceDiscountSplit(amount, eightMap[normInvKey(i.ref || i.id)]);
+      return a + amount - sp.sixPctDis - sp.eightPctDis - sp.vatDis - sp.vatDis8;
     }, 0);
 
   const totalAmount = bfBalance + rowsAmount;
@@ -3629,8 +3914,11 @@ function UGBook({ d, outlet, month }) {
 
  
   
-  const totalAmountAdj = totalAmount + balanceAmtDiff + damageAmount;
-  const totalPaidAdj   = totalPaid   + paymentDiff   + damagePayment;
+   const isLux = isLuxurySupplier(supplierId);
+  const luxuryDisc    = isLux ? await loadLuxuryDisc(outlet, month, supplierId, "amount")  : 0;
+  const luxuryDiscPay = isLux ? await loadLuxuryDisc(outlet, month, supplierId, "payment") : 0;
+  const totalAmountAdj = totalAmount + balanceAmtDiff + damageAmount - luxuryDisc;
+  const totalPaidAdj   = totalPaid   + paymentDiff   + damagePayment + luxuryDiscPay;
 
   return totalAmountAdj - totalPaidAdj; // Balance C/D
 }
@@ -3761,21 +4049,40 @@ async function computeSupplierDiscountVAT(outlet, month, supplierId, apInvoices)
 
   if (!applyDiscount) return { sixPctDis: 0, vatDis: 0 };
 
-  let sixPctDis = 0, vatDis = 0;
+   const eightMap = (IDL_EIGHT_PCT_ENABLED && isIdlSupplier(supplierId))
+    ? await getIdlEightAmtMap(outlet) : {};
+
+    let sixPctDis = 0, vatDis = 0, eightPctDis = 0, vatDis8 = 0;
   invThisMonth
     .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
     .filter(i => !useManualBF || i.date >= bfEffectiveDate)
     .forEach(i => {
       const amount = Number(i.amount) || 0;
-      const six = (amount / 1.18) * 0.06;
-      const vat = (amount * 0.06) - six;
-      sixPctDis += six;
-      vatDis    += vat;
+      const sp = invoiceDiscountSplit(amount, eightMap[normInvKey(i.ref || i.id)]);
+      sixPctDis   += sp.sixPctDis;
+      eightPctDis += sp.eightPctDis;
+           vatDis      += sp.vatDis;    // VAT on the 6% discount
+      vatDis8     += sp.vatDis8;   // VAT on the 8% discount
     });
 
-  return { sixPctDis, vatDis };
+   return { sixPctDis, vatDis, eightPctDis, vatDis8 };
 }
+// ONE place that decides a bank account's month-end balance. Uses the Balance C/D
+// saved in the Bank Ledger for that month; only if none was saved does it fall back
+// to monthly B/F (or previous month's C/D) + this month's ledger rows.
+async function getBankAccountBalance(outlet, accId, month, bankLedgerRows) {
+  const cd = await getBankCD(outlet, accId, month);
+  if (cd !== null && cd !== undefined && Number(cd) !== 0) return Number(cd);
 
+  const excl = ["bf", "bf_monthly", "pending", "cd_manual", "different"];
+  const txns = (bankLedgerRows || []).filter(r => r.bank_id === accId && !excl.includes(r.balance_type));
+  let bf = await getBankBFMonthly(outlet, accId, month);
+  if (bf === null || bf === undefined) {
+    const prevCD = await getBankCD(outlet, accId, prevMonthStr(month));
+    bf = prevCD || (await getBankBF(outlet, accId));
+  }
+  return (Number(bf) || 0) + txns.reduce((a, r) => a + (Number(r.debit) || 0) - (Number(r.credit) || 0), 0);
+}
   // Computes the SAME "Net Position" total Stock Summary shows, for one
 // outlet+month, by calling the exact same underlying functions Stock
 // Summary uses (getBankBF, getCardCD, computeSupplierBalanceCD) — so
@@ -3800,13 +4107,10 @@ async function computeNetPositionTotal(outlet, month, d) {
     const { data: bankRows } = await supabase.from("bank_accounts").select("*")
       .eq("outlet_id", outlet).eq("active", true).eq("hidden", false)
       .neq("account_type", "card");
-    if (bankRows && bankRows.length) {
-      const excl = ["bf", "bf_monthly", "pending", "cd_manual", "different"];
+      if (bankRows && bankRows.length) {
       bankTotal = 0;
       for (const acc of bankRows) {
-        const bf = await getBankBF(outlet, acc.id);
-        const txns = (d.bankLedger || []).filter(r => r.bank_id === acc.id && !excl.includes(r.balance_type));
-        bankTotal += (Number(bf) || 0) + txns.reduce((a, r) => a + (Number(r.debit) || 0) - (Number(r.credit) || 0), 0);
+        bankTotal += await getBankAccountBalance(outlet, acc.id, month, d.bankLedger);
       }
     }
     const { data: cardRows } = await supabase.from("bank_accounts").select("*")
@@ -3817,9 +4121,9 @@ async function computeNetPositionTotal(outlet, month, d) {
     }
   }
 
-  const supplierBalances = await Promise.all(
+     const supplierBalances = (await Promise.all(
     SUPPLIERS_LIST.map(s => computeSupplierBalanceCD(outlet, month, s.id, d.apInvoices, d.apPayments))
-  );
+  )).map(v => Math.max(0, v));
   const totalCredit = supplierBalances.reduce((a, v) => a + v, 0);
 
   const mStartPos = monthStart(month);
@@ -3885,18 +4189,15 @@ async function computeNetPositionTotal(outlet, month, d) {
   useEffect(() => {
     if (outlet === "ALL" || !bankAccounts.length) { setBankBalances({}); return; }
     let cancelled = false;
-    (async () => {
-      const excl = ["bf", "bf_monthly", "pending", "cd_manual", "different"];
+       (async () => {
       const entries = {};
       for (const acc of bankAccounts) {
-        const bf = await getBankBF(outlet, acc.id);
-        const txns = bankLedger.filter(r => r.bank_id === acc.id && !excl.includes(r.balance_type));
-        entries[acc.id] = (Number(bf) || 0) + txns.reduce((a, r) => a + (Number(r.debit) || 0) - (Number(r.credit) || 0), 0);
+        entries[acc.id] = await getBankAccountBalance(outlet, acc.id, month, bankLedger);
       }
       if (!cancelled) setBankBalances(entries);
     })();
     return () => { cancelled = true; };
-  }, [outlet, bankAccounts, bankLedger]);
+  }, [outlet, bankAccounts, bankLedger, month]);
 
        useEffect(() => {
     if (outlet === "ALL" || !cardAccounts.length) { setCardBalances({}); return; }
@@ -4038,7 +4339,11 @@ const assetOthersEntries = assetOthersCat
   // own Balance C/D for this exact outlet+month (see computeSupplierBalanceCD
   // above). No separate all-time AP-window math anymore, so the two
   // reports can never disagree for the same supplier/month.
-  const bySupplier = supplierBalances;
+    // round to 2 dp (+0 turns -0 into 0) so tiny float residue never shows as "-0.00"
+   // round to 2 dp, and a negative (overpaid) supplier balance counts as 0 credit — same rule for every supplier
+  const bySupplier = Object.fromEntries(
+    Object.entries(supplierBalances).map(([k, v]) => [k, Math.max(0, Math.round((Number(v) || 0) * 100) / 100) + 0])
+  );
 
   const creditRows = SUPPLIERS_LIST
     .map(s => ({ name: s.name, id: s.id, balance: bySupplier[s.id] || 0 }))
@@ -4360,6 +4665,17 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   // Normalises supplier IDs before comparing — guards against case or
   // whitespace differences between the SUPPLIERS_LIST used by this dropdown
   // and the supplier_id values saved from Account Payable (S_AP.jsx).
+    const [eightMap, setEightMap] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    if (!IDL_EIGHT_PCT_ENABLED || !isIdlSupplier(supplierId)) { setEightMap({}); return; }
+    getIdlEightAmtMap(outlet).then(m => {
+      if (cancelled) return;
+      
+      setEightMap(m);
+    });
+    return () => { cancelled = true; };
+  }, [supplierId, outlet, month, apInvoices]);
    const isSup = raw => normSup(raw) === normSup(supplierId);
 
   const invThisMonth = (apInvoices || []).filter(i => isSup(i.supplier_id || i.supplier));
@@ -4404,14 +4720,15 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
       const discount  = matchedPayments.reduce((a, p) => a + (Number(p.discount) || 0), 0);
       const chq       = matchedPayments.map(p => p.ref).filter(Boolean).join(", ");
       const payDate   = matchedPayments[0]?.date || "";
-      const amount    = Number(inv.amount) || 0;
-      // 6% Dis = Amount / 1.18 × 0.06
-      // VAT Dis = (Amount × 0.06) − 6% Dis
-      const sixPctDis = applyDiscount ? (amount / 1.18) * 0.06 : 0;
-      const vatDis    = applyDiscount ? (amount * 0.06) - sixPctDis : 0;
-      // Outstanding = Amount − 6% Dis − VAT Dis
-      const outstanding = amount - sixPctDis - vatDis;
-      return { invNo, date: inv.date, amount, payDate, paid, chq, sixPctDis, vatDis, outstanding, discount, isOrphanPayment: false };
+            const amount = Number(inv.amount) || 0;
+      const sp = applyDiscount ? invoiceDiscountSplit(amount, eightMap[normInvKey(invNo)]) : null;
+      const sixPctDis   = sp ? sp.sixPctDis : 0;
+      const eightPctDis = sp ? sp.eightPctDis : 0;
+      const eightAmt    = sp ? sp.eightAmt : 0;
+           const vatDis      = sp ? sp.vatDis  : 0;   // VAT on the 6% discount
+      const vatDis8     = sp ? sp.vatDis8 : 0;   // VAT on the 8% discount
+      const outstanding = amount - sixPctDis - eightPctDis - vatDis - vatDis8;
+      return { invNo, date: inv.date, amount, payDate, paid, chq, sixPctDis, eightPctDis, eightAmt, vatDis, vatDis8, outstanding, discount, isOrphanPayment: false };
     });
 
   // Payments made this month that don't match any invoice shown above —
@@ -4466,10 +4783,12 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   // and is already folded into bfBalance. Using only `rows` for either of
   // these undercounts both, since orphan payments live in allRows/
   // orphanPaymentRows, not `rows`.
-  const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.vatDis, 0)  
-  + returnRows.reduce((a, r) => a + r.amount, 0);
+   const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.eightPctDis - r.vatDis, 0)
+    + returnRows.reduce((a, r) => a + r.amount, 0);
+  const totalVatDis8 = rows.reduce((a, r) => a + r.vatDis8, 0);
   const totalPaid        = allRows.reduce((a, r) => a + r.paid, 0);
   const totalSixPctDis   = rows.reduce((a, r) => a + r.sixPctDis, 0);
+    const totalEightPctDis = rows.reduce((a, r) => a + r.eightPctDis, 0);
   const totalVatDis      = rows.reduce((a, r) => a + r.vatDis, 0);
   let runBal = bfBalance;
 
@@ -4485,7 +4804,34 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   const [damagePay, setDamagePay]           = useState(0);
   const [diffSaving, setDiffSaving] = useState(false);
   const [diffError, setDiffError]   = useState(null);
+  // AFTER (new)
+  const [hideDiscCols, setHideDiscCols] = useState(false);
+  const [luxuryDisc, setLuxuryDiscState] = useState(0);
+  const [luxurySaving, setLuxurySaving]  = useState(false);
+  const [luxuryDiscPay, setLuxuryDiscPayState] = useState(0);
+  const isLuxury = isLuxurySupplier(supplierId);
+  // Columns show only for eligible suppliers, when "apply discount" is ticked,
+  // and not hidden by the new checkbox. Display only, no calculation changes.
+  const show6 = isDisc6Supplier(supplierId) && applyDiscount && !hideDiscCols;
+  const show8 = isDisc8Supplier(supplierId) && applyDiscount && !hideDiscCols;
+  const colWidths = [90, 90, 130, 120, 120, 120, ...(show6 ? [90, 90] : []), ...(show8 ? [90, 90] : []), 120, 120];
+  const colCount  = colWidths.length;
+  const tableMinWidth = colWidths.reduce((a, w) => a + w, 0);
 
+useEffect(() => {
+    let cancelled = false;
+    if (!isLuxury) { setLuxuryDiscState(0); setLuxuryDiscPayState(0); return; }
+    loadLuxuryDisc(outlet, month, supplierId, "amount").then(v => { if (!cancelled) setLuxuryDiscState(v); });
+    loadLuxuryDisc(outlet, month, supplierId, "payment").then(v => { if (!cancelled) setLuxuryDiscPayState(v); });
+    return () => { cancelled = true; };
+  }, [supplierId, outlet, month]);
+
+  async function handleLuxurySave(v, field = "amount") {
+    setLuxurySaving(true);
+    const ok = await saveLuxuryDisc(outlet, month, supplierId, v, field);
+    setLuxurySaving(false);
+    setDiffError(ok ? null : "Could not save Luxury discount — check that supplier_luxury_discount exists with correct permissions.");
+  }
   useEffect(() => {
     let cancelled = false;
     getSupplierDiff(supplierId, outlet, month).then(entry => {
@@ -4528,8 +4874,8 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
     saveDiff(balanceAmtDiff, paymentDiff, val);
   }
 
-const totalAmountAdj = totalAmount + balanceAmtDiff + damageAmt;
-const totalPaidAdj   = totalPaid + paymentDiff + damagePay;
+const totalAmountAdj = totalAmount + balanceAmtDiff + damageAmt - luxuryDisc;
+const totalPaidAdj   = totalPaid + paymentDiff + damagePay + luxuryDiscPay;
 // Balance C/D = Total Amount − Total Payment (using the adjusted totals
 // above — no extra term added/subtracted here)
 const balanceCD = totalAmountAdj - totalPaidAdj;
@@ -4552,6 +4898,13 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
             <input type="checkbox" checked={applyDiscount} onChange={e => handleApplyDiscountToggle(e.target.checked)} />
             Apply 6% trade discount + VAT
           </label>
+          {isDisc6Supplier(supplierId) && applyDiscount && (
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--mut)", cursor: "pointer" }}>
+              <input type="checkbox" checked={hideDiscCols} onChange={e => setHideDiscCols(e.target.checked)} />
+              Hide discount &amp; VAT columns
+            </label>
+          )}
+          
           {diffSaving && <div style={{ fontSize: 11, color: "var(--mut)" }}>Saving…</div>}
           {diffError && <div style={{ fontSize: 11, color: "var(--red)" }}>{diffError}</div>}
         </div>
@@ -4590,18 +4943,9 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
              <style>{`
             .scl-row:hover { background: rgba(31,41,55,.5) !important; }
           `}</style>
-                    <table style={{ width: "100%", minWidth: 1080, tableLayout: "fixed", borderCollapse: "collapse", fontSize: 11 }}>
-              <colgroup>
-              <col style={{ width: 90 }} />
-              <col style={{ width: 90 }} />
-              <col style={{ width: 130 }} />
-              <col style={{ width: 120 }} />
-              <col style={{ width: 120 }} />
-              <col style={{ width: 120 }} />
-              <col style={{ width: 90 }} />
-              <col style={{ width: 90 }} />
-              <col style={{ width: 120 }} />
-              <col style={{ width: 120 }} />
+             <table style={{ width: "100%", minWidth: tableMinWidth, tableLayout: "fixed", borderCollapse: "collapse", fontSize: 11 }}>
+            <colgroup>
+             {colWidths.map((w, i) => <col key={i} style={{ width: w }} />)}
             </colgroup>
             <thead>
               <tr>
@@ -4611,43 +4955,47 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                 <th style={th}>Amount</th>
                 <th style={{ ...th, textAlign: "left", paddingLeft: 24 }}>Pay Date</th>
                 <th style={th}>Payment</th>
-                <th style={th}>6% Dis</th>
-                <th style={th}>VAT Dis</th>
+                {show6 && <th style={th}>6% Dis</th>}
+                {show6 && <th style={th}>VAT Dis</th>}
+                {show8 && <th style={th}>8% Dis</th>}
+                {show8 && <th style={th}>VAT (8%)</th>}
                 <th style={th}>Outstanding</th>
                 <th style={th}>Balance</th>
               </tr>
             </thead>
             <tbody>
               <tr style={{ background: "var(--s2)" }}>
-                <td style={td(true)} colSpan={9}>B/F Balance</td>
+                <td style={td(true)} colSpan={colCount - 1}>B/F Balance</td>
                 <td style={td(true)}>{bfBalance !== 0 ? fmt(bfBalance) : "—"}</td>
               </tr>
-                                {allRows.length === 0 && (
-                <tr><td colSpan={10} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No invoices this period</td></tr>
+              {allRows.length === 0 && (
+                <tr><td colSpan={colCount} style={{ padding: 20, textAlign: "center", color: "var(--mut)" }}>No invoices this period</td></tr>
               )}
-                            {allRows.map((r, i) => {
-                // Balance = Amount Total − Payment Total (orphan payment
-                // rows have amount 0, so they only ever reduce the balance)
-                                runBal += r.amount - r.paid;
+              {allRows.map((r, i) => {
+                runBal += r.amount - r.paid;
                 return (
                   <tr key={i} className="scl-row" style={{ background: i % 2 === 1 ? "rgba(63,63,70,.15)" : "transparent" }}>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.isOrphanPayment ? "—" : r.date}</td>
-              
                     <td title={r.chq || ""} style={{ ...td(false), textAlign: "left" }}>{(r.chq || "").split(",").map(c => c.trim().slice(-3)).filter(Boolean).join(", ") || "—"}</td>
                     <td style={{ ...td(false), textAlign: "left" }}>{r.isOrphanPayment ? `${r.invNo} (prior period)` : r.invNo}</td>
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.amount)}</td>
-                     <td style={{ ...td(false), textAlign: "left", paddingLeft: 24 }}>{r.payDate || "—"}</td>
+                    <td style={{ ...td(false), textAlign: "left", paddingLeft: 24 }}>{r.payDate || "—"}</td>
                     <td style={td(false)}>{r.paid !== 0 ? fmt(r.paid) : "-"}</td>
-                    <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.sixPctDis)}</td>
-                    <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.vatDis)}</td>
+                      {show6 && <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.sixPctDis)}</td>}
+                    {show6 && <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.vatDis)}</td>}
+                    {show8 && (
+                      <td style={td(false)} title={r.eightAmt > 0 ? `8% items: Rs.${fmt(r.eightAmt)}` : ""}>
+                        {r.isOrphanPayment ? "—" : r.eightAmt > 0 ? fmt(r.eightPctDis) : "-"}
+                      </td>
+                    )}
+                     {show8 && <td style={td(false)}>{r.isOrphanPayment ? "—" : r.eightAmt > 0 ? fmt(r.vatDis8) : "-"}</td>}
                     <td style={td(false)}>{r.isOrphanPayment ? "—" : fmt(r.outstanding)}</td>
                     <td style={td(true)}>{fmt(runBal)}</td>
                   </tr>
                 );
               })}
 
-                            {/* Staff-entered corrections — shown before TOTAL */}
-              <tr className="no-print-input-labels">
+            <tr>
                 <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Amount Different</td>
                 <td style={td(false)}>
                   <input type="number" step="0.01" value={balanceAmtDiff}
@@ -4655,30 +5003,19 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                     onBlur={e => saveDiff(parseFloat(e.target.value) || 0, paymentDiff)}
                     style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
                 </td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
+                {Array.from({ length: colCount - 4 }).map((_, i) => <td key={i} style={td(false)} />)}
               </tr>
               <tr>
                 <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Payment Different</td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
+                <td style={td(false)} /><td style={td(false)} />
                 <td style={td(false)}>
                   <input type="number" step="0.01" value={paymentDiff}
                     onChange={e => setPaymentDiff(parseFloat(e.target.value) || 0)}
                     onBlur={e => saveDiff(balanceAmtDiff, parseFloat(e.target.value) || 0)}
                     style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
                 </td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
+                {Array.from({ length: colCount - 6 }).map((_, i) => <td key={i} style={td(false)} />)}
               </tr>
-
-              {/* Damage — Amount column */}
               <tr>
                 <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Damage Amount</td>
                 <td style={td(false)}>
@@ -4687,44 +5024,60 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                     onBlur={e => saveDiff(balanceAmtDiff, paymentDiff, applyDiscount, parseFloat(e.target.value) || 0, damagePay)}
                     style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
                 </td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
+                {Array.from({ length: colCount - 4 }).map((_, i) => <td key={i} style={td(false)} />)}
               </tr>
-              {/* Damage — Payment column */}
               <tr>
                 <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>Damage Payment</td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
+                <td style={td(false)} /><td style={td(false)} />
                 <td style={td(false)}>
                   <input type="number" step="0.01" value={damagePay}
                     onChange={e => setDamagePay(parseFloat(e.target.value) || 0)}
                     onBlur={e => saveDiff(balanceAmtDiff, paymentDiff, applyDiscount, damageAmt, parseFloat(e.target.value) || 0)}
                     style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
                 </td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
-                <td style={td(false)}></td>
+                {Array.from({ length: colCount - 6 }).map((_, i) => <td key={i} style={td(false)} />)}
               </tr>
+              {isLuxury && (
+                <tr>
+                  <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>16% Discount Amount</td>
+                  <td style={td(false)}>
+                    <input type="number" step="0.01" value={luxuryDisc} disabled={outlet === "ALL" || luxurySaving}
+                      onChange={e => setLuxuryDiscState(parseFloat(e.target.value) || 0)}
+                      onBlur={e => handleLuxurySave(parseFloat(e.target.value) || 0)}
+                      style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
+                  </td>
+                {Array.from({ length: colCount - 4 }).map((_, i) => <td key={i} style={td(false)} />)}
+                </tr>
+              )}
+              {isLuxury && (
+                <tr>
+                  <td style={{ ...td(false), textAlign: "left" }} colSpan={3}>16% Discount Payment</td>
+                  <td style={td(false)} /><td style={td(false)} />
+                  <td style={td(false)}>
+                    <input type="number" step="0.01" value={luxuryDiscPay} disabled={outlet === "ALL" || luxurySaving}
+                      onChange={e => setLuxuryDiscPayState(parseFloat(e.target.value) || 0)}
+                      onBlur={e => handleLuxurySave(parseFloat(e.target.value) || 0, "payment")}
+                      style={{ width: 90, padding: "3px 6px", fontSize: 11.5, fontFamily: "'JetBrains Mono',monospace", textAlign: "right", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 4, color: "var(--txt)" }} />
+                  </td>
+                  {Array.from({ length: colCount - 6 }).map((_, i) => <td key={i} style={td(false)} />)}
+                </tr>
+              )}
 
-                <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
+              <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
                 <td style={td(true)} colSpan={3}>TOTAL</td>
                 <td style={td(true)}>{fmt(totalAmountAdj)}</td>
                 <td style={td(true)}></td>
                 <td style={td(true)}>{fmt(totalPaidAdj)}</td>
-                <td style={td(true)}>{fmt(totalSixPctDis)}</td>
-                <td style={td(true)}>{fmt(totalVatDis)}</td>
+                 {show6 && <td style={td(true)}>{fmt(totalSixPctDis)}</td>}
+                {show6 && <td style={td(true)}>{fmt(totalVatDis)}</td>}
+                {show8 && <td style={td(true)}>{fmt(totalEightPctDis)}</td>}
+                {show8 && <td style={td(true)}>{fmt(totalVatDis8)}</td>}
                 <td style={td(true)}></td>
                 <td style={td(true)}>{fmt(runBal)}</td>
               </tr>
 
-              {/* Balance C/D = Total Amount − Total Payment */}
               <tr style={{ background: "var(--s2)" }}>
-                <td style={td(true)} colSpan={9}>Balance C/D</td>
+                <td style={td(true)} colSpan={colCount - 1}>Balance C/D</td>
                 <td style={td(true)}>{fmt(balanceCD)}</td>
               </tr>
             </tbody>

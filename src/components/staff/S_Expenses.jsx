@@ -199,7 +199,7 @@ export default function S_Expenses({ outlet, user, toast_ }) {
   useEffect(() => {
     supabase.from("cash_ledger")
       .select("*").eq("outlet_id", outlet)
-      .in("balance_type", ["drawing", "other_cash"])
+      .in("balance_type", ["drawing", "other_cash", "other_payment"])
       .order("date", { ascending: false })
       .then(({ data }) => setOcpRecords(data || []));
   }, [outlet]);
@@ -217,11 +217,8 @@ export default function S_Expenses({ outlet, user, toast_ }) {
     async function submitOtherCashPayment() {
     if (ocpSaving) return; // prevents a double-click (or double-fire) from inserting twice
     if (!ocpAmt || parseFloat(ocpAmt) <= 0) { toast_("Enter valid amount", "err"); return; }
-    // Other Cash Payment: use the preset unless "CUSTOM" is picked, in
-    // which case the free-text field is required. Personal Drawing keeps
-    // using the free-text field as before.
-     if (ocpType === "other_cash" && ocpPreset === "CUSTOM" && !ocpDesc.trim()) {
-      toast_("Enter a description for the custom entry", "err"); return;
+       if (ocpType === "other_payment" && !ocpDesc.trim()) {
+      toast_("Enter a description for this payment", "err"); return;
     }
     if (ocpType === "drawing" && ocpMethod === "Bank" && !ocpBankId) {
       toast_("Select a bank account", "err"); return;
@@ -229,10 +226,12 @@ export default function S_Expenses({ outlet, user, toast_ }) {
     setOcpSaving(true);
     try {
       const amt = parseFloat(ocpAmt);
-      const label = ocpType === "drawing"
-        ? "Personal Drawing"
-        : (ocpPreset === "CUSTOM" ? ocpDesc.trim() : ocpPreset);
-            const finalDesc = ocpType === "drawing" ? (ocpDesc || label) : label;
+      const label = ocpType === "drawing" ? "Personal Drawing"
+  : ocpType === "other_cash" ? ocpPreset
+  : "Other Payment";
+const finalDesc = ocpType === "drawing" ? (ocpDesc || label)
+  : ocpType === "other_cash" ? ocpPreset
+  : ocpDesc.trim();
       if (ocpType === "drawing" && ocpMethod === "Bank") {
         // Bank Ledger money-out (credit = out, same as expense Bank method).
         // Description MUST start with "Personal Drawing" — Capital Sheet reads it.
@@ -403,10 +402,12 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             </div>
                       <div className="ff">
               <label>Type</label>
-              <select value={ocpType} onChange={e => setOcpType(e.target.value)}>
-                <option value="drawing">Personal Drawing</option>
-                                <option value="other_cash">Other Cash Payment</option>
-              </select>
+             <select value={ocpType} onChange={e => setOcpType(e.target.value)}>
+            <option value="drawing">Personal Drawing</option>
+            <option value="other_cash">Other Cash Payment</option>
+            <option value="other_payment">Other (In Hand Cash only)</option>
+           </select>
+              
             </div>
             {ocpType === "drawing" && (
               <div className="ff">
@@ -422,21 +423,22 @@ export default function S_Expenses({ outlet, user, toast_ }) {
                 <label>Bank Account *</label>
                 <select value={ocpBankId} onChange={e => setOcpBankId(e.target.value)}>
                   <option value="">Select bank account…</option>
-                  {outletBanks.map(b => (
+                                  {outletBanks.map(b => (
                     <option key={b.id} value={b.id}>{b.bank} — {b.account_no || b.accountNo}</option>
                   ))}
                 </select>
               </div>
             )}
+
             {ocpType === "other_cash" && (
               <div className="ff">
                 <label>Category *</label>
                 <select value={ocpPreset} onChange={e => setOcpPreset(e.target.value)}>
                   {OCP_PRESETS.map(p => <option key={p} value={p}>{p}</option>)}
-                  <option value="CUSTOM">Other</option>
                 </select>
               </div>
             )}
+
             <div className="ff">
               <label>Amount (Rs.) *</label>
               <input type="number" placeholder="0.00" value={ocpAmt} onChange={e => setOcpAmt(e.target.value)} />
@@ -444,16 +446,18 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             {/* Personal Drawing: free-text description as before.
                 Other Cash Payment: free-text only shown/required when
                 CUSTOM is selected in the Category dropdown above. */}
-            {(ocpType === "drawing" || ocpPreset === "CUSTOM") && (
+          {(ocpType === "drawing" || ocpType === "other_payment") && (
               <div className="ff full">
-                <label>Description{ocpType === "other_cash" ? " *" : ""}</label>
+                <label>Description{ocpType === "other_payment" ? " *" : ""}</label>
                 <input placeholder="Details…" value={ocpDesc} onChange={e => setOcpDesc(e.target.value)} />
               </div>
             )}
           </div>
           <div className="nbox nb-a" style={{ marginBottom: 10 }}>
-            ⚠ Deducts from In Hand Cash and appears as its own line in the Cash Flow Statement.
-          </div>
+  {ocpType === "other_payment"
+    ? "⚠ Deducts from In Hand Cash only. NOT shown in the Capital Sheet."
+    : "⚠ Deducts from In Hand Cash and appears in the Capital Sheet (Drawings)."}
+</div>
            <button className="btn btng" onClick={submitOtherCashPayment} disabled={ocpSaving}>
           {I.check} {ocpSaving ? "Saving…" : "Save"}
           </button> 
@@ -464,8 +468,13 @@ export default function S_Expenses({ outlet, user, toast_ }) {
             {ocpRecords.length === 0 && <tr><td colSpan={4}><div className="empty">No entries yet.</div></td></tr>}
             {ocpRecords.slice(0, 25).map(r => (
               <tr key={r.id}>
-                <td className="mono">{r.date}</td>
-                <td><span className="badge ba">{r.balance_type === "drawing" ? "Personal Drawing" : "Other Cash"}</span></td>
+                              <td className="mono">{r.date}</td>
+                <td>
+                  <span className="badge ba">
+                    {r.balance_type === "drawing" ? "Personal Drawing"
+                      : r.balance_type === "other_payment" ? "Other Payment" : "Other Cash"}
+                  </span>
+                </td>
                 <td style={{ fontSize: 11, color: "var(--mut)" }}>{r.description || "—"}</td>
                 <td className="rt mono cr bold">Rs.{fmt(r.credit)}</td>
               </tr>

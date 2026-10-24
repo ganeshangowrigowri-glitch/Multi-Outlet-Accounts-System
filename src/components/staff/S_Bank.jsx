@@ -892,7 +892,7 @@ const [entries, setEntries] = useState([]);
                       <td style={td} className="mono">{e.check_no || "—"}</td>
                       <td className="ldesc" style={td}>{e.description}</td>
                       <td className="rt" style={td}>{e.credit > 0 ? fmt(e.credit) : ""}</td>
-                      <td className="rt" style={td}>{e.debit > 0 ? fmt(e.debit) : ""}</td>
+                      <td className="rt" style={td}>{Number(e.debit) > 0 ? fmt(e.debit) : Number(e.debit) < 0 ? `(${fmt(Math.abs(e.debit))})` : ""}</td>
                       <td className="rt" style={{ ...td, fontWeight: 600 }}>{fmt(running)}</td>
                     </tr>
                   );

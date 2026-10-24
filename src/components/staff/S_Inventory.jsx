@@ -1002,6 +1002,7 @@ const pQ = {}, ipQ = {};
             invIssue:    saved.invIssue || "",
             issue:       saved.issue    || "",
             sold:        saved.sold     || "",
+            soldEdited:  saved.soldEdited || false,
             rate:        Number(saved.rate) || adminSP,
             endStock: saved.endStockEdited ? saved.endStock : null,
             endStockEdited: saved.endStockEdited || false,
@@ -1110,11 +1111,16 @@ if (field === "endStock") {
   return { ...r, [field]: parseFloat(val) || 0 };
 }));
 
- const updE = (id, field, val) => setER(prev => prev.map(r => {
+const updE = (id, field, val) => setER(prev => prev.map(r => {
   if (r.id !== id) return r;
   autoEmp.markDirty();
+  // Staff typed a sold qty → remember it so the auto total never overwrites it.
+  // Clearing the box (empty) hands the row back to the auto total.
+  if (field === "sold") {
+    return { ...r, sold: val, soldEdited: val !== "", endStock: null };
+  }
   // When any balance-affecting field changes, clear endStock so it auto-follows
-  if (["sold", "received", "return_", "invIssue", "issue"].includes(field)) {
+  if (["received", "return_", "invIssue", "issue"].includes(field)) {
   return { ...r, [field]: val, endStock: null };
 }
   if (field === "endStock") {
@@ -1141,19 +1147,20 @@ return { ...r, [field]: val };
     { emptyCode: "DEMP P", supplier: "2001-DCSL", names: ["DES P", "DCA P"] },
     { emptyCode: "DEMP N", supplier: "2001-DCSL", names: ["DES N", "DCA N", "DEC N", "DDB N"] },
   ];
-  useEffect(() => {
+   useEffect(() => {
+    if (empDate !== mainDate) return;               // Main total belongs to Main's date only
     setER(prev => prev.map(r => {
       if (r.supplier !== "DCSL") return r;
+      if (r.soldEdited) return r;                   // staff changed it → never overwrite
       const cfg = DCSL_EMP_SOLD_MAP.find(c => c.emptyCode === r.code);
       if (!cfg) return r;
       const sum = mainRows
         .filter(m => m.supplier === cfg.supplier && cfg.names.includes(m.name))
         .reduce((a, m) => a + (parseFloat(m.sold) || 0), 0);
-      const sumStr = String(sum);
-      if (r.sold === sumStr) return r;
-      return { ...r, sold: sumStr, endStock: null };
+      if ((parseFloat(r.sold) || 0) === sum) return r;   // compare as numbers (saved value is a number)
+      return { ...r, sold: String(sum), endStock: null };
     }));
-  }, [mainRows]);
+  }, [mainRows, empDate, mainDate]);
 
   // ─────────────────────────────────────────────────────────
   //  SAVE MAIN DAILY SALE
@@ -1313,7 +1320,7 @@ return true;
    
   // ─────────────────────────────────────────────────────────
   //  CURRENT STATUS DATA (Tab 5 logic)
-  //  Total Bottle Sale = Opening + Total Purchase − In Hand Stock
+  //  Total Bottle Sale = Opening + Total Purchase + transfer in − transfer out- In Hand Stock
   //  Physical Stock    = In Hand Stock × Unit Cost
   //  Profit            = Margin × Total Bottle Sale
   //  Margin            = Selling Price − Unit Cost
@@ -1443,6 +1450,7 @@ if (salesInRange.length > 0) {
     .forEach(t => txnItems(t).forEach(l => {
        if (lineMatchesItem(l, item)) transferOut += parseFloat(l.qty) || 0;
     }));
+    
 
   // ── Returns ──
   let totalReturn = 0;
@@ -1496,18 +1504,25 @@ if (salesInRange.length > 0) {
   totalSaleAmt += untracked * sp;
   profit       += untracked * mg;
 
-  // ── Adj to stock (stock short/excess) ──
-  // Last saved stkSE for this item in range, or 0
-  let adjStock = 0;
-  if (salesInRange.length > 0) {
-    const lastSale = salesInRange[salesInRange.length - 1];
-    const lastRow  = (lastSale.items || []).find(
-      r => r.code === item.code && r.id === item.id && !r.isEmptyItem
-    );
-    if (lastRow?.stkSE !== undefined) adjStock = lastRow.stkSE || 0;
-  }
-
-   const pk = `${item.id}_${fromDate}_${toDate}`;
+  // ── Adj to stock: total of every day's stock short/excess in the range ──
+const stkByDate = {};
+salesInRange.forEach(s => {
+  const rows = (s.items || []).filter(r =>
+    !r.isEmptyItem && (
+      (r.id && r.id === item.id) ||
+      (r.code === item.code && r.supplier === item.supplier)
+    )
+  );
+  rows.forEach(r => {
+    const v = parseFloat(r.stkSE) || 0;
+    // duplicate records for a date: keep the one with the larger adjustment
+    if (stkByDate[s.date] === undefined || Math.abs(v) > Math.abs(stkByDate[s.date])) {
+      stkByDate[s.date] = v;
+    }
+  });
+});
+const adjStock = Object.values(stkByDate).reduce((a, v) => a + v, 0);
+const pk = `${item.id}_${fromDate}_${toDate}`;
 
   return {
     ...item,

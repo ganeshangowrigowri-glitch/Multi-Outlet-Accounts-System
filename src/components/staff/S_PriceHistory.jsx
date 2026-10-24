@@ -3,7 +3,7 @@ import { fmt, today } from "../../utils/helpers";
 import { getPriceHistoryStock, upsertPriceHistoryStock } from "../../db";
 
 
-function buildHistoryRows(masterInv, overridesMain) {
+export function buildHistoryRows(masterInv, overridesMain) {
   const rows = [];
   (masterInv || []).forEach(item => {
     if (item.type === "EMP") return;
