@@ -5098,10 +5098,20 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
 // which useReportData already loads month-scoped for the selected outlet.
 // ══════════════════════════════════════════════════════
 function CashPaymentSummary({ d, outlet, month }) {
+  // All three types the Expenses window saves to the cash ledger
+  const SUMMARY_TYPES = ["other_cash", "drawing", "other_payment"];
+  const typeLabel = t =>
+    t === "drawing" ? "Personal Drawing"
+    : t === "other_payment" ? "Other Payment"
+    : "Other Cash";
+
   const rows = (d.cashLedger || [])
-    .filter(r => r.balance_type === "other_cash" || r.balance_type === "drawing")
+    .filter(r => SUMMARY_TYPES.includes(r.balance_type))
     .sort((a, b) => (a.date || "").localeCompare(b.date || ""));
 
+  const sumOf = t => rows
+    .filter(r => r.balance_type === t)
+    .reduce((a, r) => a + (Number(r.credit) || 0), 0);
   const total = rows.reduce((a, r) => a + (Number(r.credit) || 0), 0);
 
   const th = { padding: "6px 9px", fontSize: 9.5, fontWeight: 700, letterSpacing: ".06em", textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)", borderBottom: "1px solid var(--bdr)", whiteSpace: "nowrap", textAlign: "right" };
