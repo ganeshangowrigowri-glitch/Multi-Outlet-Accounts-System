@@ -646,24 +646,42 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
       });
   }
 
-  
+    // ── Source C: Total Sales Difference (Daily Sale screen) ──
+  // saved total − Σ(sold × rate). (−) → Short, (+) → Excess, on the sale's own date.
+  const salesDiffSE = {};
+  {
+    const lastSaleByDate = {};
+    salesData.forEach(sale => {
+      if (!sale.date || sale.date < periodFrom || sale.date > periodTo) return;
+      if (sale.total === undefined || sale.total === null || sale.total === "") return;
+      const items = (sale.items || []).filter(r => !r.isEmptyItem);
+      if (!items.length) return;               // skip Empty-stock sale records
+      lastSaleByDate[sale.date] = sale;         // one record per date, last saved wins
+    });
+    Object.entries(lastSaleByDate).forEach(([date, sale]) => {
+      const base = (sale.items || []).filter(r => !r.isEmptyItem)
+        .reduce((a, r) => a + (parseFloat(r.sold) || 0) * (parseFloat(r.rate) || 0), 0);
+      const diff = Math.round(((Number(sale.total) || 0) - base) * 100) / 100;
+      if (!diff) return;
+      salesDiffSE[date] = diff < 0 ? { short: -diff, excess: 0 } : { short: 0, excess: diff };
+    });
+  }
   // ── Manual Short Recover / Excess Recover (position_ledger, in range) ──
   const shortRecoverRows  = stockSeEntries.filter(e => e.category === "short_recover"  && e.date >= periodFrom && e.date <= periodTo);
   const excessRecoverRows = stockSeEntries.filter(e => e.category === "excess_recover" && e.date >= periodFrom && e.date <= periodTo);
 
   // ── Combine into one Date-ordered row set ──
-  const allDates = new Set([
-        ...Object.keys(inventorySE), ...Object.keys(daySheetSE), ...Object.keys(daySheetSE),
+   const allDates = new Set([
+    ...Object.keys(inventorySE), ...Object.keys(daySheetSE), ...Object.keys(salesDiffSE),
     ...shortRecoverRows.map(e=>e.date), ...excessRecoverRows.map(e=>e.date),
   ]);
   const rows = [...allDates].sort().map(date => ({
     date,
-    short:  (inventorySE[date]?.short||0)  + (daySheetSE[date]?.short||0),
-    excess: (inventorySE[date]?.excess||0) + (daySheetSE[date]?.excess||0),
+    short:  (inventorySE[date]?.short||0)  + (daySheetSE[date]?.short||0)  + (salesDiffSE[date]?.short||0),
+    excess: (inventorySE[date]?.excess||0) + (daySheetSE[date]?.excess||0) + (salesDiffSE[date]?.excess||0),
     shortRecover:  shortRecoverRows.filter(e=>e.date===date).reduce((a,e)=>a+(Number(e.amount)||0),0),
     excessRecover: excessRecoverRows.filter(e=>e.date===date).reduce((a,e)=>a+(Number(e.amount)||0),0),
   }));
-
   const totalShort         = rows.reduce((a,r)=>a+r.short,0);
   const totalShortRecover  = rows.reduce((a,r)=>a+r.shortRecover,0);
   const totalExcess        = rows.reduce((a,r)=>a+r.excess,0);
@@ -808,7 +826,14 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
                 <td style={td}>{r.excess ? fmt(r.excess) : "-"}</td>
                 <td style={td}>{r.excessRecover ? fmt(r.excessRecover) : "-"}</td>
               </tr>
-            ))}
+                     ))}
+            <tr style={{background:"var(--s3)",borderTop:"2px solid var(--bdr2)"}}>
+              <td style={{...td,textAlign:"left",fontWeight:700}}>Total</td>
+              <td style={{...td,fontWeight:700}}>{fmt(totalShort)}</td>
+              <td style={{...td,fontWeight:700}}>{fmt(totalShortRecover)}</td>
+              <td style={{...td,fontWeight:700}}>{fmt(totalExcess)}</td>
+              <td style={{...td,fontWeight:700}}>{fmt(totalExcessRecover)}</td>
+            </tr>
             <tr style={{background:"var(--s3)",borderTop:"2px solid var(--bdr2)"}}>
               <td style={{...td,textAlign:"left",fontWeight:700}}>Balance C/D</td>
               <td style={{...td,fontWeight:700}} colSpan={2}>Short Balance C/D: Rs.{fmt(shortBalanceCD)}</td>
