@@ -1635,6 +1635,80 @@ function BalanceSheet({ d, outlet, month }) {
   );
 }
 
+// Short/Excess details row: Short and Excess side by side, negatives in ( )
+const SEDRow = ({ label, s, x, bold = false, total = false }) => {
+  const cell = v => (v < 0 ? "(Rs." + fmt(Math.abs(v)) + ")" : "Rs." + fmt(v));
+  const color = v => (v < 0 ? "var(--red)" : total ? "var(--grn)" : "var(--txt)");
+  const base = { padding: "5px 14px", textAlign: "right", fontFamily: "'JetBrains Mono',monospace", fontSize: 12, fontWeight: bold || total ? 700 : 400 };
+  return (
+    <tr style={total ? { borderTop: "1.5px solid var(--bdr2)", background: "var(--s2)" } : {}}>
+      <td style={{ padding: "5px 12px 5px 28px", fontSize: 12, fontWeight: bold || total ? 700 : 400, color: total ? "var(--txt)" : "var(--mut)" }}>{label}</td>
+      <td style={{ ...base, color: color(s) }}>{cell(s)}</td>
+      <td style={{ ...base, color: color(x) }}>{cell(x)}</td>
+    </tr>
+  );
+};
+
+// Same month Short/Excess calculation as the Stock/Excess tab (inventory,
+// day sheet and total-sales difference), totals only.
+function computeStockExcessMonth({ sales, inv, ov, ledger, bfBal, from, to }) {
+  const masterByKey = {};
+  (inv || []).forEach(m => { masterByKey[`${m.code}__${m.supplier}`] = m; });
+  let short = 0, excess = 0;
+
+  (sales || []).forEach(sale => {
+    if (!sale.date || sale.date < from || sale.date > to) return;
+    (sale.items || []).forEach(r => {
+      if (r.isEmptyItem) return;
+      const stkSE = Number(r.stkSE) || 0;
+      const mk = `${r.code}__${r.supplier}`;
+      const dated = masterByKey[mk] ? priceOnDate(masterByKey[mk], ov[mk], sale.date) : null;
+      const adminSP = dated ? (Number(dated.sellingPrice) || 0) : (Number(r.adminSellingPrice) || 0);
+      const rate = Number(r.rate) || adminSP;
+      const sold = parseFloat(r.sold) || 0;
+      const amtSE = sold === 0 ? stkSE * adminSP : (stkSE * adminSP) + ((rate - adminSP) * sold);
+      if (!amtSE) return;
+      if (amtSE < 0) short += Math.abs(amtSE); else excess += amtSE;
+    });
+  });
+
+  const lastAuto = {};
+  (ledger || []).forEach((e, idx) => { if (e.description === "Daily Sale") lastAuto[e.date] = idx; });
+  const deduped = (ledger || []).filter((e, idx) =>
+    e.balance_type !== "bf" && e.balance_type !== "daysheet" &&
+    (e.description !== "Daily Sale" || lastAuto[e.date] === idx));
+  let prevDS = null;
+  (ledger || []).filter(e => e.balance_type === "daysheet")
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .forEach(row => {
+      const dsAmt = Number(row.debit) - Number(row.credit);
+      const balanceAsOf = (prevDS ? prevDS.amt : bfBal) + deduped
+        .filter(e => e.date <= row.date && (!prevDS || e.date > prevDS.date))
+        .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
+      const diff = Math.round((balanceAsOf - dsAmt) * 100) / 100;
+      prevDS = { date: row.date, amt: dsAmt };
+      if (row.date < from || row.date > to || !diff) return;
+      if (diff > 0) short += diff; else excess += -diff;
+    });
+
+  const lastSaleByDate = {};
+  (sales || []).forEach(sale => {
+    if (!sale.date || sale.date < from || sale.date > to) return;
+    if (sale.total === undefined || sale.total === null || sale.total === "") return;
+    if (!(sale.items || []).filter(r => !r.isEmptyItem).length) return;
+    lastSaleByDate[sale.date] = sale;
+  });
+  Object.values(lastSaleByDate).forEach(sale => {
+    const base = (sale.items || []).filter(r => !r.isEmptyItem)
+      .reduce((a, r) => a + (parseFloat(r.sold) || 0) * (parseFloat(r.rate) || 0), 0);
+    const diff = Math.round(((Number(sale.total) || 0) - base) * 100) / 100;
+    if (!diff) return;
+    if (diff < 0) short += -diff; else excess += diff;
+  });
+
+  return { short, excess };
+}
+
 // ══════════════════════════════════════════════════════
 // CAPITAL SHEET
 // Per PDF: Owner's Capital + Net Profit - Drawings - Commission = Total Capital
@@ -1737,7 +1811,37 @@ function BalanceSheet({ d, outlet, month }) {
     return () => { cancelled = true; };
   }, [outlet, month, d]);
 
-   const parties = Object.keys(capitalByParty);
+     const parties = Object.keys(capitalByParty);
+
+  // ── Short/Excess details (read-only; does not touch any other figure) ──
+  const [seCalc, setSeCalc] = useState(null);
+  useEffect(() => {
+    if (!month || outlet === "ALL") { setSeCalc(null); return; }
+    let cancelled = false;
+    Promise.all([getCashLedger(outlet), getCashBF(outlet), loadOutletOverridesFromDB(outlet, false)])
+      .then(([ledger, bf, ov]) => {
+        if (cancelled) return;
+        setSeCalc(computeStockExcessMonth({
+          sales: d.sales, inv: d.inv, ov: ov || {}, ledger: ledger || [],
+          bfBal: Number(bf) || 0, from: monthStart(month), to: monthEnd(month),
+        }));
+      })
+      .catch(() => { if (!cancelled) setSeCalc(null); });
+    return () => { cancelled = true; };
+  }, [outlet, month, d]);
+
+  const seMS = monthStart(month), seME = monthEnd(month);
+  const posSE = (d.positionLedgerAll || []).filter(e => e.category_group === "stock_se");
+  const seBf  = cat => Number(posSE.find(e => e.category === cat && e.date === seMS)?.amount) || 0;
+  const seSum = cat => posSE.filter(e => e.category === cat && e.date >= seMS && e.date <= seME)
+    .reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const seDet = seCalc && {
+    bfS:  seBf("short_bf"),  bfX:  seBf("excess_bf"),
+    monS: seCalc.short  + seSum("manual_short"),
+    monX: seCalc.excess + seSum("manual_excess"),
+    recS: seSum("short_recover"), recX: seSum("excess_recover"),
+    emS:  seSum("empty_short"),   emX:  seSum("empty_excess"),
+  };
 
   // Total Capital (before Partner Contribution/Drawings) = Owners' Capital
   // + Net Profit/Loss only. UG Sales Commission and Personal Drawings no
@@ -1840,6 +1944,22 @@ function BalanceSheet({ d, outlet, month }) {
         );
       })()}
 
+           {seDet && (<>
+        <SH>Short / Excess Details</SH>
+        <tr>
+          <td style={{ padding: "5px 12px" }}></td>
+          <td style={{ padding: "5px 14px", textAlign: "right", fontSize: 11.5, fontWeight: 600, color: "var(--mut)" }}>Short</td>
+          <td style={{ padding: "5px 14px", textAlign: "right", fontSize: 11.5, fontWeight: 600, color: "var(--mut)" }}>Excess</td>
+        </tr>
+        <SEDRow label="B/F Balance"   s={seDet.bfS}  x={seDet.bfX} />
+        <SEDRow label="For the Month" s={seDet.monS} x={seDet.monX} />
+        <SEDRow label="Recover"       s={-seDet.recS} x={-seDet.recX} />
+        <SEDRow label="Empty"         s={seDet.emS}  x={seDet.emX} />
+        <SEDRow label="Balance" total
+          s={seDet.bfS + seDet.monS - seDet.recS + seDet.emS}
+          x={seDet.bfX + seDet.monX - seDet.recX + seDet.emX} />
+      </>)}
+       
       <tr>
         <td colSpan={3} style={{ padding: "10px 12px", fontSize: 10.5, color: "var(--mut)", fontStyle: "italic" }}>
           Note: In the next month, this period's Net Profit is auto-added to Owner's Capital.
@@ -2280,7 +2400,7 @@ function SalesSummary({ d, outlet, month }) {
                       <td style={tdBase(card > 0 ? "var(--blu)" : "var(--mut2)")}>
                         {card > 0 ? fmt(card) : "-"}
                       </td>
-
+                    
                       {/* Brand columns */}
                       {BRAND_CONFIG.map(b => {
                         const cell = brandDay[b.key][day];

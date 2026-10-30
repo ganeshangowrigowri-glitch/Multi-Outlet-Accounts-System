@@ -583,7 +583,9 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
   const [periodTo,   setPeriodTo]   = useState(today());
   const [shortBfInput, setShortBfInput]   = useState("0");
   const [excessBfInput, setExcessBfInput] = useState("0");
-    const [savingBf, setSavingBf] = useState(false);
+  const [manualForm, setManualForm] = useState({ date: today(), kind:"empty", description:"", short:"", excess:"" });
+  const [savingEmpty, setSavingEmpty] = useState(false);
+  const [savingBf, setSavingBf] = useState(false);
   const [savingRec, setSavingRec] = useState(false);
   const [recForm, setRecForm] = useState({ kind:"short", date: today(), amount:"" });
     // Price History lookup, so Short/Excess uses the price effective on each sale date
@@ -612,10 +614,19 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
   const shortBfRow   = stockSeEntries.find(e => e.category === "short_bf"  && e.date === periodFrom);
   const excessBfRow  = stockSeEntries.find(e => e.category === "excess_bf" && e.date === periodFrom);
 
-  useEffect(() => {
+    useEffect(() => {
     setShortBfInput(String(shortBfRow?.amount ?? 0));
     setExcessBfInput(String(excessBfRow?.amount ?? 0));
   }, [periodFrom, shortBfRow?.amount, excessBfRow?.amount]);
+
+     // TCR / Different entries: shown in the report and added into the totals
+  const manualRows = stockSeEntries
+    .filter(e => (e.category === "manual_short" || e.category === "manual_excess") && e.date >= periodFrom && e.date <= periodTo)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  // Empty entries: shown in the Capital Sheet details only, NOT in the report totals
+  const emptyRows = stockSeEntries
+    .filter(e => (e.category === "empty_short" || e.category === "empty_excess") && e.date >= periodFrom && e.date <= periodTo)
+    .sort((a, b) => a.date.localeCompare(b.date));
 
     // ── Source A: Inventory Short/Excess (main stock only — see report) ──
   const inventorySE = {};
@@ -698,9 +709,11 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     excessRecover: excessRecoverRows.filter(e=>e.date===date).reduce((a,e)=>a+(Number(e.amount)||0),0),
   }));
   
-  const totalShort         = rows.reduce((a,r)=>a+r.short,0);
+  const manualShort  = manualRows.filter(e => e.category === "manual_short").reduce((a,e)=>a+(Number(e.amount)||0),0);
+  const manualExcess = manualRows.filter(e => e.category === "manual_excess").reduce((a,e)=>a+(Number(e.amount)||0),0);
+  const totalShort         = rows.reduce((a,r)=>a+r.short,0) + manualShort;
   const totalShortRecover  = rows.reduce((a,r)=>a+r.shortRecover,0);
-  const totalExcess        = rows.reduce((a,r)=>a+r.excess,0);
+  const totalExcess        = rows.reduce((a,r)=>a+r.excess,0) + manualExcess;
   const totalExcessRecover = rows.reduce((a,r)=>a+r.excessRecover,0);
   const shortBf  = parseFloat(shortBfInput)  || 0;
   const excessBf = parseFloat(excessBfInput) || 0;
@@ -718,6 +731,29 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     toast_("B/F saved ✓");
     reload();
     setSavingBf(false);
+  }
+
+     async function saveEmpty() {
+    if (savingEmpty) return;
+    const s = parseFloat(manualForm.short)  || 0;
+    const x = parseFloat(manualForm.excess) || 0;
+    const notes = manualForm.description.trim();
+    if (!notes) { toast_("Enter a description","err"); return; }
+    if (s <= 0 && x <= 0) { toast_("Enter valid amount","err"); return; }
+    setSavingEmpty(true);
+    const isEmpty = manualForm.kind === "empty";
+    if (s > 0) await addPositionEntry(outlet, { date: manualForm.date, categoryGroup:"stock_se", category: isEmpty ? "empty_short"  : "manual_short",  direction:"in", amount: s, notes });
+    if (x > 0) await addPositionEntry(outlet, { date: manualForm.date, categoryGroup:"stock_se", category: isEmpty ? "empty_excess" : "manual_excess", direction:"in", amount: x, notes });
+    toast_(isEmpty ? "Empty entry saved (Capital Sheet) ✓" : "Manual entry saved ✓");
+    setManualForm(f => ({ ...f, description:"", short:"", excess:"" }));
+    reload();
+    setSavingEmpty(false);
+  }
+
+  async function removeManual(id) {
+    if (!window.confirm("Delete this manual entry?")) return;
+    await deletePositionEntry(id);
+    reload();
   }
 
    async function saveRecover() {
@@ -769,6 +805,26 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     if (onCashChanged) onCashChanged();
   }
 
+   function printReport() {
+    const el = document.getElementById("se-report-print");
+    if (!el) return;
+    const w = window.open("", "_blank", "width=900,height=700");
+    if (!w) { toast_("Allow pop-ups to print","err"); return; }
+    w.document.write(
+      `<!doctype html><html><head><title>Stock/Excess ${outlet} ${periodFrom} to ${periodTo}</title><style>
+        :root{--s3:#eeeeee;--bdr:#bbbbbb;--bdr2:#555555;--mut:#444444;--mut2:#444444;--txt:#000000}
+        *{-webkit-print-color-adjust:exact;print-color-adjust:exact;overflow:visible!important}
+        body{font-family:Arial,Helvetica,sans-serif;color:#000;margin:16px}
+        h3{margin:0 0 2px;font-size:16px} p{margin:0 0 10px;font-size:12px;color:#444}
+        table{width:100%;border-collapse:collapse}
+        button,.no-print{display:none!important}
+      </style></head><body>${el.innerHTML}</body></html>`
+    );
+    w.document.close();
+    w.focus();
+    setTimeout(() => { w.print(); w.close(); }, 300);
+  }
+
   const th = { padding:"6px 10px", fontSize:10, fontWeight:700, letterSpacing:".04em", textTransform:"uppercase", color:"var(--mut2,var(--mut))", background:"var(--s3)", borderBottom:"1px solid var(--bdr)", textAlign:"right" };
   const td = { padding:"6px 10px", fontSize:12, textAlign:"right", borderBottom:"1px solid rgba(63,63,70,.15)" };
 
@@ -780,6 +836,25 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
       <div style={{padding:14,display:"flex",gap:8,alignItems:"flex-end",flexWrap:"wrap"}}>
         <div className="ff" style={{marginBottom:0}}><label>Period From</label><input type="date" value={periodFrom} onChange={e=>setPeriodFrom(e.target.value)}/></div>
         <div className="ff" style={{marginBottom:0}}><label>Period To</label><input type="date" value={periodTo} onChange={e=>setPeriodTo(e.target.value)}/></div>
+      </div>
+      </div>
+
+       <div className="card" style={{marginBottom:14}}>
+      <div className="chd"><h3>Manual Entry</h3><p>Empty / TCR / Different Short or Excess</p></div>
+      <div style={{padding:14}}>
+                <div className="fg">
+          <div className="ff"><label>Type</label>
+            <select value={manualForm.kind} onChange={e=>setManualForm(f=>({...f,kind:e.target.value}))}>
+              <option value="empty">Empty (Capital Sheet only)</option>
+              <option value="other">TCR (added to report)</option>
+            </select>
+          </div>
+          <div className="ff"><label>Date</label><input type="date" value={manualForm.date} onChange={e=>setManualForm(f=>({...f,date:e.target.value}))}/></div>
+          <div className="ff"><label>Description</label><input placeholder="e.g. Empty short / TCR short / Different" value={manualForm.description} onChange={e=>setManualForm(f=>({...f,description:e.target.value}))}/></div>
+          <div className="ff"><label>Short (Rs.)</label><input type="number" value={manualForm.short} onChange={e=>setManualForm(f=>({...f,short:e.target.value}))}/></div>
+          <div className="ff"><label>Excess (Rs.)</label><input type="number" value={manualForm.excess} onChange={e=>setManualForm(f=>({...f,excess:e.target.value}))}/></div>
+        </div>
+        <button className="btn btng" onClick={saveEmpty} disabled={savingEmpty}>{I.check} Add Manual Entry</button>
       </div>
     </div>
 
@@ -810,8 +885,11 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
       </div>
     </div>
 
-    <div className="card" style={{marginTop:14}}>
-      <div className="chd"><div><h3>Stock/Excess</h3><p>{outlet} &nbsp;|&nbsp; {periodFrom} to {periodTo}</p></div></div>
+       <div className="card" id="se-report-print" style={{marginTop:14}}>
+      <div className="chd">
+        <div><h3>Stock/Excess</h3><p>{outlet} &nbsp;|&nbsp; {periodFrom} to {periodTo}</p></div>
+        <button className="btn btnd btnsm no-print" onClick={printReport}>{I.print} Print</button>
+      </div>
       <div style={{padding:12,overflowX:"auto"}}>
         <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
           <thead>
@@ -842,7 +920,19 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
                 <td style={td}>{r.excess ? fmt(r.excess) : "-"}</td>
                 <td style={td}>{r.excessRecover ? fmt(r.excessRecover) : "-"}</td>
               </tr>
-                     ))}
+              ))}
+             {manualRows.map(e => (
+              <tr key={e.id}>
+                <td style={{...td,textAlign:"left"}}>
+                  {e.date} · {e.notes || "Manual entry"}{" "}
+                  <button className="btndel no-print" onClick={()=>removeManual(e.id)}>{I.trash}</button>
+                </td>
+                <td style={td}>{e.category === "manual_short" ? fmt(e.amount) : "-"}</td>
+                <td style={td}>-</td>
+                <td style={td}>{e.category === "manual_excess" ? fmt(e.amount) : "-"}</td>
+                <td style={td}>-</td>
+              </tr>
+            ))}
             <tr style={{background:"var(--s3)",borderTop:"2px solid var(--bdr2)"}}>
               <td style={{...td,textAlign:"left",fontWeight:700}}>Total</td>
               <td style={{...td,fontWeight:700}}>{fmt(totalShort)}</td>
@@ -875,7 +965,31 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
                   <td style={{...td,textAlign:"left"}}>{e.category==="short_recover"?"Short Recover":"Excess Recover"}</td>
                   <td style={{...td,textAlign:"left"}}>{e.notes}</td>
                   <td style={td}>{fmt(e.amount)}</td>
-                  <td style={td}><button className="btndel" onClick={()=>removeEntry(e.id)}>{I.trash}</button></td>
+                            <td style={td}><button className="btndel" onClick={()=>removeEntry(e.id)}>{I.trash}</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    )}
+
+    {emptyRows.length > 0 && (
+      <div className="card" style={{marginTop:14}}>
+        <div className="chd"><h3>Manual Entries (Empty)</h3><p>Shown in Capital Sheet only · Edit/Delete</p></div>
+        <div style={{padding:12,overflowX:"auto"}}>
+          <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+            <thead>
+              <tr><th style={{...th,textAlign:"left"}}>Date</th><th style={{...th,textAlign:"left"}}>Description</th><th style={th}>Short</th><th style={th}>Excess</th><th style={th}></th></tr>
+            </thead>
+            <tbody>
+              {emptyRows.map(e => (
+                <tr key={e.id}>
+                  <td style={{...td,textAlign:"left"}}>{e.date}</td>
+                  <td style={{...td,textAlign:"left"}}>{e.notes || "Empty"}</td>
+                  <td style={td}>{e.category === "empty_short"  ? fmt(e.amount) : "-"}</td>
+                  <td style={td}>{e.category === "empty_excess" ? fmt(e.amount) : "-"}</td>
+                  <td style={td}><button className="btndel" onClick={()=>removeManual(e.id)}>{I.trash}</button></td>
                 </tr>
               ))}
             </tbody>
