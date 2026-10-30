@@ -381,6 +381,15 @@ export const getSales = async (outlet) => {
   return data.map(r => ({ ...r, outlet: r.outlet_id }));
 };
  
+export const getSalesRange = async (outlet, from, to) => {
+  let q = supabase.from("sales").select("*").eq("outlet_id", outlet).order("date", { ascending: false });
+  if (from) q = q.gte("date", from);
+  if (to)   q = q.lte("date", to);
+  const { data, error } = await q;
+  if (error) { console.error("getSalesRange:", error); return []; }
+  return data.map(r => ({ ...r, outlet: r.outlet_id }));
+};
+
 export const addSale = async (outlet, sale) => {
   const { error } = await supabase.from("sales").insert({
     outlet_id:      outlet,
@@ -1252,7 +1261,6 @@ export const getCardPendingDate = async (outlet, cardId, period) => {
   if (!data || !data.length) return null;
   return data[0].date;
 };
-
 export const setCardPending = async (outlet, amount, cardId, date, period) => {
   let del = supabase.from("card_ledger").delete()
     .eq("outlet_id", outlet).eq("balance_type", "pending");
@@ -1269,7 +1277,6 @@ export const setCardPending = async (outlet, amount, cardId, date, period) => {
   if (error) { console.error("setCardPending:", error); return false; }
   return true;
 };
-
 // ─── Manually-set Balance C/D — stored per card account, same
 // delete-then-insert pattern as B/F and Pending above. This is purely
 // a persisted display value; it does NOT feed into the existing

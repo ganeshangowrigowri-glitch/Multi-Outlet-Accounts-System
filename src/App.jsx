@@ -28,7 +28,7 @@ import {
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
   getUsernameOutlets, verifyClerkLogin, signInClerkAuth, getClerkProfile,
-  getSales, getInventoryMaster,
+    getSales, getSalesRange, getInventoryMaster,
   getPositionLedger, addPositionEntry, deletePositionEntry, POSITION_CATEGORIES,
 } from "./db";
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -602,13 +602,13 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     return resolveOutletPrice(ov, date, base.unitCost, base.sellingPrice);
   };
 
-  function reload() {
-    setLoading(true);
-    Promise.all([getSales(outlet), getPositionLedger(outlet)]).then(([s, p]) => {
+   function reload(silent) {
+    if (!silent) setLoading(true);
+    Promise.all([getSalesRange(outlet, periodFrom, periodTo), getPositionLedger(outlet, ["stock_se"])]).then(([s, p]) => {
       setSalesData(s || []); setPosEntries(p || []); setLoading(false);
     });
   }
-  useEffect(() => { reload(); }, [outlet]);
+  useEffect(() => { reload(true); }, [outlet, periodFrom, periodTo]);
 
   const stockSeEntries = posEntries.filter(e => e.category_group === "stock_se");
   const shortBfRow   = stockSeEntries.find(e => e.category === "short_bf"  && e.date === periodFrom);
@@ -729,7 +729,7 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     await addPositionEntry(outlet, { date: periodFrom, categoryGroup:"stock_se", category:"short_bf",  direction:"in", amount: shortBf,  notes:"" });
     await addPositionEntry(outlet, { date: periodFrom, categoryGroup:"stock_se", category:"excess_bf", direction:"in", amount: excessBf, notes:"" });
     toast_("B/F saved ✓");
-    reload();
+    reload(true);
     setSavingBf(false);
   }
 
