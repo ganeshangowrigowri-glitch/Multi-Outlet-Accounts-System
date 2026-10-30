@@ -1701,3 +1701,4 @@ export async function setOwnersCapital(outlet, date, amount, month) {
   if (error) { console.error("setOwnersCapital failed:", error); return null; }
   return { date: data.date, amount: Number(data.amount) || 0 };
 }
+

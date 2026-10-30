@@ -423,7 +423,7 @@ const finalDesc = ocpType === "drawing" ? (ocpDesc || label)
                 <label>Bank Account *</label>
                 <select value={ocpBankId} onChange={e => setOcpBankId(e.target.value)}>
                   <option value="">Select bank account…</option>
-                                  {outletBanks.map(b => (
+                     {outletBanks.map(b => (
                     <option key={b.id} value={b.id}>{b.bank} — {b.account_no || b.accountNo}</option>
                   ))}
                 </select>

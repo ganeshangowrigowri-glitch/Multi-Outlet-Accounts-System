@@ -1811,7 +1811,8 @@ const pk = `${item.id}_${fromDate}_${toDate}`;
                     )}
                     {filteredMain.map(r => {
                       const { total,sold, balance, amount, endStock, amtSE, stkSE, purchase, transferIn, transferOut, returns } = deriveMain(r);
-                      return (
+                     
+                         return (
                         <tr key={r.id}>
                           <td className="mono" style={{ fontSize:10 }}>{r.code}</td>
                           <td style={{ fontWeight:600 }}>{r.name}</td>

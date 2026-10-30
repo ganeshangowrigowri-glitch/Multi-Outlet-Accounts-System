@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import Reports from "./components/Reports";
 import { I } from "./utils/icons";
 import { OUTLETS, COA_DEF, uid, today, oKey } from "./data/seeds";
-import { initOutletSeeds } from "./components/admin/InventoryAdmin";
+import { initOutletSeeds, loadOutletOverridesFromDB, resolveOutletPrice } from "./components/admin/InventoryAdmin";
 import AdminDashboard from "./components/admin/AdminDashboard";
 import Toast from "./components/shared/Toast";
 import Ledger from "./components/shared/Ledger";
@@ -23,12 +23,12 @@ import { supabase } from "./supabase";
 
 import {
   getCOA,
-    getCashLedger, addCashEntry, addCashEntryOnce, deleteCashEntryByRef, getCashBF, getCashBFDate, setCashBF,
+  getCashLedger, addCashEntry, addCashEntryOnce, deleteCashEntryByRef, getCashBF, getCashBFDate, setCashBF,
   getCashDaySheetBalance, setCashDaySheetBalance,
   addGLEntry, getGL,
   getAdminCount, createAdmin, verifyAdminLogin, signInAdminAuth,
   getUsernameOutlets, verifyClerkLogin, signInClerkAuth, getClerkProfile,
-  getSales,
+  getSales, getInventoryMaster,
   getPositionLedger, addPositionEntry, deletePositionEntry, POSITION_CATEGORIES,
 } from "./db";
 const fmt = n => Number(n||0).toLocaleString("en-LK",{minimumFractionDigits:2,maximumFractionDigits:2});
@@ -583,9 +583,22 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
   const [periodTo,   setPeriodTo]   = useState(today());
   const [shortBfInput, setShortBfInput]   = useState("0");
   const [excessBfInput, setExcessBfInput] = useState("0");
-  const [savingBf, setSavingBf] = useState(false);
-  const [recForm, setRecForm] = useState({ kind:"short", date: today(), amount:"" });
+    const [savingBf, setSavingBf] = useState(false);
   const [savingRec, setSavingRec] = useState(false);
+  const [recForm, setRecForm] = useState({ kind:"short", date: today(), amount:"" });
+    // Price History lookup, so Short/Excess uses the price effective on each sale date
+  const [masterInv, setMasterInv] = useState([]);
+  const [ovMain, setOvMain] = useState({});
+  useEffect(() => {
+    getInventoryMaster().then(m => setMasterInv(m || []));
+    loadOutletOverridesFromDB(outlet, false).then(o => setOvMain(o || {}));
+  }, [outlet]);
+  const masterByKey = {};
+  masterInv.forEach(m => { masterByKey[`${m.code}__${m.supplier}`] = m; });
+  const priceOnDate = (masterItem, ov, date) => {
+    const base = resolveOutletPrice(masterItem, date, masterItem.unitCost, masterItem.sellingPrice);
+    return resolveOutletPrice(ov, date, base.unitCost, base.sellingPrice);
+  };
 
   function reload() {
     setLoading(true);
@@ -604,24 +617,26 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     setExcessBfInput(String(excessBfRow?.amount ?? 0));
   }, [periodFrom, shortBfRow?.amount, excessBfRow?.amount]);
 
-  // ── Source A: Inventory Short/Excess (main stock only — see report) ──
+    // ── Source A: Inventory Short/Excess (main stock only — see report) ──
   const inventorySE = {};
   salesData.forEach(sale => {
     if (!sale.date || sale.date < periodFrom || sale.date > periodTo) return;
     (sale.items || []).forEach(r => {
       if (r.isEmptyItem) return;
       const stkSE = Number(r.stkSE) || 0;
-      const adminSP = Number(r.adminSellingPrice) || 0;
+      // price effective on the sale date (same as the Daily Sale screen); falls back to the saved price
+      const mk = `${r.code}__${r.supplier}`;
+      const dated = masterByKey[mk] ? priceOnDate(masterByKey[mk], ovMain[mk], sale.date) : null;
+      const adminSP = dated ? (Number(dated.sellingPrice) || 0) : (Number(r.adminSellingPrice) || 0);
       const rate = Number(r.rate) || adminSP;
       const sold = parseFloat(r.sold) || 0;
-      const amtSE = sold === 0 ? stkSE * adminSP : (stkSE * adminSP) + ((rate - adminSP) * sold);
+           const amtSE = sold === 0 ? stkSE * adminSP : (stkSE * adminSP) + ((rate - adminSP) * sold);
       if (!amtSE) return;
       if (!inventorySE[sale.date]) inventorySE[sale.date] = { short:0, excess:0 };
       if (amtSE < 0) inventorySE[sale.date].short += Math.abs(amtSE);
       else inventorySE[sale.date].excess += amtSE;
     });
   });
-
   
   // ── Source B: Day Sheet Short/Excess (read-only, uses Tab 1's own data) ──
   // "Different" in Tab 1 is cumulative, so only the CHANGE since the previous
@@ -682,6 +697,7 @@ const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
     shortRecover:  shortRecoverRows.filter(e=>e.date===date).reduce((a,e)=>a+(Number(e.amount)||0),0),
     excessRecover: excessRecoverRows.filter(e=>e.date===date).reduce((a,e)=>a+(Number(e.amount)||0),0),
   }));
+  
   const totalShort         = rows.reduce((a,r)=>a+r.short,0);
   const totalShortRecover  = rows.reduce((a,r)=>a+r.shortRecover,0);
   const totalExcess        = rows.reduce((a,r)=>a+r.excess,0);
