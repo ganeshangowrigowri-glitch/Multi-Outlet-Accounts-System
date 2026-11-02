@@ -2536,9 +2536,7 @@ function ExpenseSummary({ d, outlet, month }) {
       byCardId[r.card_id].total += amt;
     });
     return Object.entries(byCardId).map(([cardId, v]) => {
-      const acctLabel = v.acc
-        ? `${v.acc.bank}${v.acc.account_no || v.acc.accountNo ? ` — ${v.acc.account_no || v.acc.accountNo}` : ""}`
-        : `Card ${cardId}`;
+      const acctLabel = v.acc ? `${v.acc.bank}` : `Card ${cardId}`;
       return {
         id: `${interestAccMeta ? interestAccMeta.id : fallbackLabel}_${cardId}`,
         name: `${interestAccMeta ? interestAccMeta.name : fallbackLabel} (${acctLabel})`,
@@ -2550,12 +2548,13 @@ function ExpenseSummary({ d, outlet, month }) {
   // Only meaningful when no payment-method filter is applied — these rows
   // aren't tied to a paid_via (Cash/Bank/Visa Card/Amex Card/Pending), so
   // they only appear in the "All Payment Methods" view.
-  const cardInterestRows = methodFilter === "All"
-    ? [
-        ...buildInterestRows(b => /vi[sz]a/i.test(b), visaInterestAcc, "Visa Card Interest"),
-        ...buildInterestRows(b => /amex/i.test(b), amexInterestAcc, "Amex Card Interest"),
-      ]
-    : [];
+  const visaInterestRows = methodFilter === "All"
+  ? buildInterestRows(b => /vi[sz]a/i.test(b), visaInterestAcc, "Visa Card Interest")
+  : [];
+const amexInterestRows = methodFilter === "All"
+  ? buildInterestRows(b => /amex/i.test(b), amexInterestAcc, "Amex Card Interest")
+  : [];
+const cardInterestRows = [...visaInterestRows, ...amexInterestRows];
 
   // Safety net: any card_id with interest that matched NEITHER pattern
   // above (e.g. a bank name spelled some other way entirely) is still
@@ -2586,9 +2585,7 @@ function ExpenseSummary({ d, outlet, month }) {
           return byCardId;
         }, {})
       ).map(([cardId, v]) => {
-        const acctLabel = v.acc
-          ? `${v.acc.bank}${v.acc.account_no || v.acc.accountNo ? ` — ${v.acc.account_no || v.acc.accountNo}` : ""}`
-          : `Card ${cardId}`;
+        const acctLabel = v.acc ? `${v.acc.bank}` : `Card ${cardId}`;
         return {
           id: `card_interest_other_${cardId}`,
           name: `Card Interest (${acctLabel})`,
@@ -2612,8 +2609,9 @@ function ExpenseSummary({ d, outlet, month }) {
     rowsByAcc[aid].byDay[day] = (rowsByAcc[aid].byDay[day] || 0) + amt;
     rowsByAcc[aid].total += amt;
   });
-    const rows = [...Object.values(rowsByAcc), ...cardInterestRows, ...unmatchedInterestRows]
-    .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+  const regularRows = Object.values(rowsByAcc)
+  .sort((a, b) => String(a.id).localeCompare(String(b.id)));
+const rows = [...regularRows, ...visaInterestRows, ...unmatchedInterestRows, ...amexInterestRows];
 
   const days = Array.from({ length: 31 }, (_, i) => i + 1);
   const dayTotal = day => rows.reduce((a, r) => a + (r.byDay[day] || 0), 0);
