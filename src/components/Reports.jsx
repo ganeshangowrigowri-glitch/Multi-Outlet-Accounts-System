@@ -2737,8 +2737,8 @@ function ExpenseSummary({ d, outlet, month }) {
           .exp-print-card { background: #fff !important; border: none !important; border-radius: 0 !important; }
          .exp-print-head { background: #fff !important; color: #000 !important; padding: 0 0 4px !important; border: none !important; text-align: center !important; }
           .exp-print-head div { color: #000 !important; font-family: Calibri, "Calibri (Body)", Carlito, Arial, sans-serif !important; text-align: center !important; }
-          .exp-print-head div:first-child { font-size: 34px !important; font-weight: 700 !important; line-height: 1.2 !important; }
-          .exp-print-head div:last-child { font-size: 18px !important; line-height: 1.3 !important; }
+          .exp-print-head div:first-child { font-size: 30px !important; font-weight: 400 !important; line-height: 1.2 !important; }
+          .exp-print-head div:last-child { font-size: 12px !important; line-height: 1.3 !important; }
           .exp-print-table { min-width: 0 !important; width: 100% !important; border-collapse: collapse !important; table-layout: auto; }
           .exp-print-table tr { border: none !important; }
           .exp-print-table th, .exp-print-table td {
