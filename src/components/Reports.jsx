@@ -2623,60 +2623,89 @@ function ExpenseSummary({ d, outlet, month }) {
     ? totalExp + cardInterestTotal
     : rows.reduce((a, r) => a + r.total, 0);
 
+    const rowMm = Math.min(8, 232 / (rows.length + 2)).toFixed(2);
+
   // Excel export — uses the SAME rows / dayTotal / filteredTotal shown on screen
   async function downloadExpenseExcel() {
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("Expense Summary");
     const lastCol = days.length + 2; // Description + 31 days + Total
+    const colLetter = n => { let s = ""; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; };
 
-    ws.getColumn(1).width = 38;
-    for (let c = 2; c <= days.length + 1; c++) ws.getColumn(c).width = 11;
-    ws.getColumn(lastCol).width = 15;
+    const FONT = { name: "Arial", size: 8 };
+    const DAY_FMT = '#,##0;-#,##0;"-"';   // whole numbers, "-" for zero (as office sheet)
+    const TOT_FMT = "#,##0.00";
 
+    // Column widths: narrow day columns like the office sheet
+    ws.getColumn(1).width = 32;
+    for (let c = 2; c <= days.length + 1; c++) ws.getColumn(c).width = 7;
+    ws.getColumn(lastCol).width = 12;
+
+    // Title
     ws.mergeCells(1, 1, 1, lastCol);
     ws.getCell(1, 1).value =
       `Expense Summary  |  ${outlet === "ALL" ? "All Outlets" : outlet}  |  ${mo}` +
       (methodFilter !== "All" ? `  |  ${methodFilter} only` : "");
-    ws.getCell(1, 1).font = { bold: true, size: 13 };
-    ws.addRow([]);
+    ws.getCell(1, 1).font = { name: "Arial", size: 11, bold: true };
+    ws.getRow(1).height = 18;
+    ws.addRow([]).height = 6;
 
-    const border = { top:{style:"thin",color:{argb:"FFCCCCCC"}}, left:{style:"thin",color:{argb:"FFCCCCCC"}}, bottom:{style:"thin",color:{argb:"FFCCCCCC"}}, right:{style:"thin",color:{argb:"FFCCCCCC"}} };
+    const thin = { style: "thin", color: { argb: "FF000000" } };
+    const border = { top: thin, left: thin, bottom: thin, right: thin };
 
+    // Header row
     const headerRow = ws.addRow(["Description", ...days, "Total"]);
+    headerRow.height = 14;
     headerRow.eachCell(cell => {
-      cell.font = { bold: true, color: { argb: "FFFFFFFF" } };
-      cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: "FF2B2B4A" } };
+      cell.font = { ...FONT, bold: true };
       cell.alignment = { horizontal: "center", vertical: "middle" };
       cell.border = border;
     });
 
+    // Data rows
     rows.forEach(r => {
       const row = ws.addRow([
         r.name,
-        ...days.map(day => (r.byDay[day] > 0 ? r.byDay[day] : null)),
+        ...days.map(day => (r.byDay[day] > 0 ? r.byDay[day] : 0)),
         r.total,
       ]);
+      row.height = 13.5;
       row.eachCell((cell, col) => {
+        cell.font = FONT;
         cell.border = border;
-        if (col === 1) cell.alignment = { horizontal: "left" };
-        else { cell.alignment = { horizontal: "right" }; cell.numFmt = "#,##0.00"; }
+        cell.alignment = { vertical: "middle", horizontal: col === 1 ? "left" : "right" };
+        if (col === 1) cell.alignment = { vertical: "middle", horizontal: "left", wrapText: false };
+        else cell.numFmt = col === lastCol ? TOT_FMT : DAY_FMT;
       });
-      row.getCell(lastCol).font = { bold: true };
+      row.getCell(lastCol).font = { ...FONT, bold: true };
     });
 
+    // Total row
     const totalRow = ws.addRow([
       methodFilter === "All" ? "Total" : `Total (${methodFilter})`,
-      ...days.map(day => (dayTotal(day) > 0 ? dayTotal(day) : null)),
-      filteredTotal,
+      ...days.map(day => (dayTotal(day) > 0 ? dayTotal(day) : 0)),
+     filteredTotal,
     ]);
+    totalRow.height = 14;
     totalRow.eachCell((cell, col) => {
-      cell.font = { bold: true };
-      cell.border = { ...border, top: { style: "double" } };
-      if (col === 1) cell.alignment = { horizontal: "left" };
-      else { cell.alignment = { horizontal: "right" }; cell.numFmt = "#,##0.00"; }
+      cell.font = { ...FONT, bold: true };
+      cell.border = { ...border, top: { style: "double", color: { argb: "FF000000" } } };
+      cell.alignment = { vertical: "middle", horizontal: col === 1 ? "left" : "right" };
+      if (col !== 1) cell.numFmt = col === lastCol ? TOT_FMT : DAY_FMT;
     });
 
     ws.views = [{ state: "frozen", xSplit: 1, ySplit: 3 }];
+
+    // ── PRINT SETUP (office "EXP SUMMARY" sheet) ──
+    ws.pageSetup = {
+      paperSize: 130,                       // office paper code (8K) – same as before
+      orientation: "landscape",
+      fitToPage: true, fitToWidth: 1, fitToHeight: 1,   // Fit Sheet on One Page
+      horizontalCentered: true, verticalCentered: false,
+      margins: { left: 0.5, right: 0.75, top: 0.3, bottom: 0.3, header: 0.1, footer: 0.1 },
+      printArea: `A1:${colLetter(lastCol)}${ws.rowCount}`,   // forces the whole table to be printed
+    };
+    ws.headerFooter.oddFooter = "&C&D &T";  // date + time, centred (as office)
 
     const buf = await wb.xlsx.writeBuffer();
     const safeOutlet = (outlet === "ALL" ? "All_Outlets" : outlet).replace(/[^\w-]+/g, "_");
@@ -2695,41 +2724,57 @@ function ExpenseSummary({ d, outlet, month }) {
     color: color || "var(--txt)", whiteSpace: "nowrap",
   });
 
-        return (
+      return (
     <div>
-      <style>{`
+        <style>{`
         .exp-scroll { max-height: 70vh; overflow: auto; }
+        .exp-prn { display: none; }
         @media print {
+          .exp-scr { display: none !important; }
+          .exp-prn { display: inline !important; }
           .exp-scroll { max-height: none !important; overflow: visible !important; }
           .exp-sticky-head, .exp-sticky-col, .exp-sticky-foot { position: static !important; }
-          .exp-print-table { min-width: 0 !important; width: 100% !important; }
-          .exp-print-table th, .exp-print-table td { padding: 2px 3px !important; }
+          .exp-print-card { background: #fff !important; border: none !important; border-radius: 0 !important; }
+         .exp-print-head { background: #fff !important; color: #000 !important; padding: 0 0 4px !important; border: none !important; text-align: center !important; }
+          .exp-print-head div { color: #000 !important; font-family: Calibri, "Calibri (Body)", Carlito, Arial, sans-serif !important; text-align: center !important; }
+          .exp-print-head div:first-child { font-size: 34px !important; font-weight: 700 !important; line-height: 1.2 !important; }
+          .exp-print-head div:last-child { font-size: 18px !important; line-height: 1.3 !important; }
+          .exp-print-table { min-width: 0 !important; width: 100% !important; border-collapse: collapse !important; table-layout: auto; }
+          .exp-print-table tr { border: none !important; }
+          .exp-print-table th, .exp-print-table td {
+            padding: calc((var(--rh) - 3mm) / 2) 2px !important;
+            font-family: Arial, sans-serif !important;
+            font-size: 10px !important;
+            line-height: 1.1 !important;
+            color: #000 !important;
+            background: #fff !important;
+            border: 1px solid #000 !important;
+            white-space: nowrap;
+          }
+        .exp-print-table td:first-child, .exp-print-table th:first-child { text-align: left !important; min-width: 0 !important; }
+       
         }
-        /* Page size is NOT set here — it's controlled dynamically by
-           printMode.js (printA4 / printFull) based on which Print button
-           is clicked, so this block only ever handles layout, not size. */
-        body:not(.print-full) .exp-print-table { font-size: 8px !important; }
       `}</style>
       <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 8, marginBottom: 12 }}>
         <select value={methodFilter} onChange={e => setMethodFilter(e.target.value)}
           style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
-                  {methods.map(m => <option key={m} value={m}>{m === "All" ? "All Payment Methods" : m}</option>)}
+          {methods.map(m => <option key={m} value={m}>{m === "All" ? "All Payment Methods" : m}</option>)}
         </select>
         <button className="btn btng btnsm" onClick={downloadExpenseExcel}>Download Excel</button>
         <button className="btn btnd btnsm" onClick={printA4}>{I.print} Print (A4)</button>
         <button className="btn btnd btnsm" onClick={printFull}>{I.print} Print (8K)</button>
       </div>
 
-      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
-        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+            <div className="exp-print-card" style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+        <div className="exp-print-head" style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Expense Summary</div>
           <div style={{ fontSize: 11, color: "var(--mut)" }}>
             {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
             {methodFilter !== "All" && <> &nbsp;·&nbsp; {methodFilter} only</>}
           </div>
         </div>
-                <div className="exp-scroll" style={{ overflowX: "auto" }}>
-          <table className="exp-print-table" style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 1100 }}>
+          <div className="exp-scroll" style={{ overflowX: "auto" }}>
+          <table className="exp-print-table" style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 1100, "--rh": `${rowMm}mm` }}>
             <thead>
               <tr>
                 <th className="exp-sticky-head exp-sticky-col" style={{ ...th, textAlign: "left", minWidth: 200, left: 0, zIndex: 3 }}>Description</th>
@@ -2744,9 +2789,11 @@ function ExpenseSummary({ d, outlet, month }) {
                {rows.map(r => (
                 <tr key={r.id}>
                   <td className="exp-sticky-col" style={tdName}>{r.name}</td>
-                  {days.map(day => (
+                   {days.map(day => (
                     <td key={day} style={tdCell(r.byDay[day] || 0)}>
-                      {r.byDay[day] > 0 ? fmt(r.byDay[day]) : "-"}
+                      {r.byDay[day] > 0
+                        ? <><span className="exp-scr">{fmt(r.byDay[day])}</span><span className="exp-prn">{fmtN(r.byDay[day])}</span></>
+                        : "-"}
                     </td>
                   ))}
                   <td style={tdTotal(true, "var(--red)")}>{fmt(r.total)}</td>
@@ -2759,7 +2806,9 @@ function ExpenseSummary({ d, outlet, month }) {
                 </td>
                 {days.map(day => (
                   <td key={day} className="exp-sticky-foot" style={{ ...tdCell(dayTotal(day)), fontWeight: 700, position: "sticky", bottom: 0, zIndex: 2, background: "var(--s3)" }}>
-                    {dayTotal(day) > 0 ? fmt(dayTotal(day)) : "-"}
+                     {dayTotal(day) > 0
+                      ? <><span className="exp-scr">{fmt(dayTotal(day))}</span><span className="exp-prn">{fmtN(dayTotal(day))}</span></>
+                      : "-"}
                   </td>
                 ))}
                 <td className="exp-sticky-foot" style={{ ...tdTotal(true, "var(--red)"), position: "sticky", bottom: 0, zIndex: 2, background: "var(--s3)" }}>{fmt(filteredTotal)}</td>
@@ -3037,8 +3086,8 @@ function EmptyBottles({ d, outlet, month }) {
       totals.return_     += dd.return_     || 0;
       totals.invIssue    += dd.invIssue    || 0;
       totals.issue       += dd.issue       || 0;
-      totals.sold         += dd.sold        || 0;
-      totals.stkSE        += dd.stkSE       || 0;
+      totals.sold        += dd.sold        || 0;
+      totals.stkSE       += dd.stkSE       || 0;
     });
     totals.ex    = totals.stkSE > 0 ? totals.stkSE : 0;
     totals.short = totals.stkSE < 0 ? Math.abs(totals.stkSE) : 0;
@@ -3101,7 +3150,7 @@ function EmptyBottles({ d, outlet, month }) {
                   if (col === "ISS"    && iss  > 0)  val = fmtN(iss);
                   if (col === "SOL"    && sol  > 0)  val = fmtN(sol);
                   if (col === "SHO"    && stkSE < 0) val = fmtN(Math.abs(stkSE));
-                  if (col === "BAL")                  val = fmtN(bal);
+                  if (col === "BAL")                 val = fmtN(bal);
                   return val;
                 };
 
@@ -4403,7 +4452,7 @@ const categoryNote = key => {
       .join(" / ");
   };
 
-    // Same 1000–1499 restriction as S_Position.jsx — keeps Fixed Assets
+  // Same 1000–1499 restriction as S_Position.jsx — keeps Fixed Assets
   // (1500–1999) out of this manual Position category list.
   const EXCLUDED_ASSET_IDS = ["1100", "1400"];
   const coaAssetCats     = coa.filter(a => a.id >= "1000" && a.id <= "1499" && !EXCLUDED_ASSET_IDS.includes(a.id)).map(a => ({ key: a.id, label: a.name }));
@@ -4429,7 +4478,7 @@ const assetOthersEntries = assetOthersCat
   ? positionUpToMonthEnd.filter(r => r.category === assetOthersCat.key && r.category_group === "asset")
   : [];
 
-    const extraAssetsTotal   = assetRows.reduce((a, r) => a + r.balance, 0);
+  const extraAssetsTotal   = assetRows.reduce((a, r) => a + r.balance, 0);
   const otherCreditsTotal  = otherCreditRows.reduce((a, r) => a + r.balance, 0);
   // Card total for Total Assets — sum of per-terminal card balances.
   // Empty for "All Outlets" (cardAccountRows is [] there, same limitation
@@ -4525,7 +4574,6 @@ const assetOthersEntries = assetOthersCat
         </div>
 
           {/* Top summary tiles */}
-              {/* AFTER */}
            {/* Top summary tiles — screen-only quick glance; the same figures are
           already shown in the "1. Total Assets" table below, so printing
           both is redundant and wastes paper/ink. */}
@@ -4724,7 +4772,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   
 
   // ── Manual B/F state (DB-backed) ──
-  const [manualBF, setManualBFState]     = useState(null);
+  const [manualBF, setManualBFState]      = useState(null);
   const [bfDateInput, setBfDateInput]     = useState(today());
   const [bfAmountInput, setBfAmountInput] = useState("");
   const [bfSaving, setBfSaving]           = useState(false);
@@ -5367,7 +5415,7 @@ export default function Reports({ user }) {
         <button className="btn btnd btnsm" style={{ marginLeft:"auto" }} onClick={refresh} disabled={loading}>
           {I.refresh || "↻"} Refresh
         </button>
-              {/* Print */}
+          {/* Print */}
         <button className="btn btng btnsm" onClick={()=>window.print()}>{I.print} Print</button>
         
       </div>
@@ -5388,7 +5436,7 @@ export default function Reports({ user }) {
             {report==="emptyloan" && <EmptyLoanRegister  d={d} outlet={effectiveOutlet} month={month} refresh={refresh} recordEdit={recordEmptyLoanEdit}/>}
             {report==="ugbook"    && <UGBook             d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="supledger" && <SupplierCreditLedger d={d} outlet={effectiveOutlet} month={month} supplierId={supplierId} setSupplierId={handleSupplierChange} applyDiscount={applyDiscount} setApplyDiscount={val => { setApplyDiscount(val); setDiscountTouched(true); }}/>}
-            {report==="stocksum"  && <StockSummary d={d} outlet={effectiveOutlet} month={month}/>}
+            {report==="stocksum"  && <StockSummary        d={d} outlet={effectiveOutlet} month={month}/>}
             {report==="cashpay"   && <CashPaymentSummary d={d} outlet={effectiveOutlet} month={month}/>}
           </>
         )}
