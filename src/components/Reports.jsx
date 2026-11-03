@@ -3357,7 +3357,7 @@ function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
 
         <td style={tdText(400, "var(--mut)")}>
   {editable ? (
-    <input type="text" placeholder="short / excess note" value={detailsText} style={{ ...inputSt, width: 150, textAlign: "left", fontFamily: "'Inter',sans-serif" }}
+       <input type="text" className="elr-details" placeholder="short / excess note" value={detailsText} style={{ ...inputSt, width: 150, textAlign: "left", fontFamily: "'Inter',sans-serif" }}
               onChange={e => setDetailsText(e.target.value)}
               onBlur={e => saveField(r, "details", e.target.value)} />
           ) : (r.details || "—")}
@@ -3396,7 +3396,7 @@ function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
           ) : fmtN(r.actual)}
         </td>
 
-        <td style={td(false)}>
+          <td className="elr-rate" style={td(false)}>
           {editable ? (
             <input type="number" step="0.01" value={rateText} style={inputSt}
               onChange={e => setRateText(e.target.value)}
@@ -3404,13 +3404,67 @@ function EmptyLoanRegister({ d, outlet, month, refresh, recordEdit }) {
           ) : fmt(r.rate)}
         </td>
 
-        <td style={td(true)}>{fmt(r.amount)}</td>
+            <td className="elr-amt" style={td(true)}>{fmt(r.amount)}</td>
       </tr>
     );
   };
 
   return (
-    <div>
+    <div className="elr-wrap">
+      <style>{`
+        @media print {
+          .elr-wrap input {
+            background: #fff !important;
+            border: none !important;
+            box-shadow: none !important;
+            outline: none !important;
+            color: #000 !important;
+            -webkit-text-fill-color: #000 !important;
+            -webkit-appearance: none !important;
+            -moz-appearance: textfield !important;
+            appearance: none !important;
+            padding: 0 !important;
+            width: 100% !important;
+          }
+          .elr-wrap input::-webkit-outer-spin-button,
+          .elr-wrap input::-webkit-inner-spin-button { -webkit-appearance: none !important; margin: 0 !important; }
+                   /* Full grid + fixed column widths so every column lines up */
+          .elr-wrap table { table-layout: fixed !important; width: 100% !important; min-width: 0 !important; border-collapse: collapse !important; }
+          .elr-wrap th, .elr-wrap td {
+            border: 1px solid #000 !important;
+            padding: 3px 5px !important;
+            font-family: Arial, sans-serif !important;
+            font-size: 10px !important;
+            line-height: 1.2 !important;
+            color: #000 !important;
+            background: #fff !important;
+            overflow: hidden;
+            white-space: nowrap;
+          }
+          .elr-wrap th { font-weight: 700 !important; text-align: center !important; }
+          .elr-wrap th:nth-child(1), .elr-wrap td:nth-child(1) { width: 17%; text-align: left !important; }
+          .elr-wrap th:nth-child(2), .elr-wrap td:nth-child(2) { width: 13%; text-align: left !important; }
+          .elr-wrap th:nth-child(3), .elr-wrap td:nth-child(3) { width: 8%; }
+          .elr-wrap th:nth-child(4), .elr-wrap td:nth-child(4) { width: 8%; }
+          .elr-wrap th:nth-child(5), .elr-wrap td:nth-child(5) { width: 10%; text-align: center !important; }
+          .elr-wrap th:nth-child(6), .elr-wrap td:nth-child(6) { width: 8%; }
+          .elr-wrap th:nth-child(7), .elr-wrap td:nth-child(7) { width: 8%; }
+          .elr-wrap th:nth-child(8), .elr-wrap td:nth-child(8) { width: 9%; }
+          .elr-wrap th:nth-child(9), .elr-wrap td:nth-child(9) { width: 8%; }
+          .elr-wrap th:nth-child(10), .elr-wrap td:nth-child(10) { width: 11%; }
+          .elr-wrap td, .elr-wrap td input { text-align: right; }
+          .elr-wrap td:nth-child(1), .elr-wrap td:nth-child(2), .elr-wrap td:nth-child(2) input { text-align: left !important; }
+          .elr-wrap td:nth-child(5) { text-align: center !important; }
+                  .elr-wrap td[colspan] { text-align: left !important; font-weight: 700 !important; }
+          .elr-wrap td[colspan="9"] { width: auto; }
+          /* Remove the rounded dark outer box in print */
+          .elr-wrap > div:last-child { border: none !important; border-radius: 0 !important; overflow: visible !important; }
+          /* Actual column shows the computed figure as a placeholder when no override is typed — keep it visible in print */
+          .elr-wrap input::placeholder { color: #000 !important; -webkit-text-fill-color: #000 !important; opacity: 1 !important; }
+          /* Details note: hide the "short / excess note" hint when empty */
+          .elr-wrap input.elr-details::placeholder { color: transparent !important; -webkit-text-fill-color: transparent !important; }
+        }
+      `}</style>
       <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
         <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>Empty Loan Register</div>
         <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
@@ -4337,8 +4391,8 @@ async function computeNetPositionTotal(outlet, month, d) {
     }
   }
 
-     const supplierBalances = (await Promise.all(
-    SUPPLIERS_LIST.map(s => computeSupplierBalanceCD(outlet, month, s.id, d.apInvoices, d.apPayments))
+   const supplierBalances = (await Promise.all(
+  SUPPLIERS_LIST.map(s => computeSupplierBalanceCD(outlet, month, s.id, d.apInvoices, d.apPayments))
   )).map(v => Math.max(0, v));
   const totalCredit = supplierBalances.reduce((a, v) => a + v, 0);
 
@@ -4364,7 +4418,7 @@ async function computeNetPositionTotal(outlet, month, d) {
 
    function StockSummary({ d, outlet, month }) {
       const { apInvoices, apPayments, crateLedgerAll = [], stockValBySupplierIS: stockValBySupplier = {}, positionLedgerAll = [], coa = [],
-          bankLedger = [], cardLedgerAll = [] } = d;
+      bankLedger = [], cardLedgerAll = [] } = d;
   // Stock Summary's "Stock" must equal Current Status's Total Physical
   // Stock for the selected period. endStockValIS already replicates that
   // exact per-outlet opening/purchase/in-hand-stock algorithm (see
