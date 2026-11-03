@@ -2223,8 +2223,10 @@ function SalesSummary({ d, outlet, month }) {
   });
 
   // ── 4. Grid helpers ───────────────────────────────────────────────────
-  const days  = Array.from({ length: 31 }, (_, i) => i + 1);
+    const days  = Array.from({ length: 31 }, (_, i) => i + 1);
   const weeks = [[1, 7], [8, 14], [15, 21], [22, 28], [29, 31]];
+  // Print only: row height so 31 days + 5 week rows + header + total fit one page
+  const rowMm = Math.min(8, 232 / (days.length + weeks.length + 5)).toFixed(2);
 
   const wkBrandAmt = (bk, s, e) =>
     days.filter(d => d >= s && d <= e).reduce((a, d) => a + (brandDay[bk][d]?.amt || 0), 0);
@@ -2311,25 +2313,47 @@ function SalesSummary({ d, outlet, month }) {
   };
 
   // ── 7. Render ─────────────────────────────────────────────────────────
-  return (
+   return (
     <div>
+      <style>{`
+        @media print {
+          .ssum-scroll { max-height: none !important; overflow: visible !important; }
+          .ssum-print-card { background: #fff !important; border: none !important; border-radius: 0 !important; overflow: visible !important; }
+          .ssum-print-head { background: #fff !important; color: #000 !important; padding: 0 0 4px !important; border: none !important; text-align: center !important; }
+          .ssum-print-head div { color: #000 !important; font-family: Calibri, "Calibri (Body)", Carlito, Arial, sans-serif !important; text-align: center !important; }
+          .ssum-print-head div:first-child { font-size: 30px !important; font-weight: 400 !important; line-height: 1.2 !important; }
+          .ssum-print-head div:last-child { font-size: 12px !important; line-height: 1.3 !important; }
+          .ssum-print-table { min-width: 0 !important; width: 100% !important; border-collapse: collapse !important; table-layout: auto; }
+          .ssum-print-table tr { border: none !important; }
+          .ssum-print-table th, .ssum-print-table td {
+            padding: calc((var(--rh) - 3mm) / 2) 2px !important;
+            font-family: Arial, sans-serif !important;
+            font-size: 10px !important;
+            line-height: 1.1 !important;
+            color: #000 !important;
+            background: #fff !important;
+            border: 1px solid #000 !important;
+            white-space: nowrap;
+          }
+        }
+      `}</style>
             {/* Print button */}
       <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
-        <button className="btn btnd btnsm" onClick={printA4}>{I.print} Print (A4)</button>
-        <button className="btn btnd btnsm" onClick={printFull}>{I.print} Print (8K)</button>
+        <button className="btn btng btnsm" onClick={printA4}>{I.print} Print (A4)</button>
+        <button className="btn btng btnsm" onClick={printFull}>{I.print} Print (8K)</button>
       </div>
-      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+      <div className="ssum-print-card" style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
 
         {/* Card header */}
-        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+        <div className="ssum-print-head" style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Sales Summary</div>
           <div style={{ fontSize: 11, color: "var(--mut)" }}>
             {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
           </div>
         </div>
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 900 }}>
+        <div className="ssum-scroll" style={{ overflowX: "auto" }}>
+          <table className="ssum-print-table" style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 900, "--rh": `${rowMm}mm` }}>
             <thead>
 
               {/* ── Row 1: group headers ── */}
@@ -3661,6 +3685,8 @@ function UGBook({ d, outlet, month }) {
 
   // ── 6. Month totals ───────────────────────────────────────────────────
   const days = Array.from({ length: 31 }, (_, i) => i + 1);
+  // Print only: 31 days + B/F + TOTAL + 2 header rows + footer summary space
+  const rowMm = Math.min(7, 232 / (days.length + 4 + 8)).toFixed(2);
 
   const totalPurchase = days.reduce((a, d) => a + (dayData[d]?.purchaseTotal || 0), 0);
   const totalPayment  = days.reduce((a, d) => a + (dayData[d]?.paymentTotal  || 0), 0);
@@ -3766,18 +3792,41 @@ function UGBook({ d, outlet, month }) {
   let runBal = bfBalance;
 
   // ── 9. Render ─────────────────────────────────────────────────────────
-  return (
+    return (
     <div>
+      <style>{`
+        @media print {
+          .ugb-scroll { max-height: none !important; overflow: visible !important; }
+          .ugb-print-card { background: #fff !important; border: none !important; border-radius: 0 !important; overflow: visible !important; }
+          .ugb-print-head { background: #fff !important; color: #000 !important; padding: 0 0 4px !important; border: none !important; text-align: center !important; }
+          .ugb-print-head div { color: #000 !important; font-family: Calibri, "Calibri (Body)", Carlito, Arial, sans-serif !important; text-align: center !important; }
+          .ugb-print-head div:first-child { font-size: 30px !important; font-weight: 400 !important; line-height: 1.2 !important; }
+          .ugb-print-head div:last-child { font-size: 12px !important; line-height: 1.3 !important; }
+          .ugb-print-table { min-width: 0 !important; width: 100% !important; border-collapse: collapse !important; table-layout: auto; }
+          .ugb-print-table tr { border: none !important; }
+          .ugb-print-table th, .ugb-print-table td {
+            padding: calc((var(--rh) - 3mm) / 2) 1px !important;
+            font-family: Arial, sans-serif !important;
+            font-size: 8px !important;
+            line-height: 1.1 !important;
+            color: #000 !important;
+            background: #fff !important;
+            border: 1px solid #000 !important;
+            white-space: nowrap;
+          }
+          .ugb-print-foot { background: #fff !important; border: none !important; padding: 6px 0 0 !important; }
+          .ugb-print-foot * { color: #000 !important; font-family: Arial, sans-serif !important; background: #fff !important; }
+        }
+      `}</style>
     {/* Print button */}
       <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
-        <button className="btn btnd btnsm" onClick={printA4}>
+        <button className="btn btng btnsm" onClick={printA4}>
           {I.print} Print (A4)
         </button>
-        <button className="btn btnd btnsm" onClick={printFull}>
+        <button className="btn btng btnsm" onClick={printFull}>
           {I.print} Print (8K)
         </button>
       </div>
-
 
       {/* Manual B/F control — new, isolated section (reuses supplier_bf) */}
       <div className="no-print" style={{ display: "flex", alignItems: "flex-end", gap: 10, marginBottom: 12, flexWrap: "wrap", padding: "10px 12px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8 }}>
@@ -3802,13 +3851,13 @@ function UGBook({ d, outlet, month }) {
         )}
       </div>
 
-            <div style={{
+    <div className="ugb-print-card" style={{
         background: "var(--s1)", border: "1px solid var(--bdr)",
         borderRadius: "var(--rl)", overflow: "hidden",
       }}>
 
         {/* Card header */}
-        <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+        <div className="ugb-print-head" style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>
             UG Book
           </div>
@@ -3817,8 +3866,8 @@ function UGBook({ d, outlet, month }) {
           </div>
         </div>
 
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ borderCollapse: "collapse", fontSize: 11 }}>
+        <div className="ugb-scroll" style={{ overflowX: "auto" }}>
+          <table className="ugb-print-table" style={{ borderCollapse: "collapse", fontSize: 11, "--rh": `${rowMm}mm` }}>
             <thead>
 
               {/* Row 1 — column labels (always all 28 fixed columns) */}
@@ -3937,7 +3986,7 @@ function UGBook({ d, outlet, month }) {
         </div>
 
         {/* ── Footer summary ── */}
-        <div style={{
+        <div className="ugb-print-foot" style={{
           padding: "20px 28px",
           borderTop: "2px solid var(--bdr2)",
           background: "var(--s2)",
@@ -4764,7 +4813,229 @@ const assetOthersEntries = assetOthersCat
     </div>
   );
 }
+// ══════════════════════════════════════════════════════
+// MULTI-SUPPLIER CREDIT PRINT (print only — read-only mirror of the
+// Supplier Credit Ledger screen figures; does not change the ledger)
+// ══════════════════════════════════════════════════════
+async function buildSupplierLedgerPrintData(outlet, month, supplierId, d) {
+  const { apInvoices = [], apPayments = [], purchases = [] } = d;
+  const mStart = monthStart(month), mEnd = monthEnd(month);
+  const isSup = raw => normSup(raw) === normSup(supplierId);
+  const normInvRef = v => (v || "").toString().trim().toUpperCase();
 
+  const [manualRaw, diffEntry] = await Promise.all([
+    getSupplierBF(supplierId, outlet, month),
+    getSupplierDiff(supplierId, outlet, month),
+  ]);
+  const manualBF = manualRaw ? { ...manualRaw, date: String(manualRaw.date || "").slice(0, 10) } : null;
+  const prev = prevMonthStr(month);
+  const autoBf = prev
+    ? (await computeSupplierBalanceCD(outlet, prev, supplierId, apInvoices, apPayments).catch(() => 0)) || 0
+    : 0;
+  const useManualBF = !!manualBF;
+  const bfBalance = useManualBF ? manualBF.amount : autoBf;
+  const bfEffectiveDate = useManualBF ? manualBF.date : mStart;
+
+  const DEFAULT_DISCOUNT_SUPPLIERS = ["2003-UG", "2004-IDL"];
+  const applyDiscount = (diffEntry?.applyDiscount !== undefined && diffEntry?.applyDiscount !== null)
+    ? !!diffEntry.applyDiscount
+    : DEFAULT_DISCOUNT_SUPPLIERS.some(id => normSup(id) === normSup(supplierId));
+  const eightMap = (IDL_EIGHT_PCT_ENABLED && isIdlSupplier(supplierId)) ? await getIdlEightAmtMap(outlet) : {};
+
+  const invThisMonth = apInvoices.filter(i => isSup(i.supplier_id || i.supplier));
+  const payThisMonth = apPayments.filter(p => isSup(p.supplier_id || p.supplier) && (!mStart || (p.date >= mStart && p.date <= mEnd)));
+
+  const matchedIds = new Set();
+  const rows = invThisMonth
+    .filter(i => (mStart ? i.date >= mStart && i.date <= mEnd : true))
+    .filter(i => !useManualBF || i.date >= bfEffectiveDate)
+    .map(inv => {
+      const invNo = inv.ref || inv.id;
+      const mp = payThisMonth.filter(p => normInvRef(p.invoiceId || p.notes) === normInvRef(invNo));
+      mp.forEach(p => matchedIds.add(p.id));
+      const amount = Number(inv.amount) || 0;
+      const sp = applyDiscount ? invoiceDiscountSplit(amount, eightMap[normInvKey(invNo)]) : null;
+      return {
+        invNo, date: inv.date, amount,
+        payDate: mp[0]?.date || "",
+        paid: mp.reduce((a, p) => a + (Number(p.amount) || 0), 0),
+        chq: mp.map(p => p.ref).filter(Boolean).join(", "),
+        sixPctDis: sp ? sp.sixPctDis : 0, eightPctDis: sp ? sp.eightPctDis : 0,
+        eightAmt: sp ? sp.eightAmt : 0,
+        vatDis: sp ? sp.vatDis : 0, vatDis8: sp ? sp.vatDis8 : 0,
+        outstanding: sp ? amount - sp.sixPctDis - sp.eightPctDis - sp.vatDis - sp.vatDis8 : amount,
+        isOrphanPayment: false,
+      };
+    });
+
+  const orphanRows = payThisMonth.filter(p => !matchedIds.has(p.id)).map(p => ({
+    invNo: p.invoiceId || p.notes || "—", date: p.date, amount: 0, payDate: p.date,
+    paid: Number(p.amount) || 0, chq: p.ref || "",
+    sixPctDis: 0, eightPctDis: 0, eightAmt: 0, vatDis: 0, vatDis8: 0, outstanding: 0, isOrphanPayment: true,
+  }));
+
+  const returnRows = normSup(supplierId) !== "IDL" ? [] : purchases
+    .filter(p => isSup(p.supplier_id || p.supplier))
+    .filter(p => !mStart || (p.date >= mStart && p.date <= mEnd))
+    .filter(p => !useManualBF || p.date >= bfEffectiveDate)
+    .map(p => {
+      const notes = String(p.notes || "");
+      const m = notes.match(/\|return:(-?\d+(?:\.\d+)?)/);
+      const amt = m ? parseFloat(m[1]) : 0;
+      if (!amt) return null;
+      const invNo = (notes.match(/^Inv:([^|]*)/) || [])[1] || p.ref || p.invoice_no || "—";
+      return { invNo, date: p.date, amount: amt, payDate: "", paid: amt, chq: "",
+        sixPctDis: 0, eightPctDis: 0, eightAmt: 0, vatDis: 0, vatDis8: 0, outstanding: 0, isOrphanPayment: false };
+    }).filter(Boolean);
+
+  const allRows = [...rows, ...orphanRows, ...returnRows]
+    .sort((a, b) => (a.date || a.payDate || "").localeCompare(b.date || b.payDate || ""));
+
+  let runBal = bfBalance;
+  const lines = allRows.map(r => { runBal += r.amount - r.paid; return { ...r, balance: runBal }; });
+
+  const isLux = isLuxurySupplier(supplierId);
+  const luxuryDisc    = isLux ? await loadLuxuryDisc(outlet, month, supplierId, "amount")  : 0;
+  const luxuryDiscPay = isLux ? await loadLuxuryDisc(outlet, month, supplierId, "payment") : 0;
+  const amtDiff = diffEntry?.amountDiff || 0, payDiff = diffEntry?.paymentDiff || 0;
+  const damageAmt = diffEntry?.damageAmount || 0, damagePay = diffEntry?.damagePayment || 0;
+
+  const totalAmount = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.eightPctDis - r.vatDis, 0)
+    + returnRows.reduce((a, r) => a + r.amount, 0);
+  const totalPaid = allRows.reduce((a, r) => a + r.paid, 0);
+  const totalAmountAdj = totalAmount + amtDiff + damageAmt - luxuryDisc;
+  const totalPaidAdj = totalPaid + payDiff + damagePay + luxuryDiscPay;
+
+  return {
+    supplierId, name: (SUPPLIERS_LIST.find(s => s.id === supplierId) || {}).name || supplierId,
+    bfBalance, lines, show6: isDisc6Supplier(supplierId) && applyDiscount, show8: isDisc8Supplier(supplierId) && applyDiscount,
+    totalAmountAdj, totalPaidAdj,
+    totalSix: rows.reduce((a, r) => a + r.sixPctDis, 0), totalVat: rows.reduce((a, r) => a + r.vatDis, 0),
+    totalEight: rows.reduce((a, r) => a + r.eightPctDis, 0), totalVat8: rows.reduce((a, r) => a + r.vatDis8, 0),
+    amtDiff, payDiff, damageAmt, damagePay, luxuryDisc, luxuryDiscPay, isLux,
+    runBal, balanceCD: totalAmountAdj - totalPaidAdj,
+  };
+}
+
+function SupplierCreditPrintSheet({ d, outlet, month, supplierIds, onReady }) {
+  const [blocks, setBlocks] = useState(null);
+  const firedRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const out = [];
+      for (const id of supplierIds) {
+        try { out.push(await buildSupplierLedgerPrintData(outlet, month, id, d)); }
+        catch (e) { console.error("Credit print load failed for", id, e); }
+      }
+      if (!cancelled) setBlocks(out);
+    })();
+    return () => { cancelled = true; };
+  }, [outlet, month, supplierIds, d]);
+
+  useEffect(() => {
+    if (!blocks || firedRef.current) return;
+    firedRef.current = true;
+    const t = setTimeout(() => onReady && onReady(), 200);
+    return () => clearTimeout(t);
+  }, [blocks]); // eslint-disable-line
+
+  if (!blocks) return null;
+  const pages = [];
+  for (let i = 0; i < blocks.length; i += 6) pages.push(blocks.slice(i, i + 6));
+  const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }).toUpperCase() : "ALL PERIODS";
+  const n0 = v => (v ? fmt(v) : "-");
+
+  return (
+    <div className="scl-ps">
+      <style>{`
+        .scl-ps { display: none; }
+        @media print {
+          .scl-multi-active .scl-single, .scl-multi-active .no-print { display: none !important; }
+          .scl-multi-active .scl-ps { display: block !important; }
+          .scl-ps, .scl-ps * { color: #000 !important; background: #fff !important; font-family: Arial, sans-serif !important; }
+          .scl-ps-page { page-break-after: always; }
+          .scl-ps-page:last-child { page-break-after: auto; }
+          .scl-ps-title { text-align: center; font-size: 12px; font-weight: 700; line-height: 1.35; margin-bottom: 4mm; }
+          .scl-ps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm 6mm; align-items: start; }
+          .scl-ps-blk { break-inside: avoid; page-break-inside: avoid; }
+          .scl-ps-name { font-size: 10px; font-weight: 700; margin-bottom: 1px; }
+          .scl-ps-tbl { width: 100%; border-collapse: collapse; table-layout: fixed; }
+          .scl-ps-tbl th, .scl-ps-tbl td { border: 1px solid #000; padding: 1px 3px; font-size: 8px; line-height: 1.2; height: 11px; white-space: nowrap; overflow: hidden; text-align: right; font-variant-numeric: tabular-nums; }
+          .scl-ps-tbl th { font-weight: 700; text-align: center; white-space: normal; font-size: 7.5px; vertical-align: middle; }
+          .scl-ps-tbl td.l { text-align: left; }
+          .scl-ps-tbl tr.b td { font-weight: 700; }
+        }
+      `}</style>
+      {pages.map((pg, pi) => (
+        <div key={pi} className="scl-ps-page">
+          <div className="scl-ps-title">
+            NAME: {outlet === "ALL" ? "ALL OUTLETS" : String(outlet).toUpperCase()}<br />
+            OUTSTANDING DETAILS<br />MONTH: {mo}
+          </div>
+          <div className="scl-ps-grid">
+            {pg.map(b => {
+             const disc = b.show6 || b.show8;
+              const cols = 7 + (b.show6 ? 2 : 0) + (b.show8 ? 2 : 0) + (disc ? 1 : 0);
+              const w = [8, 6, 14, 13, 8, 13,
+                ...(b.show6 ? [10, 9] : []), ...(b.show8 ? [10, 9] : []),
+                ...(disc ? [13] : []), 14];
+              const wSum = w.reduce((a, x) => a + x, 0);
+              return (
+                <div key={b.supplierId} className="scl-ps-blk">
+                  <div className="scl-ps-name">{b.name.toUpperCase()} CREDIT</div>
+                  <table className="scl-ps-tbl">
+                    <colgroup>
+                      {w.map((x, i) => <col key={i} style={{ width: `${((x / wSum) * 100).toFixed(2)}%` }} />)}
+                    </colgroup>
+                    <thead><tr>
+                      <th>Date</th><th>Chq</th><th>Invoice</th><th>Amount</th><th>Pay Date</th><th>Payment</th>
+                      {b.show6 && <><th>6% Dis</th><th>VAT</th></>}
+                      {b.show8 && <><th>8% Dis</th><th>VAT 8%</th></>}
+                      {(b.show6 || b.show8) && <th>Outstanding</th>}
+                      <th>Balance</th>
+                    </tr></thead>
+                    <tbody>
+                    <tr className="b"><td className="l" colSpan={cols - 1}>B/F Balance</td><td>{b.bfBalance !== 0 ? fmt(b.bfBalance) : "-"}</td></tr>
+                      {b.lines.map((r, i) => (
+                        <tr key={i}>
+                          <td className="l">{r.isOrphanPayment ? "-" : (r.date || "").slice(5)}</td>
+                          <td className="l">{(r.chq || "").split(",").map(c => c.trim().slice(-3)).filter(Boolean).join(", ") || "-"}</td>
+                          <td className="l">{r.isOrphanPayment ? `${r.invNo} (prior)` : r.invNo}</td>
+                          <td>{r.isOrphanPayment ? "-" : fmt(r.amount)}</td>
+                          <td className="l">{(r.payDate || "").slice(5) || "-"}</td>
+                          <td>{r.paid !== 0 ? fmt(r.paid) : "-"}</td>
+                          {b.show6 && <><td>{r.isOrphanPayment ? "-" : n0(r.sixPctDis)}</td><td>{r.isOrphanPayment ? "-" : n0(r.vatDis)}</td></>}
+                          {b.show8 && <><td>{r.eightAmt > 0 ? fmt(r.eightPctDis) : "-"}</td><td>{r.eightAmt > 0 ? fmt(r.vatDis8) : "-"}</td></>}
+                          {(b.show6 || b.show8) && <td>{r.isOrphanPayment ? "-" : fmt(r.outstanding)}</td>}
+                          <td>{fmt(r.balance)}</td>
+                        </tr>
+                      ))}
+                      {b.amtDiff !== 0 && <tr><td className="l" colSpan={3}>Amount Different</td><td>{fmt(b.amtDiff)}</td><td colSpan={cols - 4} /></tr>}
+                      {b.payDiff !== 0 && <tr><td className="l" colSpan={3}>Payment Different</td><td /><td /><td>{fmt(b.payDiff)}</td><td colSpan={cols - 6} /></tr>}
+                      {b.damageAmt !== 0 && <tr><td className="l" colSpan={3}>Damage Amount</td><td>{fmt(b.damageAmt)}</td><td colSpan={cols - 4} /></tr>}
+                      {b.damagePay !== 0 && <tr><td className="l" colSpan={3}>Damage Payment</td><td /><td /><td>{fmt(b.damagePay)}</td><td colSpan={cols - 6} /></tr>}
+                      {b.isLux && b.luxuryDisc !== 0 && <tr><td className="l" colSpan={3}>16% Discount Amount</td><td>{fmt(b.luxuryDisc)}</td><td colSpan={cols - 4} /></tr>}
+                      {b.isLux && b.luxuryDiscPay !== 0 && <tr><td className="l" colSpan={3}>16% Discount Payment</td><td /><td /><td>{fmt(b.luxuryDiscPay)}</td><td colSpan={cols - 6} /></tr>}
+                      <tr className="b">
+                        <td className="l" colSpan={3}>TOTAL</td><td>{fmt(b.totalAmountAdj)}</td><td /><td>{fmt(b.totalPaidAdj)}</td>
+                        {b.show6 && <><td>{fmt(b.totalSix)}</td><td>{fmt(b.totalVat)}</td></>}
+                        {b.show8 && <><td>{fmt(b.totalEight)}</td><td>{fmt(b.totalVat8)}</td></>}
+                        {(b.show6 || b.show8) && <td />}
+                        <td>{fmt(b.runBal)}</td>
+                      </tr>
+                      <tr className="b"><td className="l" colSpan={cols - 1}>Balance C/D</td><td>{fmt(b.balanceCD)}</td></tr>
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, applyDiscount, setApplyDiscount }) {
  const { apInvoices, apPayments, purchases } = d;
   
@@ -4974,8 +5245,24 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   const [hideDiscCols, setHideDiscCols] = useState(false);
   const [luxuryDisc, setLuxuryDiscState] = useState(0);
   const [luxurySaving, setLuxurySaving]  = useState(false);
-  const [luxuryDiscPay, setLuxuryDiscPayState] = useState(0);
+    const [luxuryDiscPay, setLuxuryDiscPayState] = useState(0);
   const isLuxury = isLuxurySupplier(supplierId);
+
+  // ── Multi-supplier print (print only) ──
+  const [multiOpen, setMultiOpen] = useState(false);
+  const [multiSel, setMultiSel]   = useState([]);
+  const [printJob, setPrintJob]   = useState(null); // { mode: "A4" | "8K", ids: [...] }
+  useEffect(() => {
+    if (!printJob) return;
+    const done = () => setPrintJob(null);
+    window.addEventListener("afterprint", done);
+    return () => window.removeEventListener("afterprint", done);
+  }, [printJob]);
+  function startMultiPrint(mode) {
+    const ids = SUPPLIERS_LIST.map(s => s.id).filter(id => multiSel.includes(id));
+    if (!ids.length) return;
+    setPrintJob({ mode, ids });
+  }
   // Columns show only for eligible suppliers, when "apply discount" is ticked,
   // and not hidden by the new checkbox. Display only, no calculation changes.
   const show6 = isDisc6Supplier(supplierId) && applyDiscount && !hideDiscCols;
@@ -5052,9 +5339,9 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
   const supplierName = (SUPPLIERS_LIST.find(s => s.id === supplierId) || {}).name || supplierId;
   const mo = month ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" }) : "All Periods";
 
-  return (
+   return (
     
-    <div>
+    <div className={printJob ? "scl-multi-active" : ""}>
         <div className="no-print" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 10, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
           <select value={supplierId} onChange={e => setSupplierId(e.target.value)} style={{ padding: "6px 10px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 7, fontSize: 12.5, color: "var(--txt)" }}>
@@ -5074,7 +5361,36 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
           {diffSaving && <div style={{ fontSize: 11, color: "var(--mut)" }}>Saving…</div>}
           {diffError && <div style={{ fontSize: 11, color: "var(--red)" }}>{diffError}</div>}
         </div>
-        <button className="btn btnd btnsm" onClick={() => window.print()}>{I.print} Print</button>
+         <div style={{ display: "flex", gap: 8, alignItems: "flex-start", position: "relative" }}>
+        <button className="btn btng btnsm" onClick={() => setMultiOpen(v => !v)}>{I.print} Print Suppliers ▾</button>
+          {multiOpen && (
+            <div style={{ position: "absolute", top: "100%", right: 0, zIndex: 20, marginTop: 6, width: 280, padding: 12, background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 8, boxShadow: "0 6px 20px rgba(0,0,0,.35)" }}>
+              <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+                <button className="btn btnd btnsm" onClick={() => setMultiSel(SUPPLIERS_LIST.map(s => s.id))}>All Suppliers</button>
+                <button className="btn btnd btnsm" onClick={() => setMultiSel([])}>Clear</button>
+                <span style={{ fontSize: 11, color: "var(--mut)", alignSelf: "center" }}>{multiSel.length} selected</span>
+              </div>
+              <div style={{ maxHeight: 260, overflowY: "auto", marginBottom: 8 }}>
+                {SUPPLIERS_LIST.map(s => (
+                  <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, padding: "3px 0", cursor: "pointer" }}>
+                    <input type="checkbox" checked={multiSel.includes(s.id)}
+                      onChange={e => setMultiSel(prev => e.target.checked ? [...prev, s.id] : prev.filter(x => x !== s.id))} />
+                    {s.name}
+                  </label>
+                ))}
+              </div>
+              {multiSel.length > 6 && (
+                <div style={{ fontSize: 10.5, color: "var(--mut)", marginBottom: 8 }}>
+                  6 suppliers per page — will print on {Math.ceil(multiSel.length / 6)} pages.
+                </div>
+              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <button className="btn btng btnsm" disabled={!multiSel.length || !!printJob} onClick={() => startMultiPrint("A4")}>{I.print} Print (A4)</button>
+                <button className="btn btng btnsm" disabled={!multiSel.length || !!printJob} onClick={() => startMultiPrint("8K")}>{I.print} Print (8K)</button>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
       {/* Manual B/F control — new, isolated section */}
       <div className="no-print" style={{ display: "flex", alignItems: "flex-end", gap: 10, marginBottom: 12, flexWrap: "wrap", padding: "10px 12px", background: "var(--s2)", border: "1px solid var(--bdr)", borderRadius: 8 }}>
@@ -5097,9 +5413,8 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
             Active: Rs.{fmt(manualBF.amount)} as of {manualBF.date}
           </span>
         )}
-      </div> 
-
-      <div style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
+         </div> 
+      <div className="scl-single" style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
         <div style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>{supplierName} Credit Ledger</div>
           <div style={{ fontSize: 11, color: "var(--mut)" }}>{outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}</div>
@@ -5241,7 +5556,6 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
                 <td style={td(true)}></td>
                 <td style={td(true)}>{fmt(runBal)}</td>
               </tr>
-
               <tr style={{ background: "var(--s2)" }}>
                 <td style={td(true)} colSpan={colCount - 1}>Balance C/D</td>
                 <td style={td(true)}>{fmt(balanceCD)}</td>
@@ -5250,6 +5564,13 @@ const balanceCD = totalAmountAdj - totalPaidAdj;
           </table>
         </div>
       </div>
+
+      {printJob && (
+        <SupplierCreditPrintSheet
+          d={d} outlet={outlet} month={month} supplierIds={printJob.ids}
+          onReady={() => (printJob.mode === "8K" ? printFull : printA4)()}
+        />
+      )}
     </div>
   );
 }
@@ -5413,8 +5734,10 @@ export default function Reports({ user }) {
         <button className="btn btnd btnsm" style={{ marginLeft:"auto" }} onClick={refresh} disabled={loading}>
           {I.refresh || "↻"} Refresh
         </button>
-          {/* Print */}
-        <button className="btn btng btnsm" onClick={()=>window.print()}>{I.print} Print</button>
+      {/* Print — hidden on Supplier Credit Ledger (it uses its own multi-supplier print) */}
+        {report !== "supledger" && (
+          <button className="btn btng btnsm" onClick={()=>window.print()}>{I.print} Print</button>
+        )}
         
       </div>
 
