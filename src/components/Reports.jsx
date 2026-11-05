@@ -5011,14 +5011,16 @@ function SupplierCreditPrintSheet({ d, outlet, month, supplierIds, onReady }) {
           .scl-ps-page { page-break-after: always; }
           .scl-ps-page:last-child { page-break-after: auto; }
           .scl-ps-title { text-align: center; font-size: 12px; font-weight: 700; line-height: 1.35; margin-bottom: 4mm; }
-          .scl-ps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5mm 6mm; align-items: start; }
+          .scl-ps-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm 5mm; align-items: start; }
           .scl-ps-blk { break-inside: avoid; page-break-inside: avoid; }
           .scl-ps-name { font-size: 10px; font-weight: 700; margin-bottom: 1px; }
-          .scl-ps-tbl { width: 100%; border-collapse: collapse; table-layout: fixed; }
-          .scl-ps-tbl th, .scl-ps-tbl td { border: 1px solid #000; padding: 1px 3px; font-size: 8px; line-height: 1.2; height: 11px; white-space: nowrap; overflow: hidden; text-align: right; font-variant-numeric: tabular-nums; }
+          .scl-ps-tbl { width: 100%; border-collapse: collapse; table-layout: fixed; border: 0.5mm solid #000 !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+          .scl-ps-tbl th, .scl-ps-tbl td { border: 0.35mm solid #000 !important; padding: 1px 3px; font-size: 8px; line-height: 1.2; height: 11px; white-space: nowrap; overflow: hidden; text-align: right; font-variant-numeric: tabular-nums; }
           .scl-ps-tbl th { font-weight: 700; text-align: center; white-space: normal; font-size: 7.5px; vertical-align: middle; }
           .scl-ps-tbl td.l { text-align: left; }
           .scl-ps-tbl tr.b td { font-weight: 700; }
+           .scl-ps-tbl thead th { border-bottom: 0.6mm solid #000 !important; }
+          .scl-ps-tbl tr.b td { border-top: 0.5mm solid #000 !important; }
         }
       `}</style>
       {pages.map((pg, pi) => (
