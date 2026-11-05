@@ -346,8 +346,8 @@ const inv = useMemo(
                           {["Q", "P", "N", "CN", "5N", "5Q"].map(t => <option key={t}>{t}</option>)}
                         </select>
                       </td>
-                      <td><input type="number" value={l.unitCost || ""} onChange={e => updL(l.id, "unitCost", e.target.value)} style={{ width: 75 }} /></td>
-                      <td><input type="number" value={l.qty      || ""} onChange={e => updL(l.id, "qty",      e.target.value)} style={{ width: 50 }} /></td>
+                      <td><input type="number" value={l.unitCost || ""} onChange={e => updL(l.id, "unitCost", e.target.value)} style={{ width: 130}} /></td>
+                      <td><input type="number" value={l.qty      || ""} onChange={e => updL(l.id, "qty",      e.target.value)} style={{ width: 75 }} /></td>
                       <td className="mono">{fmt((parseFloat(l.qty) || 0) * (parseFloat(l.unitCost) || 0))}</td>
                       <td><input type="number" value={l.discount  || ""} onChange={e => updL(l.id, "discount", e.target.value)} style={{ width: 65 }} /></td>
                       <td className="mono bold">Rs.{fmt(l.amount)}</td>
