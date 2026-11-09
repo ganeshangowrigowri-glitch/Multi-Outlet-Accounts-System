@@ -13,6 +13,7 @@ import { getCrateLedger, upsertCrateEntry, deleteCrateEntry, getCrateBF, setCrat
 const CRATE_TYPES = [
   { value: "plastic_wh",     label: "Plastic — W/H",    group: "Plastic Crates" },
   { value: "plastic_ug",     label: "Plastic — UG",     group: "Plastic Crates" },
+  { value: "plastic_wh_n",   label: "Plastic — W/H N",  group: "Plastic Crates" },
   { value: "plastic_toddy",  label: "Plastic — Toddy",  group: "Plastic Crates" },
   { value: "plastic_beer",   label: "Plastic — Beer",   group: "Plastic Crates" },
   { value: "wood_ugn",       label: "Wood — UG N",      group: "Wood Crates" },
