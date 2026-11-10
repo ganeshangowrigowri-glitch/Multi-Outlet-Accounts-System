@@ -195,6 +195,13 @@ function isTransferOut(rec, outlet) {
   if (notes.includes("type:in")) return false;
   return (rec.from_outlet_id ?? rec.from) === outlet;
 }
+// Rejects if a save step takes too long, so one stuck request can never block every later save
+function withTimeout(promise, ms = 45000) {
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error("Save timed out — please try again")), ms);
+    promise.then(v => { clearTimeout(t); resolve(v); }, e => { clearTimeout(t); reject(e); });
+  });
+}
 async function propagateOpeningForward(outlet, fromDate, endStockMain, endStockEmp) {
   const d = new Date(fromDate);
   d.setDate(d.getDate() + 1);
@@ -411,7 +418,7 @@ function useAutoSave(rows, saveFn, scopeKey, delay = 800) {
     if (!dirtyRef.current) return true;
     dirtyRef.current = false;                        // edits typed during the save set it again
     setStatus("saving");
-    const p = saveRef.current(true);
+     const p = withTimeout(saveRef.current(true), 60000);
     busyRef.current = p;
     try {
       const ok = await p;
@@ -914,8 +921,7 @@ const pQ = {}, ipQ = {};
   });
 
     (async () => {
-    const opening = await getOpeningStock(outlet, empDate);
-    console.log("EMP-DEBUG for", empDate, "raw opening.emp:", opening?.emp);
+        const opening = await getOpeningStock(outlet, empDate);
     let mergedEmp = opening?.emp
       ? { ...baseEmp, ...opening.emp }
       : baseEmp;
@@ -985,10 +991,7 @@ const pQ = {}, ipQ = {};
         const op = resolvedOpening.emp?.[`${e.code}__${e.supplier}`]
         ?? resolvedOpening.emp?.[e.id]
         ?? 0;
-        if (e.code === "UEMP Q") {
-          console.log("EMP-DEBUG UG EMP:", { id: e.id, code: e.code, supplier: e.supplier, lookupKey: `${e.code}__${e.supplier}`, foundByComposite: resolvedOpening.emp?.[`${e.code}__${e.supplier}`], foundById: resolvedOpening.emp?.[e.id], finalOp: op });
-        }
-        const saved   = savedMap[e.id] || savedMap[`${e.code}__${e.supplier}`];
+       const saved   = savedMap[e.id] || savedMap[`${e.code}__${e.supplier}`];
 
         if (saved) {
           return {
@@ -1133,10 +1136,18 @@ return { ...r, [field]: val };
 
   // Empty save had no re-entrancy guard (Main already has savingMainRef)
   async function saveEmpGuarded(auto) {
-    if (savingEmpRef.current) return false;
-    savingEmpRef.current = true;
+    if (savingEmpRef.current && Date.now() - savingEmpRef.current > 50000) savingEmpRef.current = false;  // stuck save → release
+    if (savingEmpRef.current) {
+      if (auto !== true) toast_("A save is still running — please wait a moment and try again", "err");
+      return false;
+    }
+    savingEmpRef.current = Date.now();
     try { return await saveEmpSale(auto); }
-    catch (err) { autoEmp.markDirty(); throw err; }
+    catch (err) {
+      autoEmp.markDirty();
+      if (auto !== true) toast_("Save failed: " + (err?.message || "please try again"), "err");
+      throw err;
+    }
     finally { savingEmpRef.current = false; }
   }
   // ── Auto Sold Total (DCSL only): Main "Sold" fields → Empty "Sold" field.
@@ -1167,8 +1178,12 @@ return { ...r, [field]: val };
   // ─────────────────────────────────────────────────────────
   async function saveMainSale(auto) {
   const isAuto = auto === true;          // onClick passes an event object, so compare strictly
-  if (savingMainRef.current) return false;
-  savingMainRef.current = true;
+   if (savingMainRef.current && Date.now() - savingMainRef.current > 50000) savingMainRef.current = false;  // stuck save → release
+  if (savingMainRef.current) {
+    if (!isAuto) toast_("A save is still running — please wait a moment and try again", "err");
+    return false;
+  }
+  savingMainRef.current = Date.now();
   if (!isAuto) autoMain.begin();
   try {
   skipNextReloadRef.current = true;
@@ -1196,8 +1211,8 @@ return { ...r, [field]: val };
     om[key] = deriveMain(r).endStock;
   });
 
-  openingWriteLockRef.current = openingWriteLockRef.current.then(
-  () => propagateOpeningForward(outlet, mainDate, om, null)
+  openingWriteLockRef.current = openingWriteLockRef.current.catch(() => {}).then(
+  () => withTimeout(propagateOpeningForward(outlet, mainDate, om, null))
 );
 await openingWriteLockRef.current;
   await deleteSaleForDate(outlet, mainDate, false);
@@ -1252,7 +1267,8 @@ setDbSales(freshSales);
   if (!isAuto) { setJustSaved(true); toast_("Main stock daily sale saved ✓"); }
   return true;
   } catch (err) {
-    autoMain.markDirty();               // keep the entries eligible for retry
+      autoMain.markDirty();               // keep the entries eligible for retry
+    if (!isAuto) toast_("Save failed: " + (err?.message || "please try again"), "err");
     throw err;
   } finally {
     savingMainRef.current = false;
@@ -1276,8 +1292,8 @@ setDbSales(freshSales);
     oe[r.id] = es;
     oe[`${r.code}__${r.supplier}`] = es;   // stable key — survives the row's id changing later
   });
-  openingWriteLockRef.current = openingWriteLockRef.current.then(
-  () => propagateOpeningForward(outlet, empDate, null, oe)
+   openingWriteLockRef.current = openingWriteLockRef.current.catch(() => {}).then(
+  () => withTimeout(propagateOpeningForward(outlet, empDate, null, oe))
 );
 await openingWriteLockRef.current;
   const empRowsWithDerived = empRows.map(r => {
