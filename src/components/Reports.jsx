@@ -803,10 +803,10 @@ const transTotal = t =>
 const isArTransferOut = t => /^type:out\|account:/i.test(String(t.notes || ""));
 
 const transInAmt = transfers
-  .filter(t => !isArTransferOut(t) && (outlet==="ALL" || (t.to_outlet_id??t.to)===outlet))
+  .filter(t => !isArTransferOut(t) && (outlet==="ALL" || rptTransferIn(t, outlet)))
   .reduce((a,t) => a + transTotal(t), 0);
 const transOutAmt = transfers
-  .filter(t => outlet==="ALL" || (t.from_outlet_id??t.from)===outlet)
+  .filter(t => outlet==="ALL" || rptTransferOut(t, outlet))
   .reduce((a,t) => a + transTotal(t), 0);
 
         // ── End Stock ──
