@@ -1054,7 +1054,7 @@ Object.keys(cosByItem).forEach(code => {
   if (!(soldQtyByCode[code] > 0)) delete cosByItem[code];
 });
 
-              // ── Cash Flow ──
+      // ── Cash Flow ──
       // Total Sales Cash — matches Sales Summary's "Daily Sale" total
       // exactly: sold × rate per item, only for items whose supplier maps
       // to a known brand (same brandOf() filter Sales Summary uses, which
@@ -1874,7 +1874,7 @@ function computeStockExcessMonth({ sales, inv, ov, ledger, bfBal, from, to }) {
                 placeholder="0.00"
                 style={{ padding: "6px 10px", width: 140, background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: 6, fontSize: 12, color: "var(--txt)" }} />
             </div>
-                      <button className="btn btnd btnsm" onClick={handleSetOwnersCapital} disabled={ocSaving}>
+             <button className="btn btnd btnsm" onClick={handleSetOwnersCapital} disabled={ocSaving}>
               {ocSaving ? "Saving…" : "Set Owners' Capital"}
             </button>
             <span style={{ fontSize: 11, color: "var(--mut)" }}>Applies only to {month || "the selected month"}.</span>
@@ -1944,7 +1944,7 @@ function computeStockExcessMonth({ sales, inv, ov, ledger, bfBal, from, to }) {
         );
       })()}
 
-           {seDet && (<>
+        {seDet && (<>
         <SH>Short / Excess Details</SH>
         <tr>
           <td style={{ padding: "5px 12px" }}></td>
@@ -4954,7 +4954,8 @@ async function buildSupplierLedgerPrintData(outlet, month, supplierId, d) {
   const amtDiff = diffEntry?.amountDiff || 0, payDiff = diffEntry?.paymentDiff || 0;
   const damageAmt = diffEntry?.damageAmount || 0, damagePay = diffEntry?.damagePayment || 0;
 
-  const totalAmount = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.eightPctDis - r.vatDis, 0)
+
+  const totalAmount = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.eightPctDis - r.vatDis - r.vatDis8, 0)
     + returnRows.reduce((a, r) => a + r.amount, 0);
   const totalPaid = allRows.reduce((a, r) => a + r.paid, 0);
   const totalAmountAdj = totalAmount + amtDiff + damageAmt - luxuryDisc;
@@ -5276,7 +5277,7 @@ function SupplierCreditLedger({ d, outlet, month, supplierId, setSupplierId, app
   // and is already folded into bfBalance. Using only `rows` for either of
   // these undercounts both, since orphan payments live in allRows/
   // orphanPaymentRows, not `rows`.
-   const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.eightPctDis - r.vatDis, 0)
+   const totalAmount      = bfBalance + rows.reduce((a, r) => a + r.amount - r.sixPctDis - r.eightPctDis - r.vatDis - r.vatDis8, 0)
     + returnRows.reduce((a, r) => a + r.amount, 0);
   const totalVatDis8 = rows.reduce((a, r) => a + r.vatDis8, 0);
   const totalPaid        = allRows.reduce((a, r) => a + r.paid, 0);
