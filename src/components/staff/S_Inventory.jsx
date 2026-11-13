@@ -1561,8 +1561,8 @@ const pk = `${item.id}_${fromDate}_${toDate}`;
     physKey: pk,
   };
 }
- ).filter(r =>
-  (r.opening > 0 || r.inHandStock > 0) &&
+  ).filter(r =>
+  (r.opening > 0 || r.inHandStock > 0 || r.totalPurchase > 0 || r.transferIn > 0) &&
   (
     r.totalBottleSale > 0 || r.totalPurchase > 0 ||
     r.transferIn > 0 || r.transferOut > 0 || r.totalReturn > 0 ||
