@@ -885,11 +885,9 @@ const visaCardInterestLedger = (cardLedgerAll || [])
   .filter(r => !CARD_MARKER_TYPES.includes(r.balance_type))
   .reduce((a, r) => a + (Number(r.interest) || 0), 0);
 
-// Anti-double-count: portion already booked as a normal expense account
-const visaInterestBookedInExpenses = Object.values(expByAcc)
-  .filter(e => /vi[sz]a.*card.*interest/i.test(e.name || ""))
-  .reduce((a, e) => a + e.total, 0);
-const visaCardInterestAdd = Math.max(0, visaCardInterestLedger - visaInterestBookedInExpenses);
+// Card interest now comes ONLY from the Expenses window entries (5800–5899).
+// The Card Settlement auto-calculated interest is no longer added here.
+const visaCardInterestAdd = 0;
 
       // ── Discounts & Empty ──
       const discBySup={}, emptyDiscBySup={}, empSoldByName={}, empRetByName={};
