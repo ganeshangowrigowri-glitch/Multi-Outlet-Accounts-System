@@ -104,7 +104,7 @@ const EMPTY_NIP_ITEMS  = ["DCA N", "DES N", "DSP N", "DEC N", "DDB N"];
 // Empty Loan Register can build a "CRATE::type" row for each one without
 // importing the whole S_Crates component.
 const LOAN_CRATE_TYPES = [
-  "plastic_wh", "plastic_ug", "plastic_toddy", "plastic_beer",
+  "plastic_wh", "plastic_wh_n", "plastic_ug", "plastic_toddy", "plastic_beer",
   "wood_ugn", "wood_q", "wood_p", "wood_n",
 ];
 // First day of a given YYYY-MM string

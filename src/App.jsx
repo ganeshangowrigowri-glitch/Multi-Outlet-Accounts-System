@@ -20,7 +20,6 @@ import S_PositionTabs from "./components/staff/S_PositionTabs";
 import S_Crates from "./components/staff/S_Crates";
 import "../src/styles/global.css";
 import { supabase } from "./supabase";
-
 import {
   getCOA,
   getCashLedger, addCashEntry, addCashEntryOnce, deleteCashEntryByRef, getCashBF, getCashBFDate, setCashBF,
@@ -300,8 +299,10 @@ function S_GL({ outlet }) {
     // Editor state for the "Opening Balance (B/F)" card. Kept separate from
   // bfBal/bfDate (the books' opening B/F used by the balance calculations),
   // so browsing/editing a month never changes Cash Balance or Balance C/D.
-  const [bfEditAmt,  setBfEditAmt]  = useState("0");
+   const [bfEditAmt,  setBfEditAmt]  = useState("0");
   const [bfEditDate, setBfEditDate] = useState(today());
+  const [fromMonthBF, setFromMonthBF] = useState(null); // saved B/F of the "From Date" month (null = none)
+  const [bfVersion,   setBfVersion]   = useState(0);    // bumps after Set so the ledger re-reads it
 
   const loadBaseBF = () =>
     Promise.all([getCashBF(outlet), getCashBFDate(outlet)]).then(([b, d]) => {
@@ -318,14 +319,25 @@ function S_GL({ outlet }) {
     if (!bfEditDate) return;
     let cancelled = false;
     getCashBF(outlet, bfEditDate.slice(0, 7)).then(v => { if (!cancelled) setBfEditAmt(String(v)); });
-    return () => { cancelled = true; };
+       return () => { cancelled = true; };
   }, [outlet, bfEditDate]);
+
+  // B/F saved for the month of the ledger's "From Date" (used for the opening row)
+  useEffect(() => {
+    if (!filterFrom) { setFromMonthBF(null); return; }
+    let cancelled = false;
+    getCashBF(outlet, filterFrom.slice(0, 7)).then(v => {
+      if (!cancelled) setFromMonthBF(Number(v) ? Number(v) : null);
+    });
+    return () => { cancelled = true; };
+  }, [outlet, filterFrom, bfVersion]);
 
   async function saveBF() {
     const ok = await setCashBF(outlet, parseFloat(bfEditAmt) || 0, bfEditDate);
     if (!ok) { toast_("Failed to save B/F — check connection", "err"); return; }
     const [b, d] = await Promise.all([getCashBF(outlet), getCashBFDate(outlet)]);
-    setBF(b); setBFD(d || today());
+       setBF(b); setBFD(d || today());
+    setBfVersion(v => v + 1);
     toast_("B/F updated ✓");
   }
   async function saveManual() {
@@ -393,7 +405,19 @@ function S_GL({ outlet }) {
       .reduce((a,t) => a + (t.debit||0) - (t.credit||0), 0);
   };
 
-  const displayBF = filterFrom ? openingOn(filterFrom) : bfBal;
+   const displayBF = (() => {
+    if (!filterFrom) return bfBal;
+    // If a B/F was saved for this month, open from it (unless a Day Sheet
+    // inside the month before From Date takes over, as before).
+    const monthStart = filterFrom.slice(0, 7) + "-01";
+    const dsInMonthBefore = daySheetRows.some(d => d.date >= monthStart && d.date < filterFrom);
+    if (fromMonthBF !== null && !dsInMonthBefore) {
+      return fromMonthBF + dedupedLedger
+        .filter(e => e.date >= monthStart && e.date < filterFrom)
+        .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
+    }
+    return openingOn(filterFrom);
+  })();
 
   // Display-only rows so the ledger's running balance restarts from the
   // Day Sheet Balance on the next day. Not used for Cash In/Out totals.
@@ -441,7 +465,17 @@ function S_GL({ outlet }) {
   // ── Day Sheet Balance: staff-entered actual cash count for one date ──
   const [daySheetDate, setDaySheetDate] = useState(today());
   const [daySheetAmt,  setDaySheetAmt]  = useState("");
-  const [daySheetSaved, setDaySheetSaved] = useState(null); // null = not entered yet
+    const [daySheetSaved, setDaySheetSaved] = useState(null); // null = not entered yet
+  const [daySheetMonthBF, setDaySheetMonthBF] = useState(null); // saved B/F of the Day Sheet date's month
+
+  useEffect(() => {
+    if (!daySheetDate) { setDaySheetMonthBF(null); return; }
+    let cancelled = false;
+    getCashBF(outlet, daySheetDate.slice(0, 7)).then(v => {
+      if (!cancelled) setDaySheetMonthBF(Number(v) ? Number(v) : null);
+    });
+    return () => { cancelled = true; };
+  }, [outlet, daySheetDate, bfVersion]);
 
   useEffect(() => {
     getCashDaySheetBalance(outlet, daySheetDate).then(v => {
@@ -459,10 +493,17 @@ function S_GL({ outlet }) {
 
   // Running Balance C/D as of the Day Sheet date specifically (not the
   // From/To filter range) — this is what "Different" compares against.
-const prevDS = [...daySheetRows].reverse().find(d => d.date < daySheetDate);
-const balanceAsOfDaySheetDate = (prevDS ? prevDS.amt : bfBal) + dedupedLedger
-    .filter(e => e.date <= daySheetDate && (!prevDS || e.date > prevDS.date))
-    .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
+  const prevDS = [...daySheetRows].reverse().find(d => d.date < daySheetDate);
+const dsMonthStart = daySheetDate.slice(0, 7) + "-01";
+// Month B/F applies unless a Day Sheet inside this same month (before the date) takes over
+const useMonthBF = daySheetMonthBF !== null && (!prevDS || prevDS.date < dsMonthStart);
+const balanceAsOfDaySheetDate = useMonthBF
+  ? daySheetMonthBF + dedupedLedger
+      .filter(e => e.date >= dsMonthStart && e.date <= daySheetDate)
+      .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0)
+  : (prevDS ? prevDS.amt : bfBal) + dedupedLedger
+      .filter(e => e.date <= daySheetDate && (!prevDS || e.date > prevDS.date))
+      .reduce((a, t) => a + (t.debit || 0) - (t.credit || 0), 0);
          return (<>
     <div className="no-print" style={{display:"flex",gap:8,marginBottom:14}}>
       <button className={`btn btnsm ${cashTab==="ledger"?"btng":"btnd"}`} onClick={()=>setCashTab("ledger")}>In Hand Cash Ledger</button>

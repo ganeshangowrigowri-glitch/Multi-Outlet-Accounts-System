@@ -290,7 +290,7 @@ export const saveOutletInventory = async (outlet, items) => {
 export const updateOutletInventoryQty = async (outlet, itemId, qty) => {
   const { error } = await supabase.from("outlet_inventory")
     .upsert({ outlet_id: outlet, item_id: itemId, qty, updated_at: new Date().toISOString() },
-             { onConflict: "outlet_id,item_id" });
+   { onConflict: "outlet_id,item_id" });
   if (error) console.error("updateOutletInventoryQty:", error);
 };
 // ─── OUTLET PRICE OVERRIDES (Tab 3 / Tab 4 — hide flag + date-effective pricing) ──
