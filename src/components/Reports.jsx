@@ -898,7 +898,7 @@ const visaCardInterestAdd = 0;
         if(sol>0) empSoldByName[key]=(empSoldByName[key]||0)+sol*rate;
         if(ret>0) empRetByName[key]=(empRetByName[key]||0)+ret*rate;
       }));
-            const totalDiscPayment=Object.values(discBySup).reduce((a,v)=>a+v,0);
+      const totalDiscPayment=Object.values(discBySup).reduce((a,v)=>a+v,0);
       const totalDiscEmpty=Object.values(emptyDiscBySup).reduce((a,v)=>a+v,0);
       const totalEmpSold=Object.values(empSoldByName).reduce((a,v)=>a+v,0);
       const totalEmpRet=Object.values(empRetByName).reduce((a,v)=>a+v,0);

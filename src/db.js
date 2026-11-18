@@ -135,10 +135,9 @@ export const deleteClerk = async (id) => {
 // Replaces the old hardcoded admin/admin123 check. First-run setup:
 // if app_admins has zero rows, the login screen offers to create one.
 export const getAdminCount = async () => {
-  const { count, error } = await supabase
-    .from("app_admins").select("*", { count: "exact", head: true });
-  if (error) { console.error("getAdminCount:", error); return 0; }
-  return count || 0;
+  const { data, error } = await supabase.rpc("admin_exists");
+  if (error) { console.error("getAdminCount:", error); return 1; }
+  return data ? 1 : 0;
 };
 
 export const createAdmin = async (username, password) => {
@@ -344,7 +343,7 @@ export const upsertOutletPrice = async (outlet, itemKey, isEmpty, effectiveDate,
 
 export const deleteOutletPriceOverride = async (outlet, itemKey, isEmpty) => {
   const { error: e1 } = await supabase.from("outlet_price_history").delete()
-    .eq("outlet_id", outlet).eq("item_key", itemKey).eq("is_empty", isEmpty);
+  .eq("outlet_id", outlet).eq("item_key", itemKey).eq("is_empty", isEmpty);
   if (e1) console.error("deleteOutletPriceOverride (history):", e1);
   const { error: e2 } = await supabase.from("outlet_item_flags").delete()
     .eq("outlet_id", outlet).eq("item_key", itemKey).eq("is_empty", isEmpty);

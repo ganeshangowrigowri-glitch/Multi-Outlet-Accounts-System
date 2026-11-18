@@ -1,21 +1,4 @@
-// scripts/rename-clerk-auth.mjs
-// ───────────────────────────────────────────────────────────
-// ONE-TIME script — run locally, never deployed. Renames a clerk's
-// username in the clerks table AND, if they've already been migrated
-// to real Supabase Auth, updates their Auth email + user_metadata to
-// match — so their real-Auth login keeps working under the new name.
-//
-// Use this instead of editing the username in the Admin window
-// whenever the clerk has already been migrated (check-auth-user.mjs
-// says their account exists). If they haven't been migrated yet,
-// editing the Admin window directly is fine — there's no Auth
-// account to keep in sync.
-//
-// USAGE (PowerShell):
-//   $env:SUPABASE_URL="https://ikonkquwntbwkwancyyk.supabase.co"
-//   $env:SUPABASE_SERVICE_ROLE_KEY="<paste service role key here>"
-//   node scripts/rename-clerk-auth.mjs Prashanthni Prashanthini
-// ───────────────────────────────────────────────────────────
+
 import { createClient } from "@supabase/supabase-js";
 
 const [, , oldUsername, newUsername] = process.argv;

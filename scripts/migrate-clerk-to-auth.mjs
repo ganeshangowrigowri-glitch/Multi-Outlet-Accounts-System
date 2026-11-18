@@ -1,26 +1,4 @@
-// scripts/migrate-clerk-to-auth.mjs
-// ─────────────────────────────────────────────────────────────
-// ONE-TIME script — run locally, NEVER deployed, NEVER committed
-// with real secrets. Migrates a single clerk to real Supabase Auth,
-// reading their existing outlets/access straight from the clerks
-// table (no need to re-type them), and linking outlet_access for
-// each of their actual outlets (clerks are outlet-scoped, unlike
-// the admin's '*' wildcard from migrate-admin-to-auth.mjs).
-//
-// This does NOT touch the existing clerks/verify_clerk_login login
-// flow — that keeps working exactly as it does today for every
-// clerk not yet migrated. This just sets up the real Auth account
-// in parallel.
-//
-// USAGE (PowerShell):
-//   $env:SUPABASE_URL="https://ikonkquwntbwkwancyyk.supabase.co"
-//   $env:SUPABASE_SERVICE_ROLE_KEY="<paste service role key here>"
-//   node scripts/migrate-clerk-to-auth.mjs harish NewPassword123!
-//
-// The service-role key has full admin access to your database —
-// never put it in .env, never paste it anywhere outside this
-// one-off terminal command.
-// ─────────────────────────────────────────────────────────────
+
 import { createClient } from "@supabase/supabase-js";
 
 const [, , username, newPassword] = process.argv;
