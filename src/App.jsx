@@ -666,7 +666,7 @@ const balanceAsOfDaySheetDate = useMonthBF
     .sort((a, b) => a.date.localeCompare(b.date));
   // Empty entries: shown in the Capital Sheet details only, NOT in the report totals
   const emptyRows = stockSeEntries
-    .filter(e => (e.category === "empty_short" || e.category === "empty_excess") && e.date >= periodFrom && e.date <= periodTo)
+    .filter(e => (e.category === "empty_short" || e.category === "empty_excess" || e.category === "lastmonth_short" || e.category === "lastmonth_excess") && e.date >= periodFrom && e.date <= periodTo)
     .sort((a, b) => a.date.localeCompare(b.date));
 
     // ── Source A: Inventory Short/Excess (main stock only — see report) ──
@@ -774,23 +774,28 @@ const balanceAsOfDaySheetDate = useMonthBF
     setSavingBf(false);
   }
 
-     async function saveEmpty() {
+   async function saveEmpty() {
     if (savingEmpty) return;
     const s = parseFloat(manualForm.short)  || 0;
     const x = parseFloat(manualForm.excess) || 0;
     const notes = manualForm.description.trim();
-    if (!notes) { toast_("Enter a description","err"); return; }
-    if (s <= 0 && x <= 0) { toast_("Enter valid amount","err"); return; }
-    setSavingEmpty(true);
     const isEmpty = manualForm.kind === "empty";
-    if (s > 0) await addPositionEntry(outlet, { date: manualForm.date, categoryGroup:"stock_se", category: isEmpty ? "empty_short"  : "manual_short",  direction:"in", amount: s, notes });
-    if (x > 0) await addPositionEntry(outlet, { date: manualForm.date, categoryGroup:"stock_se", category: isEmpty ? "empty_excess" : "manual_excess", direction:"in", amount: x, notes });
-    toast_(isEmpty ? "Empty entry saved (Capital Sheet) ✓" : "Manual entry saved ✓");
+    const isLastMonth = manualForm.kind === "lastmonth";
+    if (!notes) { toast_("Enter a description","err"); return; }
+    // Last Month Excess Recover allows + (add) and − (deduct); other types stay positive only
+        const allowSigned = isLastMonth || isEmpty;   // + adds, − deducts
+    if (allowSigned ? (s === 0 && x === 0) : (s <= 0 && x <= 0)) { toast_("Enter valid amount","err"); return; }
+    setSavingEmpty(true);
+    const catShort  = isLastMonth ? "lastmonth_short"  : (isEmpty ? "empty_short"  : "manual_short");
+    const catExcess = isLastMonth ? "lastmonth_excess" : (isEmpty ? "empty_excess" : "manual_excess");
+        const dirOf = v => (allowSigned && v < 0) ? "out" : "in";   // out = deduct, in = add
+    if (allowSigned ? s !== 0 : s > 0) await addPositionEntry(outlet, { date: manualForm.date, categoryGroup:"stock_se", category: catShort,  direction: dirOf(s), amount: Math.abs(s), notes });
+        if (allowSigned ? x !== 0 : x > 0) await addPositionEntry(outlet, { date: manualForm.date, categoryGroup:"stock_se", category: catExcess, direction: dirOf(x), amount: Math.abs(x), notes });
+    toast_(isLastMonth ? "Last Month Excess Recover saved (Capital Sheet) ✓" : (isEmpty ? "Empty entry saved (Capital Sheet) ✓" : "Manual entry saved ✓"));
     setManualForm(f => ({ ...f, description:"", short:"", excess:"" }));
     reload();
     setSavingEmpty(false);
-  }
-
+}
   async function removeManual(id) {
     if (!window.confirm("Delete this manual entry?")) return;
     await deletePositionEntry(id);
@@ -886,8 +891,9 @@ const balanceAsOfDaySheetDate = useMonthBF
                 <div className="fg">
           <div className="ff"><label>Type</label>
             <select value={manualForm.kind} onChange={e=>setManualForm(f=>({...f,kind:e.target.value}))}>
-              <option value="empty">Empty (Capital Sheet only)</option>
-              <option value="other">TCR (added to report)</option>
+             <option value="empty">Empty (Capital Sheet only)</option>
+            <option value="lastmonth">Last Month Excess Recover (Capital Sheet only)</option>
+            <option value="other">TCR (added to report)</option>
             </select>
           </div>
           <div className="ff"><label>Date</label><input type="date" value={manualForm.date} onChange={e=>setManualForm(f=>({...f,date:e.target.value}))}/></div>
@@ -1028,8 +1034,8 @@ const balanceAsOfDaySheetDate = useMonthBF
                 <tr key={e.id}>
                   <td style={{...td,textAlign:"left"}}>{e.date}</td>
                   <td style={{...td,textAlign:"left"}}>{e.notes || "Empty"}</td>
-                  <td style={td}>{e.category === "empty_short"  ? fmt(e.amount) : "-"}</td>
-                  <td style={td}>{e.category === "empty_excess" ? fmt(e.amount) : "-"}</td>
+                  <td style={td}>{(e.category === "empty_short" || e.category === "lastmonth_short") ? (e.direction === "out" ? `(${fmt(e.amount)})` : fmt(e.amount)) : "-"}</td>
+                  <td style={td}>{(e.category === "empty_excess" || e.category === "lastmonth_excess") ? (e.direction === "out" ? `(${fmt(e.amount)})` : fmt(e.amount)) : "-"}</td>
                   <td style={td}><button className="btndel" onClick={()=>removeManual(e.id)}>{I.trash}</button></td>
                 </tr>
               ))}

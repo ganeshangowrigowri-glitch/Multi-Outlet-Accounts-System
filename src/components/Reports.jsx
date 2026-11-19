@@ -1831,15 +1831,24 @@ function computeStockExcessMonth({ sales, inv, ov, ledger, bfBal, from, to }) {
   const seMS = monthStart(month), seME = monthEnd(month);
   const posSE = (d.positionLedgerAll || []).filter(e => e.category_group === "stock_se");
   const seBf  = cat => Number(posSE.find(e => e.category === cat && e.date === seMS)?.amount) || 0;
-  const seSum = cat => posSE.filter(e => e.category === cat && e.date >= seMS && e.date <= seME)
+    const seSum = cat => posSE.filter(e => e.category === cat && e.date >= seMS && e.date <= seME)
     .reduce((a, e) => a + (Number(e.amount) || 0), 0);
+  const seSumSigned = cat => posSE.filter(e => e.category === cat && e.date >= seMS && e.date <= seME)
+    .reduce((a, e) => a + (e.direction === "out" ? -1 : 1) * (Number(e.amount) || 0), 0);
   const seDet = seCalc && {
     bfS:  seBf("short_bf"),  bfX:  seBf("excess_bf"),
     monS: seCalc.short  + seSum("manual_short"),
     monX: seCalc.excess + seSum("manual_excess"),
     recS: seSum("short_recover"), recX: seSum("excess_recover"),
-    emS:  seSum("empty_short"),   emX:  seSum("empty_excess"),
+         emS:  seSumSigned("empty_short"),   emX:  seSumSigned("empty_excess"),
   };
+  // Last Month Excess Recover: direction "out" = deduct, "in" = add
+  const lmRows = posSE
+    .filter(e => (e.category === "lastmonth_short" || e.category === "lastmonth_excess") && e.date >= seMS && e.date <= seME)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const lmSigned = e => (e.direction === "out" ? -1 : 1) * (Number(e.amount) || 0);
+  const lmS = lmRows.filter(e => e.category === "lastmonth_short").reduce((a, e) => a + lmSigned(e), 0);
+  const lmX = lmRows.filter(e => e.category === "lastmonth_excess").reduce((a, e) => a + lmSigned(e), 0);
 
   // Total Capital (before Partner Contribution/Drawings) = Owners' Capital
   // + Net Profit/Loss only. UG Sales Commission and Personal Drawings no
@@ -1952,10 +1961,16 @@ function computeStockExcessMonth({ sales, inv, ov, ledger, bfBal, from, to }) {
         <SEDRow label="B/F Balance"   s={seDet.bfS}  x={seDet.bfX} />
         <SEDRow label="For the Month" s={seDet.monS} x={seDet.monX} />
         <SEDRow label="Recover"       s={-seDet.recS} x={-seDet.recX} />
-        <SEDRow label="Empty"         s={seDet.emS}  x={seDet.emX} />
+       <SEDRow label="Empty"         s={seDet.emS}  x={seDet.emX} />
+        {lmRows.map(e => (
+          <SEDRow key={e.id}
+            label={`Last Month Excess Recover${e.notes ? " - " + e.notes : ""}`}
+            s={e.category === "lastmonth_short"  ? lmSigned(e) : 0}
+            x={e.category === "lastmonth_excess" ? lmSigned(e) : 0} />
+        ))}
         <SEDRow label="Balance" total
-          s={seDet.bfS + seDet.monS - seDet.recS + seDet.emS}
-          x={seDet.bfX + seDet.monX - seDet.recX + seDet.emX} />
+          s={seDet.bfS + seDet.monS - seDet.recS + seDet.emS + lmS}
+          x={seDet.bfX + seDet.monX - seDet.recX + seDet.emX + lmX} />
       </>)}
        
       <tr>
