@@ -1547,14 +1547,14 @@ Object.keys(cosByItem).forEach(code => {
         <TR label="Luxury Brand 16% Discount" col2={totalLuxuryDisc} indent={1} />
       )}
 
-       <TRSplit label="Price Increase" col2={Math.abs(priceHistoryOtherInc)} neg={priceHistoryOtherInc < 0} indent={1} />
+       <TRSplit label="Price Increase/Decrease" col2={Math.abs(priceHistoryOtherInc)} neg={priceHistoryOtherInc < 0} indent={1} />
 
-            {manualEntries.map(e => (
+          {manualEntries.map(e => (
         <TRSplit key={`mo-${e.id}`} label={e.description}
           col2={Number(e.amount) || 0} neg={e.sign === "-"} indent={1} />
       ))}
 
-       <TR label="Total Other Income" val={totalOtherIncIS} bold total />
+      <TR label="Total Other Income" val={totalOtherIncIS} bold total />
       <TR label="Total Income" val={totalIncome} bold total />
 
       {/* Expenses */}
@@ -1573,7 +1573,7 @@ Object.keys(cosByItem).forEach(code => {
 
       <SH>Other Expenses (5900–5999)</SH>
       {expDetail("5900", "5999").map(e => <TR key={e.id} label={e.name} col2={e.total} indent={1} />)}
-           <TR label="Total Other Expenses" val={expOther} neg bold />
+       <TR label="Total Other Expenses" val={expOther} neg bold />
 
       <TR label="Total Expenses" val={totalExpIS} neg total />
       <TR label="Net Profit / (Loss)" val={netProfit} bold total />
