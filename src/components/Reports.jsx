@@ -2140,49 +2140,35 @@ export function brandOf(rawSupplier) {
 // ─────────────────────────────────────────────────────────────────────────
 function SalesSummary({ d, outlet, month }) {
   const { sales, totalSalesAmt, bankLedger, purchases, cardLedgerAll } = d;
-  
+
   // ── 1. Per-brand, per-day aggregates ─────────────────────────────────
-  // brandDay[brandKey][dayNum] = { amt, qty }
   const brandDay = {};
   BRAND_CONFIG.forEach(b => { brandDay[b.key] = {}; });
 
-  const dailySale = {};   // dayNum → total Rs amount
-  const dailySold = {};   // dayNum → total units
+  const dailySale = {};
+  const dailySold = {};
 
-    const salesFiltered = [...sales]
-    .filter(s => (s.items || []).some(r => !r.isEmptyItem));
-  
+  const salesFiltered = [...sales].filter(s => (s.items || []).some(r => !r.isEmptyItem));
 
-     salesFiltered.forEach(s => {
-    // Exact-date guard: only ever bucket a record into the day it actually
-    // belongs to (selectedDate === rowDate). Prevents any stray/out-of-range
-    // record from silently adding onto another day's totals.
+  salesFiltered.forEach(s => {
     if (month && monthOf(s.date) !== month) return;
     const day = dayOf(s.date);
 
-  (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
-      const qty = parseFloat(r.sold) || 0;  // direct daily qty ✅
+    (s.items || []).filter(r => !r.isEmptyItem).forEach(r => {
+      const qty = parseFloat(r.sold) || 0;
       const amt = qty * (parseFloat(r.rate) || 0);
 
-      // Daily Sale / Sold totals must include EVERY item regardless of
-      // supplier-brand mapping, so this always matches the real Total Sale
-      // shown on the Stock/Inventory Daily Sale screen. Only the per-brand
-      // columns (IDL/RL/DCSL/UG/etc.) are limited to recognized brands —
-      // unmapped suppliers (e.g. KASTHURI W/S) simply don't get a brand
-      // column, but their sales still count in the totals.
       dailySale[day] = (dailySale[day] || 0) + amt;
       dailySold[day] = (dailySold[day] || 0) + qty;
 
       const bk = brandOf(r.supplier);
-      if (!bk) return; // no matching brand column — totals above already counted it
+      if (!bk) return;
 
       if (!brandDay[bk][day]) brandDay[bk][day] = { amt: 0, qty: 0 };
       brandDay[bk][day].amt += amt;
       brandDay[bk][day].qty += qty;
     });
 
-    // ← NEW: Daily Sale column = the saved "Total Sale" of the day (same as the
-    // Daily Sale screen). Only dailySale changes; brand columns and Sold stay as is.
     if (s.total !== undefined && s.total !== null && s.total !== "") {
       const itemsTotal = (s.items || []).filter(r => !r.isEmptyItem)
         .reduce((a, r) => a + (parseFloat(r.sold) || 0) * (parseFloat(r.rate) || 0), 0);
@@ -2190,19 +2176,11 @@ function SalesSummary({ d, outlet, month }) {
     }
   });
 
-  // ── 2. Daily Deposit — from bankLedger debit entries ─────────────────
+  // ── 2. Daily Deposit ─────────────────────────────────────────────────
   const dailyDeposit = {};
   (bankLedger || []).forEach(r => {
-    // Exclude non-transaction marker rows (B/F, monthly B/F, pending,
-    // manual C/D, "different") — same exclusion BankLedgerView already
-    // applies. Without this, the B/F balance row was being summed in as
-    // if it were a deposit, inflating whichever day it's dated to.
     if (["bf", "bf_monthly", "pending", "cd_manual", "different"].includes(r.balance_type)) return;
-    // Exact-date guard: only ever bucket a row into the day it belongs to.
     if (month && monthOf(r.date) !== month) return;
-    // Deposit-only guard: bank transfers post debit rows to the same
-    // ledger (e.g. reference-number rows like "823816") and must NOT be
-    // counted here — only rows actually entered as a Bank Deposit.
     const desc = (r.description || "").trim().toLowerCase();
     if (desc !== "bank deposit") return;
     const day = dayOf(r.date);
@@ -2210,11 +2188,7 @@ function SalesSummary({ d, outlet, month }) {
     if (deb > 0) dailyDeposit[day] = (dailyDeposit[day] || 0) + deb;
   });
 
-  // ── 2b. Daily Card Settlement — from Card Ledger, credit (gross) side.
-  // Only "sale" rows (RecordCollection) carry credit > 0 — "transfer" rows
-  // (TransferToBank) carry debit instead, so they're naturally excluded.
-  // Marker rows (bf/pending/cd_manual/different) are excluded explicitly,
-  // matching how S_Card.jsx's own LedgerView filters cardEntries.
+  // ── 2b. Card Settlement ──────────────────────────────────────────────
   const dailyCardSettlement = {};
   (cardLedgerAll || []).forEach(r => {
     if (["bf", "pending", "cd_manual", "different"].includes(r.balance_type)) return;
@@ -2224,7 +2198,7 @@ function SalesSummary({ d, outlet, month }) {
     if (gross > 0) dailyCardSettlement[day] = (dailyCardSettlement[day] || 0) + gross;
   });
 
-  // ── 3. Daily Purchase — from purchases records ────────────────────────
+  // ── 3. Purchase ──────────────────────────────────────────────────────
   const dailyPurchase = {};
   (purchases || []).forEach(p => {
     const day = dayOf(p.date);
@@ -2235,33 +2209,46 @@ function SalesSummary({ d, outlet, month }) {
     if (amt > 0) dailyPurchase[day] = (dailyPurchase[day] || 0) + amt;
   });
 
-  // ── 4. Grid helpers ───────────────────────────────────────────────────
-    const days  = Array.from({ length: 31 }, (_, i) => i + 1);
+  // ── 4. Grid + totals ─────────────────────────────────────────────────
+  const days  = Array.from({ length: 31 }, (_, i) => i + 1);
   const weeks = [[1, 7], [8, 14], [15, 21], [22, 28], [29, 31]];
-  // Print only: row height so 31 days + 5 week rows + header + total fit one page
   const rowMm = Math.min(8, 232 / (days.length + weeks.length + 5)).toFixed(2);
 
   const wkBrandAmt = (bk, s, e) =>
     days.filter(d => d >= s && d <= e).reduce((a, d) => a + (brandDay[bk][d]?.amt || 0), 0);
-  const wkBrandQty = (bk, s, e) =>
-    days.filter(d => d >= s && d <= e).reduce((a, d) => a + (brandDay[bk][d]?.qty || 0), 0);
   const wkSimple = (map, s, e) =>
     days.filter(d => d >= s && d <= e).reduce((a, d) => a + (map[d] || 0), 0);
 
-  const grandDailySale  = Object.values(dailySale   ).reduce((a, v) => a + v, 0);
-   const grandDeposit    = Object.values(dailyDeposit ).reduce((a, v) => a + v, 0);
-   const grandCardSettle = Object.values(dailyCardSettlement).reduce((a, v) => a + v, 0);
-   const grandPurchase   = Object.values(dailyPurchase).reduce((a, v) => a + v, 0);
-   const grandSold       = Object.values(dailySold    ).reduce((a, v) => a + v, 0);
+  const grandDailySale  = Object.values(dailySale).reduce((a, v) => a + v, 0);
+  const grandDeposit    = Object.values(dailyDeposit).reduce((a, v) => a + v, 0);
+  const grandCardSettle = Object.values(dailyCardSettlement).reduce((a, v) => a + v, 0);
+  const grandPurchase   = Object.values(dailyPurchase).reduce((a, v) => a + v, 0);
+  const grandSold       = Object.values(dailySold).reduce((a, v) => a + v, 0);
 
   const grandBrandAmt = bk => days.reduce((a, d) => a + (brandDay[bk][d]?.amt || 0), 0);
-  const grandBrandQty = bk => days.reduce((a, d) => a + (brandDay[bk][d]?.qty || 0), 0);
+
+  // ── 5. Average helpers (same rule as Excel AVERAGEIF ">0") ───────────
+  // Weekly = average of days with value > 0 in that week
+  // Total  = average of the weekly averages
+  const avgPositive = arr => {
+    const v = arr.filter(x => x > 0);
+    return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0;
+  };
+  const weekAvg = (s, e) => avgPositive(
+    days.filter(d => d >= s && d <= e).map(d => dailySale[d] || 0)
+  );
+  const totalAvgSale = avgPositive(weeks.map(([s, e]) => weekAvg(s, e)));
+
+  const brandWeekAvg = (bk, s, e) => avgPositive(
+    days.filter(d => d >= s && d <= e).map(d => brandDay[bk][d]?.amt || 0)
+  );
+  const brandTotalAvg = bk => avgPositive(weeks.map(([s, e]) => brandWeekAvg(bk, s, e)));
 
   const mo = month
     ? new Date(month + "-01").toLocaleString("en-LK", { month: "long", year: "numeric" })
     : "All Periods";
 
-  // ── 5. Cell style helpers ─────────────────────────────────────────────
+  // ── 6. Cell styles ───────────────────────────────────────────────────
   const thBase = {
     padding: "5px 7px", fontSize: 9, fontWeight: 700, letterSpacing: ".06em",
     textTransform: "uppercase", color: "var(--mut2)", background: "var(--s3)",
@@ -2293,40 +2280,41 @@ function SalesSummary({ d, outlet, month }) {
     textAlign: "right", borderRight: "1px solid var(--bdr)",
   });
 
-  // ── 6. Weekly subtotal row ────────────────────────────────────────────
-    const WeekRow = ({ s, e }) => {
-    const wSale    = wkSimple(dailySale,     s, e);
-    const wDeposit = wkSimple(dailyDeposit,  s, e);
+  // ── 7. Weekly subtotal row ───────────────────────────────────────────
+  const WeekRow = ({ s, e }) => {
+    const wSale    = wkSimple(dailySale, s, e);
+    const wDeposit = wkSimple(dailyDeposit, s, e);
     const wCard    = wkSimple(dailyCardSettlement, s, e);
     const wPur     = wkSimple(dailyPurchase, s, e);
-    const wSold    = wkSimple(dailySold,     s, e);
+    const wSold    = wkSimple(dailySold, s, e);
+    const wAvg     = weekAvg(s, e);
     return (
       <tr style={{ background: "var(--gd2)", borderBottom: "2px solid var(--bdr2)" }}>
         <td style={{ ...wkTd(), textAlign: "center", whiteSpace: "nowrap" }}>Wk {s}–{e}</td>
-        <td style={wkTd()}>{wSale    > 0 ? fmt(wSale)    : ""}</td>
+        <td style={wkTd()}>{wSale > 0 ? fmt(wSale) : ""}</td>
+        <td style={wkTd("var(--grn)")}>{wAvg > 0 ? fmt(wAvg) : ""}</td>
         <td style={wkTd()}>{wDeposit > 0 ? fmt(wDeposit) : ""}</td>
-        <td style={wkTd()}>{wCard    > 0 ? fmt(wCard)    : ""}</td>
+        <td style={wkTd()}>{wCard > 0 ? fmt(wCard) : ""}</td>
 
-        {BRAND_CONFIG.map(b => (
-          <React.Fragment key={b.key}>
-            <td style={wkTd()}>{wkBrandAmt(b.key, s, e) > 0 ? fmt(wkBrandAmt(b.key, s, e)) : ""}</td>
-            {b.hasQty && (
-              <td style={{ ...wkTd(), color: "var(--mut2)" }}>
-                {wkBrandQty(b.key, s, e) > 0 ? fmtN(wkBrandQty(b.key, s, e)) : ""}
-              </td>
-            )}
-          </React.Fragment>
-        ))}
+        {BRAND_CONFIG.map(b => {
+          const amt = wkBrandAmt(b.key, s, e);
+          const avg = brandWeekAvg(b.key, s, e);
+          return (
+            <React.Fragment key={b.key}>
+              <td style={wkTd()}>{amt > 0 ? fmt(amt) : ""}</td>
+              <td style={wkTd("var(--grn)")}>{avg > 0 ? fmt(avg) : ""}</td>
+            </React.Fragment>
+          );
+        })}
 
-        <td style={wkTd()}>{wPur  > 0 ? fmt(wPur)   : ""}</td>
+        <td style={wkTd()}>{wPur > 0 ? fmt(wPur) : ""}</td>
         <td style={wkTd()}>{wSold > 0 ? fmtN(wSold) : ""}</td>
-        <td style={{ borderRight: "1px solid var(--bdr)" }} />
       </tr>
     );
   };
 
-  // ── 7. Render ─────────────────────────────────────────────────────────
-   return (
+  // ── 8. Render ────────────────────────────────────────────────────────
+  return (
     <div>
       <style>{`
         @media print {
@@ -2350,14 +2338,14 @@ function SalesSummary({ d, outlet, month }) {
           }
         }
       `}</style>
-            {/* Print button */}
+
       <div className="no-print" style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 12 }}>
         <button className="btn btng btnsm" onClick={printA4}>{I.print} Print (A4)</button>
         <button className="btn btng btnsm" onClick={printFull}>{I.print} Print (8K)</button>
       </div>
+
       <div className="ssum-print-card" style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
 
-        {/* Card header */}
         <div className="ssum-print-head" style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Sales Summary</div>
           <div style={{ fontSize: 11, color: "var(--mut)" }}>
@@ -2366,144 +2354,99 @@ function SalesSummary({ d, outlet, month }) {
         </div>
 
         <div className="ssum-scroll" style={{ overflowX: "auto" }}>
-          <table className="ssum-print-table" style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 900, "--rh": `${rowMm}mm` }}>
+          <table className="ssum-print-table" style={{ borderCollapse: "collapse", fontSize: 11, minWidth: 1400, "--rh": `${rowMm}mm` }}>
             <thead>
-
-              {/* ── Row 1: group headers ── */}
+              {/* Row 1 */}
               <tr>
                 <th rowSpan={2} style={{ ...thBase, textAlign: "center", minWidth: 42 }}>Date</th>
                 <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Daily Sale</th>
+                <th rowSpan={2} style={{ ...thBase, textAlign: "right", color: "var(--grn)" }}>Avg Sale</th>
                 <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Daily Deposit</th>
                 <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Card Settlement</th>
 
-                {BRAND_CONFIG.map(b => b.hasQty ? (
-                  // Brands with Qty: span 2 sub-cols
+                {BRAND_CONFIG.map(b => (
                   <th key={b.key} colSpan={2}
                     style={{ ...thBase, textAlign: "center", background: "var(--gd2)", color: "var(--gld2)", borderBottom: "1px solid var(--bdr2)" }}>
-                    {b.label}
-                  </th>
-                ) : (
-                  // Amount-only brands: rowSpan=2, no sub-header needed
-                  <th key={b.key} rowSpan={2} style={{ ...thBase, textAlign: "right" }}>
                     {b.label}
                   </th>
                 ))}
 
                 <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Purchase</th>
                 <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Sold</th>
-                <th rowSpan={2} style={{ ...thBase, textAlign: "right" }}>Other</th>
               </tr>
 
-              {/* ── Row 2: sub-col labels (only for hasQty brands) ── */}
+              {/* Row 2 — Sales / Avg under each brand */}
               <tr>
-                {BRAND_CONFIG.filter(b => b.hasQty).map(b => (
+                {BRAND_CONFIG.map(b => (
                   <React.Fragment key={b.key}>
-                    <th style={{ ...thBase, textAlign: "right", fontSize: 8 }}>Amount</th>
-                    <th style={{ ...thBase, textAlign: "right", fontSize: 8 }}>Qty</th>
+                    <th style={{ ...thBase, textAlign: "right", fontSize: 8 }}>Sales</th>
+                    <th style={{ ...thBase, textAlign: "right", fontSize: 8, color: "var(--grn)" }}>Avg</th>
                   </React.Fragment>
                 ))}
               </tr>
-
             </thead>
 
             <tbody>
-               {days.map(day => {
+              {days.map(day => {
                 const weekBreakBefore = weeks.find(([, e]) => e === day - 1);
-                const sale    = dailySale[day]     || 0;
-                const deposit = dailyDeposit[day]  || 0;
+                const sale    = dailySale[day] || 0;
+                const deposit = dailyDeposit[day] || 0;
                 const card    = dailyCardSettlement[day] || 0;
                 const pur     = dailyPurchase[day] || 0;
-                const sold    = dailySold[day]     || 0;
+                const sold    = dailySold[day] || 0;
 
                 return (
                   <React.Fragment key={day}>
                     {weekBreakBefore && <WeekRow s={weekBreakBefore[0]} e={weekBreakBefore[1]} />}
 
                     <tr style={{ borderBottom: "1px solid rgba(63,63,70,.25)" }}>
-                      {/* Date */}
                       <td style={dayTd}>{day}</td>
+                      <td style={tdBase(sale > 0 ? "var(--grn)" : "var(--mut2)")}>{sale > 0 ? fmt(sale) : "-"}</td>
+                      <td style={tdBase("var(--mut2)")}>{""}</td>
+                      <td style={tdBase(deposit > 0 ? "var(--blu)" : "var(--mut2)")}>{deposit > 0 ? fmt(deposit) : "-"}</td>
+                      <td style={tdBase(card > 0 ? "var(--blu)" : "var(--mut2)")}>{card > 0 ? fmt(card) : "-"}</td>
 
-                      {/* Daily Sale */}
-                      <td style={tdBase(sale > 0 ? "var(--grn)" : "var(--mut2)")}>
-                        {sale > 0 ? fmt(sale) : "-"}
-                      </td>
-
-                      {/* Daily Deposit */}
-                      <td style={tdBase(deposit > 0 ? "var(--blu)" : "var(--mut2)")}>
-                        {deposit > 0 ? fmt(deposit) : "-"}
-                      </td>
-
-                      {/* Card Settlement */}
-                      <td style={tdBase(card > 0 ? "var(--blu)" : "var(--mut2)")}>
-                        {card > 0 ? fmt(card) : "-"}
-                      </td>
-                    
-                      {/* Brand columns */}
                       {BRAND_CONFIG.map(b => {
                         const cell = brandDay[b.key][day];
                         return (
                           <React.Fragment key={b.key}>
-                            {/* Amount */}
                             <td style={tdBase(cell?.amt > 0 ? "var(--txt)" : "var(--mut2)")}>
                               {cell?.amt > 0 ? fmt(cell.amt) : "-"}
                             </td>
-                            {/* Qty (only for hasQty brands) */}
-                            {b.hasQty && (
-                              <td style={tdBase("var(--mut2)")}>
-                                {cell?.qty > 0 ? fmtN(cell.qty) : ""}
-                              </td>
-                            )}
+                            <td style={tdBase("var(--mut2)")}>{""}</td>
                           </React.Fragment>
                         );
                       })}
 
-                      {/* Purchase */}
-                      <td style={tdBase(pur > 0 ? "var(--gld2)" : "var(--mut2)")}>
-                        {pur > 0 ? fmt(pur) : "-"}
-                      </td>
-
-                      {/* Sold (total units all brands) */}
-                      <td style={tdBase(sold > 0 ? "var(--txt)" : "var(--mut2)")}>
-                        {sold > 0 ? fmtN(sold) : ""}
-                      </td>
-
-                      {/* Other (reserved) */}
-                      <td style={tdBase("var(--mut2)")}>{""}</td>
+                      <td style={tdBase(pur > 0 ? "var(--gld2)" : "var(--mut2)")}>{pur > 0 ? fmt(pur) : "-"}</td>
+                     <td style={tdBase(sold > 0 ? "var(--txt)" : "var(--mut2)")}>{sold > 0 ? fmtN(sold) : ""}</td>
                     </tr>
                   </React.Fragment>
                 );
               })}
 
-              {/* Week 29–31 subtotal */}
               <WeekRow s={29} e={31} />
 
-              {/* ── Grand Total row ── */}
+              {/* Grand Total */}
               <tr style={{ background: "var(--s3)", borderTop: "2px solid var(--bdr2)" }}>
                 <td style={{ padding: "7px 10px", fontWeight: 700, fontSize: 12, borderRight: "1px solid var(--bdr)", textAlign: "center" }}>
                   Total
                 </td>
                 <td style={totTd("var(--grn)")}>{grandDailySale > 0 ? fmt(grandDailySale) : ""}</td>
+                <td style={totTd("var(--grn)")}>{totalAvgSale > 0 ? fmt(totalAvgSale) : ""}</td>
                 <td style={totTd("var(--blu)")}>{fmt(grandDeposit)}</td>
                 <td style={totTd("var(--blu)")}>{fmt(grandCardSettle)}</td>
 
                 {BRAND_CONFIG.map(b => (
                   <React.Fragment key={b.key}>
-                    <td style={totTd()}>
-                      {grandBrandAmt(b.key) > 0 ? fmt(grandBrandAmt(b.key)) : ""}
-                    </td>
-                    {b.hasQty && (
-                      <td style={totTd("var(--mut)")}>
-                        {grandBrandQty(b.key) > 0 ? fmtN(grandBrandQty(b.key)) : ""}
-                      </td>
-                    )}
+                    <td style={totTd()}>{grandBrandAmt(b.key) > 0 ? fmt(grandBrandAmt(b.key)) : ""}</td>
+                    <td style={totTd("var(--grn)")}>{brandTotalAvg(b.key) > 0 ? fmt(brandTotalAvg(b.key)) : ""}</td>
                   </React.Fragment>
                 ))}
 
                 <td style={totTd("var(--gld2)")}>{grandPurchase > 0 ? fmt(grandPurchase) : ""}</td>
                 <td style={totTd()}>{grandSold > 0 ? fmtN(grandSold) : ""}</td>
-                <td style={{ borderRight: "1px solid var(--bdr)" }} />
               </tr>
-
             </tbody>
           </table>
         </div>
@@ -2801,7 +2744,7 @@ const rows = [...regularRows, ...visaInterestRows, ...unmatchedInterestRows, ...
       </div>
 
             <div className="exp-print-card" style={{ background: "var(--s1)", border: "1px solid var(--bdr)", borderRadius: "var(--rl)", overflow: "hidden" }}>
-        <div className="exp-print-head" style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
+          <div className="exp-print-head" style={{ padding: "16px 18px", borderBottom: "1px solid var(--bdr)", background: "var(--s2)" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 2 }}>Expense Summary</div>
           <div style={{ fontSize: 11, color: "var(--mut)" }}>
             {outlet === "ALL" ? "All Outlets" : outlet} &nbsp;·&nbsp; {mo}
