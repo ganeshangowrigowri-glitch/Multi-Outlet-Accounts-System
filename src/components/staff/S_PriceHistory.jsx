@@ -3,26 +3,29 @@ import { fmt, today } from "../../utils/helpers";
 import { getPriceHistoryStock, upsertPriceHistoryStock } from "../../db";
 
 
-export function buildHistoryRows(masterInv, overridesMain) {
+export function buildHistoryRows(masterInv) {
   const rows = [];
   (masterInv || []).forEach(item => {
     if (item.type === "EMP") return;
-    const ovKey = `${item.code}__${item.supplier}`;
-    const hist = (overridesMain[ovKey]?.priceHistory || [])
+    const itemKey = `${item.code}__${item.supplier}`;
+    const hist = (item.priceHistory || [])
       .slice()
       .sort((a, b) => a.date.localeCompare(b.date));
     hist.forEach((h, i) => {
-      const oldCost = i > 0 ? hist[i - 1].unitCost : item.unitCost;
+      if (i === 0) return;                                  // first row is the starting cost
+      const oldCost = Number(hist[i - 1].unitCost);
+      const newCost = Number(h.unitCost);
+      if (newCost === oldCost) return;                      // selling-only change, not a cost change
       rows.push({
-        rowKey:   `${ovKey}__${h.date}`,
-        itemKey:  ovKey,
+        rowKey:   `${itemKey}__${h.date}`,
+        itemKey,
         date:     h.date,
         supplier: item.supplier,
         name:     item.name,
         type:     item.type,
-        newCost:  h.unitCost,
+        newCost,
         oldCost,
-        margin:   h.unitCost - oldCost,
+        margin:   newCost - oldCost,
       });
     });
   });
@@ -38,11 +41,7 @@ export default function S_PriceHistory({ outlet, masterInv, outletOverridesMain 
   useEffect(() => {
     getPriceHistoryStock(outlet).then(setStockMap);
   }, [outlet]);
-
-  const allRows = useMemo(
-    () => buildHistoryRows(masterInv, outletOverridesMain),
-    [masterInv, outletOverridesMain]
-  );
+  const allRows = useMemo(() => buildHistoryRows(masterInv), [masterInv]);
 
   const rows = useMemo(
     () => allRows.filter(r => r.date.slice(0, 7) === month),

@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect,  useRef} from "react";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import { ls, lss } from "../../utils/helpers";
-import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride } from "../../db";
+import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride, deleteInventoryItem } from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SEED_EMPTY, SUPPLIERS_LIST, SUP_COLOR, ITEM_TYPES, OUTLETS, OUTLET_INV_SEEDS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -41,6 +41,18 @@ export function resolveOutletPrice(ov, dateStr, fallbackCost, fallbackPrice) {
     unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : fallbackCost,
     sellingPrice: ov.sellingPrice !== undefined ? ov.sellingPrice : fallbackPrice,
   };
+}
+// Unit cost ALWAYS comes from the main item (same in every outlet).
+// Selling price comes from the outlet's own dated price if it has one.
+export function resolveItemPrice(masterItem, ov, dateStr) {
+  const m = resolveOutletPrice(masterItem, dateStr, masterItem.unitCost, masterItem.sellingPrice);
+  const ovRows = (ov?.priceHistory || [])
+    .filter(h => h.date <= dateStr)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const sellingPrice = ovRows.length
+    ? ovRows[ovRows.length - 1].sellingPrice
+    : m.sellingPrice;
+  return { unitCost: m.unitCost, sellingPrice };
 }
 // Combines Supabase flags + price history into the SAME shape the rest of
 // this file (and S_Inventory.jsx) already expects:
@@ -224,19 +236,19 @@ async function openEdit(item) {
     const ovKey  = `${editItem.code}__${editItem.supplier}`;
     const prevOv = overrides[ovKey] || {};
     const pDate  = ef.priceDate || today();
-    const unitCost     = Number(ef.unitCost)     || 0;
+       const unitCost     = Number(editItem.unitCost) || 0;   // cost is never set per outlet
     const sellingPrice = Number(ef.sellingPrice) || 0;
 
-    await upsertOutletPrice(selOutlet, ovKey, false, pDate, unitCost, sellingPrice);
+      await upsertOutletPrice(selOutlet, ovKey, false, pDate, Number(editItem.unitCost) || 0, sellingPrice);
     await setOutletItemHidden(selOutlet, ovKey, false, ef.hidden);
 
     const priceHistory = [
       ...(prevOv.priceHistory || []).filter(h => h.date !== pDate),
-      { date: pDate, unitCost, sellingPrice },
+      { date: pDate, unitCost: Number(editItem.unitCost) || 0, sellingPrice },
     ].sort((a, b) => a.date.localeCompare(b.date));
     setOverridesState({
       ...overrides,
-      [ovKey]: { unitCost, sellingPrice, hidden: ef.hidden, priceHistory },
+      [ovKey]: { unitCost: Number(editItem.unitCost) || 0, sellingPrice, hidden: ef.hidden, priceHistory },
     });
 
     if (ef.qty !== "" && ef.qty != null) {
@@ -364,12 +376,9 @@ async function openEdit(item) {
                 const hasOv       = !!ov;
                 const isHidden    = ov?.hidden;
                 const col         = allSupColors[item.supplier] || "#94a3b8";
-                const outletCost  = hasOv ? ov.unitCost     : item.unitCost;
+                const outletCost  = item.unitCost;
                 const outletPrice = hasOv ? ov.sellingPrice : item.sellingPrice;
-                const priceChanged = hasOv && (
-                  Number(ov.sellingPrice) !== Number(item.sellingPrice) ||
-                  Number(ov.unitCost)     !== Number(item.unitCost)
-                );
+                const priceChanged = hasOv && Number(ov.sellingPrice) !== Number(item.sellingPrice);
                 return (
                   <tr key={`${item.id}__${item.supplier}`} style={isHidden?{opacity:.4}:{}}>
                     <td style={{color:"var(--mut2)",fontSize:11,fontFamily:"monospace"}}>{idx+1}</td>
@@ -460,11 +469,11 @@ async function openEdit(item) {
               New cost/price apply from this date onward, until the next change.
             </div>
           </div>
-                     {ef.unitCost && ef.sellingPrice && Number(ef.unitCost)>0 && (
+                    {ef.sellingPrice && Number(editItem.unitCost)>0 && (
             <div style={{background:"var(--s2)",borderRadius:6,padding:"7px 11px",fontSize:11.5,
               border:"1px solid var(--bdr)",marginBottom:10}}>
               Outlet margin: <strong style={{color:"var(--gld2)"}}>
-                {(((ef.sellingPrice-ef.unitCost)/ef.unitCost)*100).toFixed(2)}%
+                {(((ef.sellingPrice-editItem.unitCost)/editItem.unitCost)*100).toFixed(2)}%
               </strong>
             </div>
           )}
@@ -606,7 +615,7 @@ async function saveEdit() {
     const ovKey  = `${editItem.code}__${editItem.supplier}`;
     const prevOv = overrides[ovKey] || {};
     const pDate  = ef.priceDate || today();
-    const unitCost     = Number(ef.unitCost)     || 0;
+      const unitCost     = Number(editItem.unitCost) || 0;   // cost is never set per outlet
     const sellingPrice = Number(ef.sellingPrice) || 0;
 
     await upsertOutletPrice(selOutlet, ovKey, true, pDate, unitCost, sellingPrice);
@@ -766,10 +775,7 @@ async function saveEdit() {
                 const col          = getSupColor(item.supplier);
                 const outletCost   = hasOv ? ov.unitCost     : item.unitCost;
                 const outletPrice  = hasOv ? ov.sellingPrice : item.sellingPrice;
-                const priceChanged = hasOv && (
-                  Number(ov.sellingPrice) !== Number(item.sellingPrice) ||
-                  Number(ov.unitCost)     !== Number(item.unitCost)
-                );
+                const priceChanged = hasOv && Number(ov.sellingPrice) !== Number(item.sellingPrice);
                 return (
                   <tr key={item.id} style={isHidden?{opacity:.4}:{}}>
                   <td style={{color:"var(--mut2)",fontSize:11,fontFamily:"monospace"}}>{idx+1}</td>
@@ -840,13 +846,12 @@ async function saveEdit() {
             <span>Main cost: <strong style={{color:"var(--txt)"}}>Rs.{fmt(editItem.unitCost)}</strong></span>
             <span>Main price: <strong style={{color:"var(--txt)"}}>Rs.{fmt(editItem.sellingPrice)}</strong></span>
           </div>
-          <div className="fg">
+                    <div className="fg">
             <div className="ff">
-              <label>Outlet Unit Cost (Rs.)</label>
-              <input type="number" value={ef.unitCost}
-                onChange={e=>setEf({...ef,unitCost:e.target.value})} placeholder="0.00"/>
+              <label>Unit Cost (main, all outlets)</label>
+              <div className="mono" style={{padding:"7px 0"}}>Rs.{fmt(editItem.unitCost)}</div>
             </div>
-             <div className="ff">
+            <div className="ff">
               <label>Outlet Selling Price (Rs.)</label>
               <input type="number" value={ef.sellingPrice}
                 onChange={e=>setEf({...ef,sellingPrice:e.target.value})} placeholder="0.00"/>
@@ -857,14 +862,14 @@ async function saveEdit() {
             <input type="date" value={ef.priceDate || today()}
               onChange={e=>setEf({...ef,priceDate:e.target.value})}/>
             <div style={{fontSize:11,color:"var(--mut)",marginTop:3}}>
-              New cost/price apply from this date onward, until the next change.
+              New selling price applies from this date onward, until the next change.
             </div>
           </div>
-          {ef.unitCost && ef.sellingPrice && Number(ef.unitCost)>0 && (
+         {ef.sellingPrice && Number(editItem.unitCost)>0 && (
             <div style={{background:"var(--s2)",borderRadius:6,padding:"7px 11px",fontSize:11.5,
               border:"1px solid var(--bdr)",marginBottom:10}}>
               Outlet margin: <strong style={{color:"var(--gld2)"}}>
-                {(((ef.sellingPrice-ef.unitCost)/ef.unitCost)*100).toFixed(2)}%
+                {(((ef.sellingPrice-editItem.unitCost)/editItem.unitCost)*100).toFixed(2)}%
               </strong>
             </div>
           )}
@@ -1066,10 +1071,17 @@ async function savePrice() {
   setPriceM(null);
 }
 
- function deleteItem(item) {
-  if (!confirm(`Remove ${item.code} — ${item.name} (${item.supplier})?`)) return;
-  saveEmpty(items.filter(i => i.id !== item.id));
-  toast_("Removed ✓");
+ async function deleteItem(item) {
+  if (!confirm(`Remove ${item.code} — ${item.name} (${item.supplier})? This also removes its outlet prices.`)) return;
+  try {
+    await deleteInventoryItem(item.id, `${item.code}__${item.supplier}`);
+    const remaining = items.filter(i => i.id !== item.id);
+    setItems(remaining);
+    lss("inv_empty_v2", remaining);
+    toast_("Removed ✓");
+  } catch (err) {
+    toast_("Delete failed — check console", "err");
+  }
 }
   function addSupplier() {
     if (!supForm.name) { toast_("Enter supplier name", "err"); return; }
@@ -1488,9 +1500,8 @@ useEffect(() => {
       !(single && csOutletOverrides[`${item.code}__${item.supplier}`]?.hidden))
     .map(item => {
     const ovItem = single ? csOutletOverrides[`${item.code}__${item.supplier}`] : undefined;
-    // Master dated price on csTo first, then outlet override (same as Staff)
-    const base = resolveOutletPrice(item, csTo, Number(item.unitCost) || 0, Number(item.sellingPrice) || 0);
-    const { unitCost: ucR, sellingPrice: spR } = resolveOutletPrice(ovItem, csTo, base.unitCost, base.sellingPrice);
+       // Master cost + outlet selling price for csTo (same rule as Staff)
+    const { unitCost: ucR, sellingPrice: spR } = resolveItemPrice(item, ovItem, csTo);
     const uc = Number(ucR) || 0;
     const sp = Number(spR) || 0;
     const mg = sp - uc;
@@ -1664,8 +1675,7 @@ useEffect(() => {
       totalSaleAmt = 0; profit = 0;
       let soldTracked = 0;
       Object.entries(soldByDate).forEach(([date, q]) => {
-        const b  = resolveOutletPrice(item, date, item.unitCost, item.sellingPrice);
-        const dp = resolveOutletPrice(ovItem, date, b.unitCost, b.sellingPrice);
+       const dp = resolveItemPrice(item, ovItem, date);
         const daySP = Number(dp.sellingPrice) || 0;
         const dayUC = Number(dp.unitCost)     || 0;
         totalSaleAmt += q * daySP;
@@ -1964,8 +1974,18 @@ async function saveSupplier() {
                 {I.edit}
                </button>
               
-                <button className="btndel" title="Delete"
-                  onClick={()=>{if(!confirm(`Remove ${item.code}?`))return;si(inv.filter(i=>!(i.id===item.id && i.supplier===item.supplier)));toast_("Removed");}}>
+                 <button className="btndel" title="Delete"
+                  onClick={async ()=>{
+                    if(!confirm(`Remove ${item.code} — ${item.name}? This also removes its outlet prices.`)) return;
+                    try {
+                      await deleteInventoryItem(item.id, `${item.code}__${item.supplier}`);
+                      setIR(prev => prev.filter(i => !(i.id===item.id && i.supplier===item.supplier)));
+                      lss("inv_main", inv.filter(i => !(i.id===item.id && i.supplier===item.supplier)));
+                      toast_("Removed ✓");
+                    } catch (err) {
+                      toast_("Delete failed — check console", "err");
+                    }
+                  }}>
                   {I.trash}
                 </button>
               </div>
@@ -2478,13 +2498,25 @@ async function saveSupplier() {
               const pDate        = pf.priceDate || today();
               const unitCost     = Number(pf.unitCost)     || 0;
               const sellingPrice = Number(pf.sellingPrice) || 0;
-              const prevHistory  = priceM.priceHistory || [];
+                           const prevHistory  = priceM.priceHistory || [];
+              const seed = prevHistory.length === 0
+                ? [{ date: pf.oldFrom || "2026-07-01",
+                     unitCost: priceM.unitCost, sellingPrice: priceM.sellingPrice }]
+                : [];
               const priceHistory = [
+                ...seed,
                 ...prevHistory.filter(h => h.date !== pDate),
                 { date: pDate, unitCost, sellingPrice },
               ].sort((a, b) => a.date.localeCompare(b.date));
               
-              si(inv.map(i=>(i.id===priceM.id && i.supplier===priceM.supplier)?{...i,unitCost,sellingPrice,priceHistory}:i));
+              const today0 = today();
+              const cur = [...priceHistory].filter(h => h.date <= today0).pop();
+              si(inv.map(i=>(i.id===priceM.id && i.supplier===priceM.supplier)
+              ? {...i,
+              priceHistory,
+               unitCost:     cur ? cur.unitCost     : i.unitCost,
+               sellingPrice: cur ? cur.sellingPrice : i.sellingPrice}
+              : i));
               toast_("Main prices updated ✓"); setPriceM(null);
             }}>{I.check} Update Main Price</button>
           </>}>

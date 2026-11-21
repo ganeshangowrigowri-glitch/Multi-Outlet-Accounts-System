@@ -5,7 +5,7 @@ import { ls, lss, fmt, oKey, today, uid } from "../../utils/helpers";
 import { addSale, deleteSaleForDate, addCashEntry,deleteCashEntryForDate, deleteEmptyCashEntriesForDate, addGLEntry, getPurchases, getTransfers, getReturns, getSales, getInventoryMaster,  getEmptyInventoryMaster, getOpeningStock, saveOpeningStock, getSuppliers} from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY } from "../../data/seeds";
-import { resolveOutletPrice, loadOutletOverridesFromDB } from "../admin/InventoryAdmin";
+import { resolveOutletPrice, resolveItemPrice, loadOutletOverridesFromDB } from "../admin/InventoryAdmin";
 import S_PriceHistory from "./S_PriceHistory";
 import S_Crates from "./S_Crates";
 const EMPTY_PURCHASE_SUP_ID = "EMPTY_PURCHASE"; // adjust to match your actual Supabase ID
@@ -53,8 +53,7 @@ const EMPTY_RECEIVED_AUTO_MAP = [
   // Stock price change (Tab 1) never applies retroactively to earlier
   // dates here either. This becomes the fallback for outlet pricing,
   // exactly as item.unitCost/sellingPrice did before.
-  const base = resolveOutletPrice(item, d, item.unitCost, item.sellingPrice);
-  const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, base.unitCost, base.sellingPrice);
+   const { unitCost, sellingPrice } = resolveItemPrice(item, ov, d);
   return {
     ...item,
     unitCost,
@@ -135,8 +134,7 @@ const master =
       // ✅ Resolve the MASTER empty price effective on this date first —
       // same dated priceHistory logic as outlet overrides — before
       // layering any outlet-specific override on top.
-      const base = resolveOutletPrice(item, d, item.unitCost, item.sellingPrice);
-      const { unitCost, sellingPrice } = resolveOutletPrice(ov, d, base.unitCost, base.sellingPrice);
+       const { unitCost, sellingPrice } = resolveItemPrice(item, ov, d);
       return {
         ...item,
         id:           item.id || `${item.supplier}__${item.code}`.replace(/\s/g, "_"),
@@ -371,8 +369,7 @@ function CsTotals({ csData, fmt, physStock }) {
 // Unit cost / selling price effective on a given date
 // (same dated priceHistory logic already used by getOutletInventory)
 function priceOnDate(masterItem, ov, date) {
-  const base = resolveOutletPrice(masterItem, date, masterItem.unitCost, masterItem.sellingPrice);
-  return resolveOutletPrice(ov, date, base.unitCost, base.sellingPrice);
+  return resolveItemPrice(masterItem, ov, date);
 }
 // ── Keyboard navigation for the Daily Sale tables (Main + Empty) ──
 function navKey(e) {
@@ -584,7 +581,7 @@ const refreshOutletOverrides = useCallback(() => {
   ]).then(([mainOv, empOv]) => {
     setOutletOverridesMain(mainOv);
     setOutletOverridesEmp(empOv);
-  });
+  }).catch(err => console.error("OVR load failed", err));
 }, [outlet]);
 
 useEffect(() => {
@@ -1348,6 +1345,7 @@ return true;
   const uc = Number(item.unitCost)     || 0;
   const sp = Number(item.sellingPrice) || 0;
   const mg = sp - uc;
+  
 
   // ── All daily sales for this item in the date range, sorted by date ──
   const salesInRange = dbSales
@@ -1487,6 +1485,7 @@ if (salesInRange.length > 0) {
   // Each day's sold qty uses the price / margin effective on THAT day.
   const masterItem = masterInv.find(m => m.code === item.code && m.supplier === item.supplier) || item;
   const ovItem     = outletOverridesMain[`${item.code}__${item.supplier}`];
+   
 
   // one sold qty per date (duplicate sale records can exist; keep the larger)
   const soldByDate = {};
@@ -1505,7 +1504,7 @@ if (salesInRange.length > 0) {
   let totalSaleAmt = 0;
   let profit       = 0;
   let soldTracked  = 0;
-  Object.entries(soldByDate).forEach(([date, q]) => {
+   Object.entries(soldByDate).forEach(([date, q]) => {
     const dp = priceOnDate(masterItem, ovItem, date);
     const daySP = Number(dp.sellingPrice) || 0;
     const dayUC = Number(dp.unitCost)     || 0;

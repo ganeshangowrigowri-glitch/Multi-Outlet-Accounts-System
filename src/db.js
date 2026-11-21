@@ -1707,4 +1707,21 @@ export async function setOwnersCapital(outlet, date, amount, month) {
   if (error) { console.error("setOwnersCapital failed:", error); return null; }
   return { date: data.date, amount: Number(data.amount) || 0 };
 }
+// Deletes a main-stock item and all its outlet overrides, so a deleted
+// item cannot come back on the next admin save or on staff screens.
+export async function deleteInventoryItem(id, itemKey) {
+  const { data, error: e1 } = await supabase
+    .from("inventory_master").delete().eq("id", id).select("id");
+  if (e1) { console.error("deleteInventoryItem (master):", e1); throw e1; }
+  if (!data || data.length === 0) {
+    const msg = `Not deleted: no database row matched id "${id}" (check permissions or the id)`;
+    console.error(msg);
+    throw new Error(msg);
+  }
 
+  const { error: e2 } = await supabase.from("outlet_price_history").delete().eq("item_key", itemKey);
+  if (e2) console.error("deleteInventoryItem (price history):", e2);
+
+  const { error: e3 } = await supabase.from("outlet_item_flags").delete().eq("item_key", itemKey);
+  if (e3) console.error("deleteInventoryItem (flags):", e3);
+}

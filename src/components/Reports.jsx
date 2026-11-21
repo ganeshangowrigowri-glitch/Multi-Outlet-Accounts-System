@@ -4169,6 +4169,16 @@ export async function computeStockValBySupplier(outlet, month, invMap) {
   const mEnd = monthEnd(month);
   const mStart = monthStart(month);
 
+  // An outlet only carries a physical stock value for a month in which it
+  // actually sold something. Otherwise, stock carried forward from earlier
+  // months (or a snapshot saved with zero sales) must not be counted.
+  const salesForCheck = (await getSales(outlet)) || [];
+  const tradedThisMonth = salesForCheck.some(s =>
+    s.date && s.date >= mStart && s.date <= mEnd &&
+    (s.items || []).some(r => !r.isEmptyItem && (parseFloat(r.sold) || 0) > 0)
+  );
+  if (!tradedThisMonth) return {};
+
   // Same algorithm as useReportData's stockValBySupplierIS (= Current Status
   // physical stock): in-hand stock × outlet unit cost effective on month-end,
   // keyed by the full supplier id. invMap is accepted only for call compatibility.

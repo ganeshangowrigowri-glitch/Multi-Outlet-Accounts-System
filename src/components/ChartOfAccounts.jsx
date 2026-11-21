@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, Fragment } from "react";
 import { supabase } from "../supabase";
 import { saveCOA } from "../db";
 // ═══ FULL ACCOUNT LIST DATA ═══════════════════════════════════════════════════
@@ -423,9 +423,9 @@ const handleDelete = async (id) => {
             </tr>
           </thead>
           <tbody>
-            {Object.entries(grouped).map(([type, accs]) => (
-              <>
-                <tr key={"grp-"+type}>
+           {Object.entries(grouped).map(([type, accs]) => (
+              <Fragment key={type}>
+                <tr>
                   <td colSpan={isAdmin ? 5 : 4} style={styles.groupRow}>
                     <span style={{...styles.typeBadge, background: (TYPE_COLOR[type]||"#52525b")+"22", color: TYPE_COLOR[type]||"#a1a1aa", border:`1px solid ${(TYPE_COLOR[type]||"#52525b")}44`}}>
                       {type}
@@ -456,8 +456,8 @@ const handleDelete = async (id) => {
                     </td>
                     )}
                   </tr>
-                ))}
-              </>
+                  ))}
+              </Fragment>
             ))}
             {filtered.length === 0 && (
               <tr><td colSpan={isAdmin?5:4} style={{textAlign:"center", padding:"32px", color:"#52525b"}}>No accounts found</td></tr>
@@ -678,7 +678,7 @@ const styles = {
   actBtn:       { background:"none", border:"1px solid #27272a", borderRadius:5, cursor:"pointer", color:"#71717a", width:26, height:26, display:"flex", alignItems:"center", justifyContent:"center", padding:0 },
 
   subTabs:      { display:"flex", gap:4, padding:"0 0 0 0", borderBottom:"1px solid #27272a", marginBottom:4 },
-  subTab:       { display:"flex", alignItems:"center", gap:5, padding:"9px 14px", background:"none", border:"none", borderBottom:"2px solid transparent", cursor:"pointer", fontSize:12.5, fontWeight:500, color:"#71717a", fontFamily:"Inter,sans-serif", transition:"all .15s" },
+    subTab:       { display:"flex", alignItems:"center", gap:5, padding:"9px 14px", background:"none", border:"none", borderBottomWidth:2, borderBottomStyle:"solid", borderBottomColor:"transparent", cursor:"pointer", fontSize:12.5, fontWeight:500, color:"#71717a", fontFamily:"Inter,sans-serif", transition:"all .15s" },
   subTabAct:    { color:"#f59e0b", borderBottomColor:"#f59e0b" },
 
   statCard:     { background:"#111113", border:"1px solid #27272a", borderRadius:10, padding:"14px 16px" },

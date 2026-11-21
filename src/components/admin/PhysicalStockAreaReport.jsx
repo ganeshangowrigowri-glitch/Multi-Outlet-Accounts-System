@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import { I } from "../../utils/icons";
-import { getInventoryMaster, getAPInvoices, getAPPayments } from "../../db";
+import { getInventoryMaster, getAPInvoices, getAPPayments, getSales } from "../../db";
 import { AREAS, UNASSIGNED_AREA, getOutletArea } from "../../data/areas";
 import { SUPPLIERS_LIST } from "../../data/seeds";
 import { computeStockValBySupplier, computeSupplierBalanceCD, brandOf } from "../Reports";
@@ -98,8 +98,21 @@ export default function PhysicalStockAreaReport({ outlets, toast_ }) {
         (inv || []).forEach(i => { map[i.code] = i; if (i.id) map[i.id] = i; });
         invMapRef.current = map;
       }
+            // Only outlets with real sales (sold > 0) in the selected month get a
+      // stock value. Other outlets show "-" instead of carrying old stock forward.
+      const activeFlags = await Promise.all(
+        outletsInScope.map(async o => {
+          const sales = (await getSales(o)) || [];
+          const traded = sales.some(s =>
+            s.date && s.date.slice(0, 7) === month &&
+            (s.items || []).some(r => !r.isEmptyItem && (parseFloat(r.sold) || 0) > 0)
+          );
+          return [o, traded];
+        })
+      );
+      const activeOutlets = activeFlags.filter(([, t]) => t).map(([o]) => o);
       const entries = await Promise.all(
-        outletsInScope.map(async o => [o, await computeStockValBySupplier(o, month, invMapRef.current)])
+        activeOutlets.map(async o => [o, await computeStockValBySupplier(o, month, invMapRef.current)])
       );
       if (cancelled) return;
 
