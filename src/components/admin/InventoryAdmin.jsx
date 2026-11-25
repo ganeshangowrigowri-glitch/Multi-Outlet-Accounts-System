@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect,  useRef} from "react";
 import ExcelJS from "exceljs";
 import { saveAs } from "file-saver";
 import { ls, lss } from "../../utils/helpers";
-import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride, deleteInventoryItem } from "../../db";
+import { getInventoryMaster, saveInventoryMaster, addSupplier, saveOpeningStock, getOpeningStock, getSales, getPurchases, getTransfers, getReturns, saveEmptyInventoryMaster, getEmptyInventoryMaster, getOutletItemFlags, setOutletItemHidden, getOutletPriceHistory, upsertOutletPrice, deleteOutletPriceOverride, deleteInventoryItem, upsertInventoryItem } from "../../db";
 import { I } from "../../utils/icons";
 import { SEED_INVENTORY, SEED_EMPTY, SUPPLIERS_LIST, SUP_COLOR, ITEM_TYPES, OUTLETS, OUTLET_INV_SEEDS } from "../../data/seeds";
 import Modal from "../shared/Modal";
@@ -29,13 +29,12 @@ export function resolveOutletPrice(ov, dateStr, fallbackCost, fallbackPrice) {
     const latest = hist.reduce((a, b) => (a.date > b.date ? a : b));
     return { unitCost: latest.unitCost, sellingPrice: latest.sellingPrice };
   }
-  // No dated history record is effective yet for this date. If dated
-  // history exists at all, ov.unitCost/sellingPrice mirror the OVERALL
-  // latest entry (which may be dated AFTER dateStr) — using them here
-  // would project a future price change backward onto earlier dates.
-  // Fall back to the true base/master price instead.
-  if ((ov.priceHistory || []).length > 0) {
-    return { unitCost: fallbackCost, sellingPrice: fallbackPrice };
+  // The date is before the first recorded price. Use the EARLIEST row,
+  // never the top-level price (which is the newest price).
+  const all = ov.priceHistory || [];
+  if (all.length > 0) {
+    const first = all.reduce((a, b) => (a.date < b.date ? a : b));
+    return { unitCost: first.unitCost, sellingPrice: first.sellingPrice };
   }
   return {
     unitCost:     ov.unitCost     !== undefined ? ov.unitCost     : fallbackCost,
@@ -1427,11 +1426,19 @@ useEffect(() => {
   // handleEmptyInventoryChange is kept so EmptyStockPanel's onInventoryChange prop works.
   function handleEmptyInventoryChange(_newData) { /* no-op: Tab 4 self-loads */ }
 
-  const si = d  => {
+  const si = d => {
   const s = sortInv(d);
-  setIR(s); 
+  // Save only items that actually changed, never the whole list
+  const changed = s.filter(n => {
+    const o = inv.find(x => x.id === n.id && x.supplier === n.supplier);
+    return !o || JSON.stringify(o) !== JSON.stringify(n);
+  });
+  setIR(s);
   lss("inv_main", s);
-  saveInventoryMaster(s); // save to Supabase
+  changed.forEach(it => {
+    upsertInventoryItem(it).catch(err =>
+      console.error("Save failed for", it.code, err));
+  });
 };
   const se = d => { setER(d); lss("inv_empty", d); };
 
@@ -1868,9 +1875,14 @@ useEffect(() => {
     ].sort((a, b) => a.date.localeCompare(b.date));
 
     
+    // Top-level price = price effective TODAY, not the newest future row
+  const curRow = priceHistory.filter(h => h.date <= today()).pop();
   const item = { ...iForm, type:finalType,
   id: iModal==="add" ? `${iForm.supplier}__${iForm.code}` : iModal.id,
-  qty:Number(iForm.qty)||0, unitCost, sellingPrice, priceHistory };
+  qty:Number(iForm.qty)||0,
+  unitCost:     curRow ? curRow.unitCost     : unitCost,
+  sellingPrice: curRow ? curRow.sellingPrice : sellingPrice,
+  priceHistory };
 
     if (iModal==="add") {
     if (inv.find(i=>i.code===iForm.code && i.supplier===iForm.supplier)){toast_("Code already exists for this supplier","err");return;}
@@ -2500,7 +2512,7 @@ async function saveSupplier() {
               const sellingPrice = Number(pf.sellingPrice) || 0;
                            const prevHistory  = priceM.priceHistory || [];
               const seed = prevHistory.length === 0
-                ? [{ date: pf.oldFrom || "2026-07-01",
+              ? [{ date: pf.oldFrom || "2000-01-01",
                      unitCost: priceM.unitCost, sellingPrice: priceM.sellingPrice }]
                 : [];
               const priceHistory = [

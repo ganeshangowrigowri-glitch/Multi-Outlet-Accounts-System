@@ -1725,3 +1725,23 @@ export async function deleteInventoryItem(id, itemKey) {
   const { error: e3 } = await supabase.from("outlet_item_flags").delete().eq("item_key", itemKey);
   if (e3) console.error("deleteInventoryItem (flags):", e3);
 }
+// Saves ONE main-stock item. Never writes the whole list, so a stale
+// browser copy can no longer overwrite other items' price history.
+export async function upsertInventoryItem(item) {
+  const row = {
+    id:            item.id,
+    code:          item.code,
+    name:          item.name,
+    description:   item.description || null,
+    type:          item.type || null,
+    supplier_id:   item.supplier,
+    unit_cost:     Number(item.unitCost) || 0,
+    selling_price: Number(item.sellingPrice) || 0,
+    qty:           Number(item.qty) || 0,
+    price_history: item.priceHistory || [],
+  };
+  const { error } = await supabase
+    .from("inventory_master")
+    .upsert(row, { onConflict: "id" });
+  if (error) { console.error("upsertInventoryItem:", error); throw error; }
+}
