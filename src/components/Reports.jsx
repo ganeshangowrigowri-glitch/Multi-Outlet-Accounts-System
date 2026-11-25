@@ -2591,15 +2591,13 @@ const cardInterestRows = [...visaInterestRows, ...amexInterestRows];
   });
   const regularRows = Object.values(rowsByAcc)
   .sort((a, b) => String(a.id).localeCompare(String(b.id)));
-const rows = [...regularRows, ...visaInterestRows, ...unmatchedInterestRows, ...amexInterestRows];
+const rows = regularRows;   // card interest comes only from the Expenses window entries
 
-  const days = Array.from({ length: 31 }, (_, i) => i + 1);
-  const dayTotal = day => rows.reduce((a, r) => a + (r.byDay[day] || 0), 0);
-  const cardInterestTotal = cardInterestRows.reduce((a, r) => a + r.total, 0)
-    + unmatchedInterestRows.reduce((a, r) => a + r.total, 0);
-    const filteredTotal = methodFilter === "All"
-    ? totalExp + cardInterestTotal
-    : rows.reduce((a, r) => a + r.total, 0);
+const days = Array.from({ length: 31 }, (_, i) => i + 1);
+const dayTotal = day => rows.reduce((a, r) => a + (r.byDay[day] || 0), 0);
+const filteredTotal = methodFilter === "All"
+  ? totalExp
+  : rows.reduce((a, r) => a + r.total, 0);
 
     const rowMm = Math.min(8, 232 / (rows.length + 2)).toFixed(2);
 
